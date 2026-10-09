@@ -84,6 +84,7 @@ class MiniApp(App):
     #status { height: 1; background: $boost; padding: 0 1; }
     #main { height: 1fr; }
     #left { width: 45%; }
+    #main > TabbedContent { width: 1fr; }   /* the rest of the row, not a full row width past the edge */
     #chat { height: 1fr; border: round $primary; }
     #live { height: 3; color: $text-muted; padding: 0 1; }
     #prompt { dock: bottom; }
@@ -96,8 +97,9 @@ class MiniApp(App):
     """
     BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit")]
 
-    def __init__(self, cfg, backend_factory=None, task=None, attach=(), exit_when_done=False):
+    def __init__(self, cfg, backend_factory=None, task=None, attach=(), exit_when_done=False, exit_delay=6):
         super().__init__()
+        self.exit_delay = exit_delay
         self.start_task, self.start_attach, self.exit_when_done = task, list(attach), exit_when_done
         self.cfg = cfg
         self.backend_factory = backend_factory      # tests inject a scripted model
@@ -114,18 +116,18 @@ class MiniApp(App):
         yield Static(id="status")
         with Horizontal(id="main"):
             with Vertical(id="left"):
-                yield RichLog(id="chat", wrap=True, markup=True)
+                yield RichLog(id="chat", wrap=True, markup=True, min_width=1)   # wrap to the pane, not to 78 columns
                 yield Static(id="live")
                 yield Input(placeholder="Give mini a task.  /attach PATH  /registry  /help", id="prompt")
             with TabbedContent(initial="tab-log"):
                 with TabPane("Live log", id="tab-log"):
-                    yield RichLog(id="log", wrap=True, markup=False, max_lines=5000)
+                    yield RichLog(id="log", wrap=True, markup=False, max_lines=5000, min_width=1)
                 with TabPane("Registry", id="tab-reg"):
                     yield DataTable(id="reg-table", cursor_type="row")
                     with Horizontal(id="reg-buttons"):
                         yield Input(placeholder="version", id="reg-version", restrict=r"[0-9]*", max_length=4)
                         yield Button("Roll back to version", id="rollback", variant="warning")
-                    yield RichLog(id="reg-detail", wrap=True)
+                    yield RichLog(id="reg-detail", wrap=True, min_width=1)
                 with TabPane("Config", id="tab-cfg"):
                     yield TextArea(config_mod.dumps(self.cfg), language="toml", id="cfg-text")
                     yield Static(id="cfg-msg")
@@ -208,7 +210,7 @@ class MiniApp(App):
                 self.chat("output files: " + ", ".join(ev["outputs"]) + f"  (in runs/{ev['run_id']}/work/out/)")
             self.refresh_registry()
             if self.exit_when_done:
-                self.set_timer(6, self.exit)
+                self.set_timer(self.exit_delay, self.exit)
         self.update_status()
 
     def approval_handler(self, kind, title, details, options, auto=None):
@@ -328,6 +330,6 @@ class MiniApp(App):
         self.update_status()
 
 
-def run_ui(cfg, task=None, attach=(), exit_when_done=False):
-    MiniApp(cfg, task=task, attach=attach, exit_when_done=exit_when_done).run()
+def run_ui(cfg, task=None, attach=(), exit_when_done=False, exit_delay=6):
+    MiniApp(cfg, task=task, attach=attach, exit_when_done=exit_when_done, exit_delay=exit_delay).run()
     return 0

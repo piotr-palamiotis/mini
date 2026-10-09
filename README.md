@@ -17,6 +17,8 @@ mini has two parts:
   and the run log.
 - **mini-agent** (`mini/agent/`) runs the loop: parse → confirm → gap detection → tool creation → execution.
 
+Demo video: [youtu.be/CYJnR0hDpY8](https://youtu.be/CYJnR0hDpY8)
+
 The test results are in [docs/test-report.md](docs/test-report.md). The demo shot list is in
 [docs/shot-list.md](docs/shot-list.md).
 

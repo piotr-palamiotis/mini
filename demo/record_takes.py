@@ -31,7 +31,9 @@ OUT = os.path.join(ROOT, "demo", "out", "takes")
 REG = os.path.join(ROOT, "state", "registry")
 
 
-DEMO_DISPLAY, SIZE, APP_ID = ":2", "1280x800", "org.mini.DemoTerm"
+DEMO_DISPLAY, SIZE, APP_ID = ":2", "1440x960", "org.mini.DemoTerm"   # wider than the 1280 monitor; x11grab still gets it all
+TERM_GEOMETRY = "97x53+0+0"           # mini on the left ~800 px
+BROWSER_BOX = (800, 0, 640, 960)      # Mailpit on the right: x, y, width, height
 
 
 def demo_screen():
@@ -68,21 +70,45 @@ def mailpit_shot(path):
     return os.path.exists(path)
 
 
-def show_inbox(env, secs=12):
-    """Open the real Mailpit inbox in Firefox on the recorded screen, open the newest message, hold it."""
-    d = os.path.expanduser("~/snap/firefox/common/mini-show")
-    os.makedirs(d, exist_ok=True)
+FF_DIR = os.path.expanduser("~/snap/firefox/common/mini-show")   # snap Firefox can only use its own home area
+
+
+def open_browser(env, url="http://127.0.0.1:8025/"):
+    """Open Firefox on the recorded screen at a fixed place beside mini. There is no window manager on the
+    nested screen, so the window geometry is pre-written into the profile's xulstore.json."""
+    shutil.rmtree(FF_DIR, ignore_errors=True)
+    os.makedirs(FF_DIR)
+    x, y, w, h = BROWSER_BOX
+    json.dump({"chrome://browser/content/browser.xhtml": {"main-window": {
+        "screenX": str(x), "screenY": str(y), "width": str(w), "height": str(h), "sizemode": "normal"}}},
+        open(os.path.join(FF_DIR, "xulstore.json"), "w"))
+    open(os.path.join(FF_DIR, "user.js"), "w").write(
+        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+        'user_pref("browser.aboutwelcome.enabled", false);\n'
+        'user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);\n'
+        'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
+        'user_pref("trailhead.firstrun.didSeeAboutWelcome", true);\n')
+    ff = subprocess.Popen(["firefox", "--new-instance", "--profile", FF_DIR, url], env=env,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(8)
+    return ff
+
+
+def show_message(env, secs=10):
+    """At the end: open the newest message in the same Firefox window and hold it on screen."""
     try:
         with urllib.request.urlopen("http://127.0.0.1:8025/api/v1/messages", timeout=10) as r:
             msgs = json.load(r)["messages"]
-        url = f"http://127.0.0.1:8025/view/{msgs[0]['ID']}" if msgs else "http://127.0.0.1:8025/"
     except OSError:
-        url = "http://127.0.0.1:8025/"
-    ff = subprocess.Popen(["firefox", "--new-instance", "--profile", d, "--kiosk", "http://127.0.0.1:8025/"],
-                          env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(secs / 2 + 4)          # the inbox list with the new mail
-    subprocess.Popen(["firefox", "--profile", d, url], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(secs / 2 + 2)          # the message itself
+        msgs = []
+    time.sleep(4)                       # the live inbox with the new mail
+    if msgs:
+        subprocess.Popen(["firefox", "--profile", FF_DIR, f"http://127.0.0.1:8025/view/{msgs[0]['ID']}"], env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(secs)
+
+
+def close_browser(ff):
     ff.terminate()
     try:
         ff.wait(10)
@@ -102,7 +128,8 @@ def take(task, n, registry_from):
     video = os.path.join(OUT, f"{task}-{n}.mkv")
     before = set(glob.glob(os.path.join(ROOT, "runs", "*")))
     env = demo_screen()
-    ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-framerate", "15",
+    browser = open_browser(env) if task in ("email", "compose") else None   # visible from the start
+    ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-framerate", "15", "-draw_mouse", "0",
                            "-video_size", SIZE, "-i", DEMO_DISPLAY + ".0",
                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-pix_fmt", "yuv420p", video],
                           stdin=subprocess.PIPE)
@@ -112,15 +139,21 @@ def take(task, n, registry_from):
         os.remove(done)
     py = os.path.join(ROOT, ".venv", "bin", "python")
     cmd = (f"{py} -m mini --config {os.path.join(ROOT, 'config', 'demo.toml')} ui --task {json.dumps(TASKS[task])} "
-           f"--exit-when-done; touch {done}")
-    subprocess.run(["gnome-terminal", "--app-id", APP_ID, "--geometry=156x46+0+0", f"--working-directory={ROOT}",
+           f"--exit-when-done --exit-delay 22; touch {done}")
+    subprocess.run(["gnome-terminal", "--app-id", APP_ID, f"--geometry={TERM_GEOMETRY}", f"--working-directory={ROOT}",
                     "--", "bash", "-c", cmd], env=env, capture_output=True)
-    # the terminal client returns at once; the take ends when mini itself exits (it writes the marker)
+    # the terminal client returns at once; the take ends when mini itself exits (it writes the marker).
+    # As soon as the run has finished (summary written), open the message while mini's final screen is visible.
+    shown = False
     while not os.path.exists(done) and time.time() - t0 < 3 * 3600:
-        time.sleep(2)
-    if task in ("email", "compose"):
-        show_inbox(env)            # the inbox appears in the recording itself, after mini has finished
+        new_runs = sorted(set(glob.glob(os.path.join(ROOT, "runs", "*"))) - before)
+        if browser and not shown and new_runs and os.path.exists(os.path.join(new_runs[-1], "summary.json")):
+            show_message(env)
+            shown = True
+        time.sleep(1)
     ff.communicate(b"q", timeout=60)
+    if browser:
+        close_browser(browser)
     new = sorted(set(glob.glob(os.path.join(ROOT, "runs", "*"))) - before)
     run_dir = new[-1] if new else None
     summ = os.path.join(run_dir, "summary.json") if run_dir else None

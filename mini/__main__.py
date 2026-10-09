@@ -41,6 +41,7 @@ def main(argv=None):
     u.add_argument("--task", help="demo: type this task in automatically")
     u.add_argument("--attach", action="append", default=[])
     u.add_argument("--exit-when-done", action="store_true")
+    u.add_argument("--exit-delay", type=float, default=6, help="seconds to keep the final screen before exiting")
     a = ap.parse_args(argv)
     cfg = config_mod.load(a.config)
 
@@ -95,7 +96,7 @@ def main(argv=None):
         return 0
     from .ui.app import run_ui
     if a.cmd == "ui":
-        return run_ui(cfg, a.task, a.attach, a.exit_when_done)
+        return run_ui(cfg, a.task, a.attach, a.exit_when_done, a.exit_delay)
     return run_ui(cfg)
 
 
