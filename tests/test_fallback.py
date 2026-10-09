@@ -86,6 +86,38 @@ class FallbackTest(unittest.TestCase):
         caps = [e for e in events(agent) if e["kind"] == "cap"]
         self.assertEqual(caps[0]["fallback"], "disabled")
 
+    def test_consult_before_fallback(self):
+        """Budget used up -> the agent asks the user for advice; advice extends the budget and the tool gets fixed.
+        The fallback is never called."""
+        prov = FakeProvider(["unused"])
+        asked = []
+        def handler(kind, title, details, options):
+            if kind == "consult":
+                asked.append(details)
+                return Decision(True, "send advice", "count with str.splitlines() instead of split", "user")
+            return Decision(True, options[0], "", "user")
+        cfg = self.cfg(**{"approvals.mode": "ask"})
+        script = failing_script(1)[:-1] + [
+            step(call("record_lesson", problem="p", cause="c", avoid="a", try_instead="t")),       # failed lesson
+            step(call("ask_for_advice", building="a line counter", keeps_failing="off by one in the count",
+                      tried="two edits", question="How should lines be counted?")),
+            step(call("replace", path="tool.py", old=TOOL_FIX_OLD, new=TOOL_FIX_NEW), call("run_tests")),
+            step(call("record_lesson", problem="off by one", cause="split", avoid="split", try_instead="splitlines")),
+            step(call("invoke_tool", name="count_text_lines", inputs={"path": "in/a.txt"})),
+            step(call("finish", answer="2 lines"))]
+        agent = Agent(cfg, backend=fake_backend(script), fallback_provider=prov, approval_handler=handler, label="consult")
+        src = os.path.join(agent.run_dir, "a.txt")
+        open(src, "w").write("a\nb\n")
+        s = agent.run_task("count lines", [src])
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertEqual(prov.calls, [])
+        self.assertEqual(asked[0]["question"], "How should lines be counted?")
+        self.assertEqual(asked[0]["attempts used"], "2/2")
+        ev = events(agent)
+        self.assertTrue(any(e["kind"] == "attempt" and e.get("budget") == 5 and e.get("passed") for e in ev))
+        fixed = [l for l in agent.lessons.all() if l["outcome"] == "fixed"]
+        self.assertEqual(fixed[0]["user_advice"], "count with str.splitlines() instead of split")
+
     def test_spend_cap_is_hard(self):
         cfg = temp_config(**{"fallback.enabled": True, "fallback.spend_usd_per_run": 0.30})
         log = type("L", (), {"emit": lambda self, *a, **k: None})()

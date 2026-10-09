@@ -47,6 +47,9 @@ T_SANDBOX = fn("run_in_sandbox", "Run one inspection command in the tool's sandb
                {"argv": {"type": "array", "items": S}}, ["argv"])
 T_LESSON = fn("record_lesson", "Write a lesson for future attempts at building this kind of tool.",
               {"problem": S, "cause": S, "avoid": S, "try_instead": S}, ["problem", "cause", "avoid", "try_instead"])
+T_ASK_HELP = fn("ask_for_advice", "Ask the user for advice: what you are building, what keeps failing, what you "
+                "tried, and one concrete question.", {"building": S, "keeps_failing": S, "tried": S, "question": S},
+                ["building", "keeps_failing", "tried", "question"])
 T_EXPLAIN = fn("explain", "Explain what still fails, why, and the one change you will make next.",
                {"what_fails": S, "why": S, "next_change": S}, ["what_fails", "why", "next_change"])
 FIX_TOOLS = [T_REPLACE, T_REPLACE_LINES, T_REWRITE, T_RUN_TESTS, T_UPDATE_SPEC, T_SANDBOX]
@@ -81,6 +84,7 @@ class Creator:
         self.spec, self.approved_perms, self.image = None, {"network": [], "packages": {"apt": [], "pip": []}}, None
         self.parent = None
         self.restarts = 0
+        self.consults = 0
         self.errors = {}
         self.last_output, self.last_hash = "", None
         self.local_attempts = 0
@@ -103,6 +107,7 @@ class Creator:
         self.image = a.sandbox.ensure_image(self.approved_perms["packages"])
         self.parent = manifest["version"]
         self.restarts, self.last_output, self.last_hash, self.local_attempts = 0, "", None, 0
+        self.consults = 0
         self.errors = {}
         if a.cfg["lessons"]["enabled"]:
             stored = a.lessons.add({"capability": f"{manifest['name']}: {manifest['description']}",
@@ -325,7 +330,8 @@ class Creator:
             return
         recurring = sorted(self.errors.items(), key=lambda x: -x[1])[:5]
         base = {"capability": f"{self.spec['name']}: {self.spec['description']}", "outcome": outcome,
-                "errors": recurring, "attempts": a.wd.attempts, "run_id": a.log.run_id}
+                "errors": recurring, "attempts": a.wd.attempts, "run_id": a.log.run_id,
+                "user_advice": getattr(self, "advice", None)}
         ask = {"restart": "Earlier tries kept failing and the conversation is being restarted.",
                "failed": "The attempt budget is used up and the tool could not be built.",
                "fixed": "The tests pass now, after earlier failures."}[outcome]
@@ -357,7 +363,7 @@ class Creator:
         status = "PASSED" if res["passed"] else "FAILED"
         if res["exit_code"] == 5:
             status = "FAILED (no tests were collected)"
-        out = prompts.TEST_RESULT.format(attempt=n, budget=self.a.cfg["caps"]["attempts_per_tool"], status=status,
+        out = prompts.TEST_RESULT.format(attempt=n, budget=self.a.wd.budget, status=status,
                                          output=trim(res["output"]))
         if res.get("network_note") and not res["passed"]:
             out += "\n" + res["network_note"]
@@ -536,9 +542,57 @@ class Creator:
             t.result(c["name"], "Noted. Make that one change now, then run the tests.")
 
     # ================================================================== budget, fallback, install
+    def _consult_user(self):
+        """Budget used up: the agent asks the user for advice before the fallback or giving up.
+        Returns True when the user gave advice (the budget was extended), False otherwise."""
+        a = self.a
+        cc = a.cfg["consult"]
+        if not cc["enabled"] or self.consults >= cc["max_rounds"]:
+            return False
+        recurring = sorted(self.errors.items(), key=lambda x: -x[1])[:5]
+        q = None
+        try:
+            msgs = list(self.messages) + [{"role": "user", "content":
+                "You have used all attempts. Call `ask_for_advice`: explain to the user, in plain words, what you are "
+                "building, what keeps failing, what you already tried, and ask one concrete question whose answer "
+                "would help you most."}]
+            reply = Turns(a, "fix", msgs, [T_ASK_HELP]).ask()
+            for c in reply["tool_calls"]:
+                if c["name"] == "ask_for_advice" and c["arguments"].get("question"):
+                    q = {k: str(c["arguments"].get(k, ""))[:600] for k in ("building", "keeps_failing", "tried", "question")}
+                    break
+        except AgentStop:
+            raise
+        except Exception as e:   # noqa: BLE001
+            a.log.emit("error", text=f"advice request not written by the model: {e}")
+        if q is None:
+            q = {"building": self.spec["description"], "keeps_failing": recurring[0][0] if recurring else "the tests",
+                 "tried": f"{a.wd.attempts} attempts", "question": "What should I change so that it works?"}
+        self.consults += 1
+        d = a.gate.request("consult", "mini is stuck and would like your advice", {
+            "tool": self.spec["name"], "building": q["building"], "keeps failing": q["keeps_failing"],
+            "already tried": q["tried"],
+            "recurring errors": "; ".join(f"{s} (x{n})" for s, n in recurring) or "-",
+            "attempts used": f"{a.wd.attempts}/{a.wd.budget}", "question": q["question"],
+            "if you answer": f"{cc['extra_attempts']} more attempts with your advice"}, options=("send advice", "skip"))
+        advice = (d.note or "").strip()
+        if not d.approved or d.choice == "skip" or not advice:
+            a.log.emit("consult", answered=False, decided_by=d.decided_by)
+            return False
+        a.log.emit("consult", answered=True, advice=advice, extra_attempts=cc["extra_attempts"])
+        a.wd.extend_budget(cc["extra_attempts"])
+        self.advice = advice
+        a.wd.reset_conversation()
+        self.messages.append({"role": "user", "content":
+            f"Advice from the user: {advice}\n\nUse it. You have {cc['extra_attempts']} more attempts. Fix the code "
+            "(replace, replace_lines or rewrite_file), then call `run_tests`."})
+        return True
+
     def _budget_exhausted(self):
         a = self.a
         self._record_lesson("failed")
+        if self._consult_user():
+            return None
         if not a.fallback.enabled:
             a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.attempts, fallback="disabled")
             raise ToolFailed(f"{self.spec['name']}: tests still fail after {a.wd.attempts} attempts; fallback disabled")

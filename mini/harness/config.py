@@ -70,6 +70,11 @@ DEFAULTS = {
         "price_out_per_mtok": 15.0,
         "timeout_s": 300,
     },
+    "consult": {
+        "enabled": True,                     # when the attempt budget runs out, ask the user for advice first
+        "extra_attempts": 3,                 # attempts granted after the user gives advice
+        "max_rounds": 1,                     # advice rounds per tool
+    },
     "lessons": {
         "enabled": True,                     # agent-written lessons from failures, kept in <state>/lessons.jsonl
         "max_in_prompt": 3,

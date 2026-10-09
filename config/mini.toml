@@ -68,6 +68,11 @@ price_in_per_mtok = 3.75
 price_out_per_mtok = 15.0
 timeout_s = 300
 
+[consult]
+enabled = true
+extra_attempts = 3
+max_rounds = 1
+
 [lessons]
 enabled = true
 max_in_prompt = 3

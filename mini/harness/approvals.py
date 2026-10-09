@@ -10,7 +10,7 @@ Modes (config [approvals]):
 """
 import sys
 
-KINDS = ("confirm", "permissions", "install", "escalate", "cap")
+KINDS = ("confirm", "permissions", "install", "consult", "escalate", "cap")
 
 
 class Decision:

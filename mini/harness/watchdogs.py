@@ -30,6 +30,7 @@ class Watchdogs:
 
     def reset_tool(self):
         self.attempts = 0
+        self.budget = self.caps["attempts_per_tool"]       # the user's advice can extend this (consult rounds)
         self.fail_streak = 0
         self.rewrites = {}
         self.green_reruns = 0
@@ -102,7 +103,8 @@ class Watchdogs:
         Returns one of: 'review', 'restart', 'budget', 'continue'."""
         if changed or self.attempts == 0:
             self.attempts += 1
-            self.log.emit("attempt", n=self.attempts, budget=self.caps["attempts_per_tool"], passed=passed)
+            self.log.emit("attempt", n=self.attempts, budget=self.budget, passed=passed,
+                          extended=self.budget > self.caps["attempts_per_tool"])
         if passed:
             self.fail_streak = 0
             if not changed and self.last_green_hash == code_hash:
@@ -117,8 +119,8 @@ class Watchdogs:
         self.green_reruns = 0
         if changed:
             self.fail_streak += 1
-        if self.attempts >= self.caps["attempts_per_tool"]:
-            self.trigger("attempt_budget", attempts=self.attempts, limit=self.caps["attempts_per_tool"])
+        if self.attempts >= self.budget:
+            self.trigger("attempt_budget", attempts=self.attempts, limit=self.budget)
             return "budget"
         if self.fail_streak >= self.w["fail_streak_restart"]:
             self.trigger("fail_streak", streak=self.fail_streak, limit=self.w["fail_streak_restart"], action="restart",
@@ -126,6 +128,12 @@ class Watchdogs:
             self.fail_streak = 0
             return "restart"
         return "continue"
+
+    def extend_budget(self, n):
+        """The user gave advice when the budget ran out: n more attempts for this tool."""
+        self.budget += n
+        self.fail_streak = 0
+        self.log.emit("attempt", n=self.attempts, budget=self.budget, extended=True, passed=False)
 
     def time_or_turns_exceeded(self):
         el = time.time() - self.task_t0
