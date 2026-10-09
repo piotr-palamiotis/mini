@@ -49,6 +49,8 @@ def script():
         step(content=fence("tool.py", TOOL_BAD)),
         step(content=fence("test_tool.py", TESTS)),
         step(call("replace", path="tool.py", old=TOOL_FIX_OLD, new=TOOL_FIX_NEW), call("run_tests")),
+        step(call("record_lesson", problem="line count off by one", cause="split on newline counts the empty tail",
+                  avoid="str.split('\\n') for counting lines", try_instead="str.splitlines()")),
         step(call("invoke_tool", name="count_text_lines", inputs={"path": "in/a.txt"})),
         step(call("finish", answer="The file has 2 lines.")),
     ]
@@ -77,6 +79,27 @@ class PipelineTest(unittest.TestCase):
         # install happened only after a passing test run
         self.assertLess(kinds.index("install"), len(kinds))
         self.assertTrue(tests[-1]["t"] <= [e for e in events if e["kind"] == "install"][0]["t"])
+
+    def test_lessons_persist_into_next_run(self):
+        cfg = temp_config()
+        a1 = Agent(cfg, backend=fake_backend(script()), label="lesson1")
+        src = os.path.join(a1.run_dir, "a.txt")
+        open(src, "w").write("x\n")
+        a1.run_task("count lines", [src])
+        stored = a1.lessons.all()
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["outcome"], "fixed")
+        self.assertEqual(stored[0]["try_instead"], "str.splitlines()")
+        self.assertTrue(any("AssertionError" in sig for sig, n in stored[0]["errors"]))
+        # a fresh session (new Agent, empty registry) building a similar tool sees the lesson in its spec prompt
+        a1.registry.wipe()
+        backend = fake_backend(script())
+        a2 = Agent(cfg, backend=backend, label="lesson2")
+        seen = []
+        orig = backend.chat
+        backend.chat = lambda model, messages, *x, **k: (seen.append(messages[-1]["content"]), orig(model, messages, *x, **k))[1]
+        a2.run_task("count lines", [src])
+        self.assertTrue(any("str.splitlines()" in m and "Lessons from earlier attempts" in m for m in seen))
 
     def test_rollback(self):
         cfg = temp_config()

@@ -35,7 +35,12 @@ def main(argv=None):
     g.add_argument("name", nargs="?")
     g.add_argument("version", nargs="?", type=int)
     sub.add_parser("setup")
-    sub.add_parser("ui")
+    le = sub.add_parser("lessons")
+    le.add_argument("action", choices=["list", "wipe"])
+    u = sub.add_parser("ui")
+    u.add_argument("--task", help="demo: type this task in automatically")
+    u.add_argument("--attach", action="append", default=[])
+    u.add_argument("--exit-when-done", action="store_true")
     a = ap.parse_args(argv)
     cfg = config_mod.load(a.config)
 
@@ -73,6 +78,15 @@ def main(argv=None):
             reg.wipe()
             print("registry wiped")
         return 0
+    if a.cmd == "lessons":
+        from .harness.lessons import LessonStore, format_lessons
+        store = LessonStore(cfg.abspath("state"))
+        if a.action == "wipe":
+            store.wipe()
+            print("lessons wiped")
+        else:
+            print(format_lessons(store.all()) or "(no lessons yet)")
+        return 0
     if a.cmd == "setup":
         sb = Sandbox(cfg)
         if not sb.image_exists(cfg["sandbox"]["image"]):
@@ -80,6 +94,8 @@ def main(argv=None):
         print("sandbox image ready:", cfg["sandbox"]["image"])
         return 0
     from .ui.app import run_ui
+    if a.cmd == "ui":
+        return run_ui(cfg, a.task, a.attach, a.exit_when_done)
     return run_ui(cfg)
 
 

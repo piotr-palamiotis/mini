@@ -2,6 +2,7 @@
 
 The agent runs in a worker thread. Approval requests block that thread until the user answers in a modal dialog.
 """
+import asyncio
 import json
 import os
 import threading
@@ -38,9 +39,10 @@ class ApprovalScreen(ModalScreen):
     #buttons Button { margin-right: 1; }
     """
 
-    def __init__(self, kind, title, details, options):
+    def __init__(self, kind, title, details, options, auto=None):
         super().__init__()
         self.kind, self.title_text, self.details, self.options = kind, title, details, options
+        self.auto = auto            # (choice, delay_s): demo policy answers after a visible countdown
 
     def compose(self):
         with Vertical(id="box"):
@@ -49,11 +51,25 @@ class ApprovalScreen(ModalScreen):
                 for k, v in self.details.items():
                     val = v if isinstance(v, str) else json.dumps(v, indent=1)
                     yield Static(f"[b]{escape(str(k))}[/b]: {escape(val)}")
+            if self.auto:
+                yield Label(f"demo policy: auto-{self.auto[0]} in {self.auto[1]} s", id="countdown")
             yield Input(placeholder="optional note / hint / clarification for the agent", id="note")
             with Horizontal(id="buttons"):
                 for i, o in enumerate(self.options):
                     yield Button(o, id=f"opt-{i}", variant="success" if i == 0 else
                                  "error" if o in ("refuse", "stop", "cancel") else "default")
+
+    def on_mount(self):
+        if self.auto:
+            choice, delay = self.auto
+            self.left = int(delay)
+            def tick():
+                self.left -= 1
+                if self.left <= 0:
+                    self.dismiss(Decision(choice not in ("refuse", "stop", "cancel"), choice, "", "auto-policy (shown)"))
+                else:
+                    self.query_one("#countdown", Label).update(f"demo policy: auto-{choice} in {self.left} s")
+            self.set_interval(1, tick)
 
     @on(Button.Pressed)
     def pressed(self, ev):
@@ -80,8 +96,9 @@ class MiniApp(App):
     """
     BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit")]
 
-    def __init__(self, cfg, backend_factory=None):
+    def __init__(self, cfg, backend_factory=None, task=None, attach=(), exit_when_done=False):
         super().__init__()
+        self.start_task, self.start_attach, self.exit_when_done = task, list(attach), exit_when_done
         self.cfg = cfg
         self.backend_factory = backend_factory      # tests inject a scripted model
         self.agent = None
@@ -122,6 +139,18 @@ class MiniApp(App):
                   f" via {self.cfg['local']['backend']}. Fallback: " +
                   (f"{self.cfg['fallback']['provider']} ({self.cfg['fallback']['model']})" if self.cfg["fallback"]["enabled"] else "disabled"))
         self.query_one("#prompt", Input).focus()
+        if self.start_task:
+            self.set_timer(2, self._type_start_task)
+
+    async def _type_start_task(self):
+        """Demo mode: type the task into the prompt so the recording shows it, then submit it."""
+        box = self.query_one("#prompt", Input)
+        self.attachments = [os.path.abspath(a) for a in self.start_attach]
+        for ch in self.start_task:
+            box.value += ch
+            await asyncio.sleep(0.03)
+        await asyncio.sleep(0.6)
+        await box.action_submit()
 
     # ------------------------------------------------------------ status
     def update_status(self):
@@ -178,9 +207,11 @@ class MiniApp(App):
             if ev.get("outputs"):
                 self.chat("output files: " + ", ".join(ev["outputs"]) + f"  (in runs/{ev['run_id']}/work/out/)")
             self.refresh_registry()
+            if self.exit_when_done:
+                self.set_timer(6, self.exit)
         self.update_status()
 
-    def approval_handler(self, kind, title, details, options):
+    def approval_handler(self, kind, title, details, options, auto=None):
         """Called from the agent thread; blocks it until the user answers."""
         done, box = threading.Event(), {}
 
@@ -188,7 +219,7 @@ class MiniApp(App):
             def got(decision):
                 box["d"] = decision
                 done.set()
-            self.push_screen(ApprovalScreen(kind, title, details, options), got)
+            self.push_screen(ApprovalScreen(kind, title, details, options, auto=auto), got)
         self.call_from_thread(show)
         done.wait()
         return box["d"]
@@ -297,6 +328,6 @@ class MiniApp(App):
         self.update_status()
 
 
-def run_ui(cfg):
-    MiniApp(cfg).run()
+def run_ui(cfg, task=None, attach=(), exit_when_done=False):
+    MiniApp(cfg, task=task, attach=attach, exit_when_done=exit_when_done).run()
     return 0

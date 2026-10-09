@@ -25,7 +25,7 @@ TASKS = {
     "email": ("Send an email to anna@example.local saying the meeting moved to Friday.", []),
     "weather": ("What will the weather be in Prague tomorrow?", []),
     "pdf": ("Convert this PDF to Markdown and add a short summary at the top.", ["demo/report.pdf"]),
-    "compose": ("Summarize this PDF and email the summary to anna@example.local.", ["demo/report.pdf"]),
+    "compose": ("Email anna@example.local tomorrow's weather forecast for Prague.", []),
 }
 
 
@@ -108,7 +108,10 @@ def main():
                 rec, run_dir = run_one(task, i, a.fallback, a.name, registry_from=snap)
             else:
                 rec, run_dir = run_one(task, i, a.fallback, a.name)
-                if rec["graded_pass"] and task in ("email", "pdf") and not a.compose_registry:
+                # email must have really delivered; pdf must have built a tool and completed (OCR quality is graded
+                # by the pdf task itself; composition tests reuse, so a tool without OCR still counts here)
+                usable = rec["graded_pass"] if task == "email" else (rec["agent_status"] == "success" and rec["tools"])
+                if usable and task in ("email", "pdf") and not a.compose_registry:
                     tag = os.path.join(out, f"snap-{task}")
                     if not os.path.exists(tag):
                         snapshot(run_dir, snap)

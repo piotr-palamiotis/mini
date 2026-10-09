@@ -74,7 +74,21 @@ FAULTS = {}
 def handle(conn, port, hosts):
     dest = None
     try:
-        if len(hosts) == 1:
+        conn.settimeout(10)
+        try:
+            first = conn.recv(65536, socket.MSG_PEEK)
+        except socket.timeout:
+            first = b""                        # protocols where the server speaks first
+        conn.settimeout(None)
+        named = sni(first) if first[:1] == b"\x16" else None
+        if named and named not in hosts:
+            log(event="deny", dest=named, port=port, reason="TLS name not declared for this port")
+            conn.close()
+            return
+        if named:
+            dest = named
+            first = b""
+        elif len(hosts) == 1:
             dest = hosts[0]
             first = b""
         else:

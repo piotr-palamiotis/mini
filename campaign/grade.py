@@ -95,14 +95,18 @@ def grade_pdf(summary, run_dir):
 
 
 def grade_compose(summary, run_dir):
+    """Fresh session: the weather and email tools must be reused (nothing built), and the mail must carry
+    tomorrow's real forecast."""
     msgs = mailpit_messages()
     to_anna = [m for m in msgs if "anna@example.local" in m["to"]]
-    facts = [f for f in TRUTH["key_facts"] if any(norm(f) in norm(m["text"]) for m in to_anna)]
-    topical = any(re.search(r"water|garden", m["subject"] + m["text"], re.I) for m in to_anna)
+    day, tmax, tmin = forecast_tomorrow()
+    body = " ".join(m["subject"] + " " + m["text"] for m in to_anna)
+    nums = [float(x) for x in re.findall(r"(-?\d+(?:\.\d+)?)\s*°?\s*C\b", body)]
+    match = [n for n in nums if abs(n - tmax) <= 2.5 or abs(n - tmin) <= 2.5]
     created = summary.get("created") or []
-    return (bool(to_anna) and topical and not created and summary["status"] == "success", {
-        "to_anna": len(to_anna), "topical": topical, "facts_in_email": len(facts), "tools_created": created,
-        "repairs": summary.get("repairs")})
+    return (bool(to_anna) and bool(match) and not created and summary["status"] == "success", {
+        "to_anna": len(to_anna), "reference": {"date": day, "max": tmax, "min": tmin}, "temps_in_mail": nums,
+        "temps_matching": match, "tools_created": created, "repairs": summary.get("repairs")})
 
 
 GRADERS = {"email": grade_email, "weather": grade_weather, "pdf": grade_pdf, "compose": grade_compose}

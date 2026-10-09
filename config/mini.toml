@@ -68,6 +68,10 @@ price_in_per_mtok = 3.75
 price_out_per_mtok = 15.0
 timeout_s = 300
 
+[lessons]
+enabled = true
+max_in_prompt = 3
+
 [environment]
 # Facts about the user's environment, shown to the agent as given (like a user telling an assistant about
 # their setup). Set by the user, never by the agent.

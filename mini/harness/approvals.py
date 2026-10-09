@@ -3,6 +3,8 @@ pass through request(). The agent cannot answer for the user.
 
 Modes (config [approvals]):
   ask   the UI handler shows a dialog and blocks until the user answers (headless: a terminal prompt)
+  auto_visible  for demo recordings: the UI shows each dialog, then the auto policy answers it after a countdown
+        (logged as decided_by="auto-policy (shown)")
   auto  for unattended test runs only: kinds listed in auto_approve are approved, the rest are refused.
         Every auto decision is logged as decided_by="auto-policy".
 """
@@ -28,7 +30,11 @@ class ApprovalGate:
     def request(self, kind, title, details, options=("approve", "refuse")):
         assert kind in KINDS, kind
         self.log.emit("approval", phase="requested", req=kind, title=title, details=details, options=list(options))
-        if self.cfg["mode"] == "auto":
+        if self.cfg["mode"] == "auto_visible" and self.handler:
+            ok = kind in self.cfg["auto_approve"]
+            choice = self.cfg.get("auto_choice", {}).get(kind, options[0]) if ok else options[-1]
+            d = self.handler(kind, title, details, list(options), auto=(choice, self.cfg.get("auto_delay_s", 3)))
+        elif self.cfg["mode"] in ("auto", "auto_visible"):
             ok = kind in self.cfg["auto_approve"]
             choice = self.cfg.get("auto_choice", {}).get(kind, options[0]) if ok else options[-1]
             d = Decision(ok, choice, "", "auto-policy")

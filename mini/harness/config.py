@@ -70,6 +70,10 @@ DEFAULTS = {
         "price_out_per_mtok": 15.0,
         "timeout_s": 300,
     },
+    "lessons": {
+        "enabled": True,                     # agent-written lessons from failures, kept in <state>/lessons.jsonl
+        "max_in_prompt": 3,
+    },
     "environment": {
         # Facts about the user's environment, shown to the agent as given. Set by the user, not the agent.
         "facts": [],

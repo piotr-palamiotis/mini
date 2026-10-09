@@ -46,6 +46,37 @@ def validate_targets(targets):
 PLACEHOLDERS = {"none", "null", "nil", "n/a", "na", "-", "no", "nothing", "stdlib", "builtin", "standard library"}
 
 
+HOST_RE = re.compile(r"host='([A-Za-z0-9.-]+)',\s*port=(\d+)|Failed to resolve '([A-Za-z0-9.-]+)'|"
+                     r"(?:https?://)([A-Za-z0-9.-]+\.[a-z]{2,})(?::(\d+))?/")
+
+
+def network_diagnosis(output, egress_events, declared):
+    """Explain blocked or undeclared connections in plain words, so the model can fix the URL or the spec."""
+    declared = list(declared or [])
+    notes = []
+    for e in egress_events or []:
+        if e.get("event") == "deny":
+            notes.append(f"blocked {e.get('dest')}:{e.get('port')} ({e.get('reason')})")
+    connection_trouble = re.search(r"Connection|resolve|Name or service|SSL|timed out|Max retries|URLError|gaierror",
+                                   output or "")
+    if connection_trouble:
+        for m in HOST_RE.finditer(output or ""):
+            host = (m.group(1) or m.group(3) or m.group(4) or "").lower()
+            port = m.group(2) or m.group(5)
+            if not host or host in ("localhost", "127.0.0.1"):
+                continue
+            target = f"{host}:{port}" if port else host
+            ok = any(d == target or (not port and d.startswith(host + ":")) for d in declared)
+            if not ok:
+                notes.append(f"{target} is not declared")
+    if not notes:
+        return ""
+    uniq = list(dict.fromkeys(notes))
+    return ("Network: " + "; ".join(uniq) + f". Declared targets: {', '.join(declared) or 'none'}. Only declared "
+            "host:port pairs are reachable (https uses port 443, http port 80). Fix the URL in the code, or call "
+            "update_spec to declare the exact host:port.")
+
+
 def validate_packages(pkgs):
     import sys
     if not isinstance(pkgs, dict):
@@ -220,7 +251,7 @@ class Sandbox:
         if code == 137 and not timed_out:
             out += f"\n[sandbox] exit 137: killed, most likely by the {self.cfg['memory']} memory limit"
         res = {"exit_code": code, "output": out, "secs": round(time.time() - t0, 2), "timed_out": timed_out,
-               "egress": egress_events}
+               "egress": egress_events, "network_note": network_diagnosis(out, egress_events, targets)}
         self._emit("sandbox", action="exit", purpose=purpose, exit_code=code, secs=res["secs"], timed_out=timed_out,
                    egress=egress_events or None)
         return res

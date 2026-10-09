@@ -18,6 +18,7 @@ from ..harness.approvals import ApprovalGate
 from ..harness.backends import Endpoint, make_backend
 from ..harness.eventlog import RunLog
 from ..harness.fallback import Fallback
+from ..harness.lessons import LessonStore
 from ..harness.registry import Registry
 from ..harness.sandbox import PolicyError, Sandbox
 from ..harness.watchdogs import Watchdogs
@@ -70,6 +71,7 @@ class Agent:
         self.model_options = {"num_ctx": lc["num_ctx"], "temperature": lc["temperature"]} if lc["backend"] == "ollama" \
             else {"temperature": lc["temperature"]}
         self.registry = Registry(cfg.abspath("state"))
+        self.lessons = LessonStore(cfg.abspath("state"))
         self.sandbox = Sandbox(cfg, self.log)
         self.gate = ApprovalGate(cfg, self.log, approval_handler)
         self.fallback = Fallback(cfg, self.log, fallback_provider)
@@ -318,13 +320,18 @@ class Agent:
             return f"Missing required inputs for {name}: {', '.join(req)}.\n" + describe_tool(m)
         self.log.emit("invoke", tool=name, version=m["version"], inputs=inputs)
         out, res = self.sandbox.invoke_tool(m, m["_dir"], self.work, inputs)
-        last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:]}
+        last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:],
+                             "network": res.get("network_note") or None}
         self.log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
         text = json.dumps(out, indent=1, default=str)
         if len(text) > 6000:
             p = os.path.join(".mini", f"result-{name}-{int(time.time())}.json")
             open(os.path.join(self.work, p), "w").write(text)
             text = text[:5000] + f"\n[... output is {len(text)} characters; full JSON saved to {p}]"
+        note = res.get("network_note") or ((self._net_note(out, m)) if "error" in out else "")
+        if note:
+            text += "\n" + note
+            self.log.emit("watchdog", name="network_diagnosis", tool=name, note=note)
         if "error" in out:
             text += ("\nThe tool failed. If this is a bug in the tool (not a problem with your inputs), "
                      "call report_tool_bug.")
@@ -332,6 +339,11 @@ class Agent:
             text += ("\nCheck this output against the request before you go on: is any part missing, empty, marked "
                      "as not found, or different from what was asked? If so, call report_tool_bug with what is wrong.")
         return text
+
+    @staticmethod
+    def _net_note(out, manifest):
+        from ..harness.sandbox import network_diagnosis
+        return network_diagnosis(json.dumps(out), [], (manifest.get("permissions") or {}).get("network"))
 
     def _path(self, p):
         full = os.path.realpath(os.path.join(self.work, str(p or "")))

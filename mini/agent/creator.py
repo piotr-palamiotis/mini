@@ -10,6 +10,7 @@ Enforced in code:
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 
@@ -18,6 +19,7 @@ from .turns import AgentStop, EscalateRequested, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE
 from ..harness.sandbox import PolicyError, validate_packages, validate_targets
 from ..harness.fallback import FallbackCapError
+from ..harness.lessons import format_lessons
 
 S = {"type": "string"}
 OBJ = {"type": "object"}
@@ -43,6 +45,8 @@ T_SANDBOX = fn("run_in_sandbox", "Run one inspection command in the tool's sandb
                "e.g. [\"python\", \"-c\", \"import x; print(x.__version__)\"]. Tool files are in /tool (read-only), "
                "the working directory is an empty scratch directory.",
                {"argv": {"type": "array", "items": S}}, ["argv"])
+T_LESSON = fn("record_lesson", "Write a lesson for future attempts at building this kind of tool.",
+              {"problem": S, "cause": S, "avoid": S, "try_instead": S}, ["problem", "cause", "avoid", "try_instead"])
 T_EXPLAIN = fn("explain", "Explain what still fails, why, and the one change you will make next.",
                {"what_fails": S, "why": S, "next_change": S}, ["what_fails", "why", "next_change"])
 FIX_TOOLS = [T_REPLACE, T_REPLACE_LINES, T_REWRITE, T_RUN_TESTS, T_UPDATE_SPEC, T_SANDBOX]
@@ -77,6 +81,7 @@ class Creator:
         self.spec, self.approved_perms, self.image = None, {"network": [], "packages": {"apt": [], "pip": []}}, None
         self.parent = None
         self.restarts = 0
+        self.errors = {}
         self.last_output, self.last_hash = "", None
         self.local_attempts = 0
         a.log.emit("phase", phase="create", need=need)
@@ -98,6 +103,12 @@ class Creator:
         self.image = a.sandbox.ensure_image(self.approved_perms["packages"])
         self.parent = manifest["version"]
         self.restarts, self.last_output, self.last_hash, self.local_attempts = 0, "", None, 0
+        self.errors = {}
+        if a.cfg["lessons"]["enabled"]:
+            stored = a.lessons.add({"capability": f"{manifest['name']}: {manifest['description']}",
+                                    "outcome": "real_run_failure", "problem": problem[:400], "cause": "", "avoid": "",
+                                    "try_instead": "", "errors": [], "run_id": a.log.run_id})
+            a.log.emit("lessons", action="recorded", lesson=stored)
         a.log.emit("phase", phase="repair", tool=manifest["name"], from_version=manifest["version"], problem=problem)
         msg = (f"The installed tool {manifest['name']} v{manifest['version']} failed on the real task.\n"
                f"Problem: {problem}\nEvidence:\n{trim(evidence, 2500)}\n\n"
@@ -105,6 +116,7 @@ class Creator:
                "Find the root cause first: why does the tool not produce what was asked? Check what it sends and "
                "what it reads. Add a test that reproduces the problem, fix the cause (do not hide the failure), "
                "then call `run_tests`.")
+        msg = self._lessons_block() + msg
         self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES},
                          {"role": "user", "content": msg}]
         return self._fix_loop()
@@ -114,8 +126,8 @@ class Creator:
         a = self.a
         names = ", ".join(a.registry.names()) or "(none)"
         self.messages = [{"role": "system", "content": prompts.SYSTEM},
-                         {"role": "user", "content": prompts.SPEC.format(rules=prompts.CREATE_RULES, need=self.need,
-                                                                          task=self.task, context=self.context, names=names)}]
+                         {"role": "user", "content": self._lessons_block() + prompts.SPEC.format(
+                             rules=prompts.CREATE_RULES, need=self.need, task=self.task, context=self.context, names=names)}]
         t = Turns(a, "spec", self.messages, [T_SPEC])
         for _ in range(6):
             reply = t.ask()
@@ -274,6 +286,8 @@ class Creator:
         passed = res["exit_code"] == 0
         summary = next((ln for ln in reversed(res["output"].strip().split("\n")) if ln.strip()), "")
         self.last_output = res["output"]
+        if not passed:
+            self._count_errors(res["output"])
         a.log.emit("test_run", tool=self.spec["name"], passed=passed, exit_code=res["exit_code"], summary=summary,
                    attempt=a.wd.attempts + (1 if self._hash() != self.last_hash else 0), text=res["output"][-6000:])
         self.last_test = {"passed": passed, "summary": summary, "output_tail": res["output"][-1500:],
@@ -281,13 +295,73 @@ class Creator:
         res["passed"] = passed
         return res
 
+    def _count_errors(self, output):
+        """Compact error signatures of one failing test run (exception type + message), counted across attempts."""
+        sigs = set()
+        for line in output.splitlines():
+            m = re.match(r"^E\s+(\w+(?:Error|Exception|Exit)|AssertionError|assert)\b:?\s*(.*)", line)
+            if m:
+                sigs.add((m.group(1) + ": " + m.group(2))[:120])
+            elif line.startswith("ERROR ") or "ModuleNotFoundError" in line:
+                sigs.add(line.strip()[:120])
+        for sig in sigs:
+            self.errors[sig] = self.errors.get(sig, 0) + 1
+
+    def _lessons_block(self):
+        if not self.a.cfg["lessons"]["enabled"]:
+            return ""
+        found = self.a.lessons.search(self.need + " " + (self.spec or {}).get("description", "") + " " + self.task,
+                                      limit=self.a.cfg["lessons"]["max_in_prompt"])
+        if not found:
+            return ""
+        self.a.log.emit("lessons", action="used", count=len(found), lessons=found)
+        return ("Lessons from earlier attempts at similar tools (written by you in earlier runs). Use them: avoid "
+                "what failed before and take a different approach where one is suggested.\n" + format_lessons(found) + "\n\n")
+
+    def _record_lesson(self, outcome):
+        """Ask the model for a lesson and store it. outcome: restart, failed, fixed, real_run_failure."""
+        a = self.a
+        if not a.cfg["lessons"]["enabled"] or not self.spec:
+            return
+        recurring = sorted(self.errors.items(), key=lambda x: -x[1])[:5]
+        base = {"capability": f"{self.spec['name']}: {self.spec['description']}", "outcome": outcome,
+                "errors": recurring, "attempts": a.wd.attempts, "run_id": a.log.run_id}
+        ask = {"restart": "Earlier tries kept failing and the conversation is being restarted.",
+               "failed": "The attempt budget is used up and the tool could not be built.",
+               "fixed": "The tests pass now, after earlier failures."}[outcome]
+        msgs = list(self.messages) + [{"role": "user", "content":
+            f"{ask} Recurring errors (count = failing test runs):\n" +
+            ("\n".join(f"- {s} (x{n})" for s, n in recurring) or "- (none recorded)") +
+            "\n\nCall `record_lesson` for future attempts at this kind of tool: the problem, its root cause, what "
+            "to avoid, and what to try instead" + (" (what finally worked)." if outcome == "fixed" else ".")}]
+        lesson = None
+        try:
+            t = Turns(a, "fix", msgs, [T_LESSON])
+            reply = t.ask()
+            for c in reply["tool_calls"]:
+                if c["name"] == "record_lesson" and c["arguments"].get("problem"):
+                    lesson = {k: str(c["arguments"].get(k, ""))[:400] for k in ("problem", "cause", "avoid", "try_instead")}
+                    break
+        except AgentStop:
+            raise
+        except Exception as e:   # noqa: BLE001 - a lesson is best effort; the harness still keeps the signatures
+            a.log.emit("error", text=f"lesson not written by the model: {e}")
+        if lesson is None:
+            top = recurring[0][0] if recurring else "unknown"
+            lesson = {"problem": f"tests kept failing with: {top}", "cause": "not diagnosed", "avoid": "", "try_instead": ""}
+        stored = a.lessons.add({**base, **lesson})
+        a.log.emit("lessons", action="recorded", lesson=stored)
+
     def _test_message(self, res):
         n = self.a.wd.attempts + (1 if self._hash() != self.last_hash else 0)
         status = "PASSED" if res["passed"] else "FAILED"
         if res["exit_code"] == 5:
             status = "FAILED (no tests were collected)"
-        return prompts.TEST_RESULT.format(attempt=n, budget=self.a.cfg["caps"]["attempts_per_tool"], status=status,
-                                          output=trim(res["output"]))
+        out = prompts.TEST_RESULT.format(attempt=n, budget=self.a.cfg["caps"]["attempts_per_tool"], status=status,
+                                         output=trim(res["output"]))
+        if res.get("network_note") and not res["passed"]:
+            out += "\n" + res["network_note"]
+        return out
 
     def _after_test(self, verdict):
         """Handle the watchdog verdict after a test run. Returns a manifest when the tool is installed."""
@@ -303,11 +377,12 @@ class Creator:
 
     def _restart(self):
         a = self.a
+        self._record_lesson("restart")
         self.restarts += 1
         a.log.emit("phase", phase="restart", tool=self.spec["name"], restarts=self.restarts, attempts=a.wd.attempts)
         a.wd.reset_conversation()
         self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES},
-                         {"role": "user", "content": prompts.RESTART.format(
+                         {"role": "user", "content": self._lessons_block() + prompts.RESTART.format(
                              streak=a.cfg["watchdogs"]["fail_streak_restart"], spec=json.dumps(self.spec, indent=1),
                              files=self._files_view(), output=trim(self.last_output))}]
 
@@ -463,6 +538,7 @@ class Creator:
     # ================================================================== budget, fallback, install
     def _budget_exhausted(self):
         a = self.a
+        self._record_lesson("failed")
         if not a.fallback.enabled:
             a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.attempts, fallback="disabled")
             raise ToolFailed(f"{self.spec['name']}: tests still fail after {a.wd.attempts} attempts; fallback disabled")
@@ -515,6 +591,8 @@ class Creator:
 
     def _install(self, provider):
         a = self.a
+        if provider == "local" and a.wd.attempts > 1:
+            self._record_lesson("fixed")
         if provider == "local":
             created_by = {"provider": "local", "model": a.model, "backend": a.cfg["local"]["backend"]}
         else:
