@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+# runtime state: generated tools must never be committed as seeds
+state/
+runs/
+campaign/out/
+demo/out/

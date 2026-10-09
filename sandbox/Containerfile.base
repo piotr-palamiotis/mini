@@ -1,0 +1,10 @@
+# mini sandbox base image. Everything in it is listed in the README ("Sandbox base image").
+# Extra packages are never added here: the agent requests them, the user approves, and the harness builds a
+# derived image (see mini/harness/sandbox.py: ensure_image).
+FROM docker.io/library/python:3.12-slim
+RUN pip install --no-cache-dir pytest==8.3.5 \
+ && useradd -u 1000 -m -s /bin/sh tool \
+ && mkdir -p /work /tool /mini && chown tool:tool /work
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
+WORKDIR /work
+USER tool

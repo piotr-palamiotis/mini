@@ -1,0 +1,79 @@
+# mini configuration. Missing keys fall back to mini/harness/config.py DEFAULTS.
+
+[local]
+backend = "ollama"
+url = "http://127.0.0.1:11434"
+model = "gemma4:12b"
+num_ctx = 65536
+gpu_env = ""
+launch_cmd = []
+temperature = 0.6
+
+[thinking]
+parse = false
+gap = false
+spec = true
+code = true
+fix = true
+execute = true
+
+[caps]
+attempts_per_tool = 10
+task_wall_clock_s = 1200
+task_turns = 30
+run_hard_wall_clock_s = 3600
+reply_max_tokens = 8192
+reply_max_s = 300
+tokens_per_run = 600000
+max_repairs_per_task = 2
+
+[watchdogs]
+identical_call_repeat = 3
+passing_test_reruns = 2
+file_rewrites = 3
+fail_streak_restart = 3
+parse_error_retries = 5
+empty_reply_nudges = 1
+swap_growth_mib = 250
+
+[sandbox]
+engine = "podman"
+image = "mini-sandbox:base"
+memory = "1g"
+cpus = "2"
+pids = 256
+timeout_s = 180
+service_network = "mini-net"
+allowed_argv0 = ["python", "python3", "pytest", "ls", "cat", "head", "tail", "wc", "file", "pip"]
+
+[approvals]
+confirm_first = true
+mode = "ask"
+auto_approve = []
+
+[approvals.auto_choice]
+confirm = "proceed"
+cap = "hint"
+
+[fallback]
+enabled = true
+provider = "claude_cli"
+model = "sonnet"
+attempts_per_tool = 3
+tokens_per_run = 60000
+spend_usd_per_run = 0.5
+max_output_tokens = 8000
+price_in_per_mtok = 3.75
+price_out_per_mtok = 15.0
+timeout_s = 300
+
+[environment]
+# Facts about the user's environment, shown to the agent as given (like a user telling an assistant about
+# their setup). Set by the user, never by the agent.
+facts = [
+  "Outgoing email: SMTP server at host mailpit, port 1025, plain SMTP without TLS and without authentication. Send from mini@example.local.",
+]
+
+[paths]
+state = "state"
+runs = "runs"
