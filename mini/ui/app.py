@@ -80,9 +80,10 @@ class MiniApp(App):
     """
     BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit")]
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, backend_factory=None):
         super().__init__()
         self.cfg = cfg
+        self.backend_factory = backend_factory      # tests inject a scripted model
         self.agent = None
         self.attachments = []
         self.attempt = (0, cfg["caps"]["attempts_per_tool"], "local")
@@ -226,8 +227,9 @@ class MiniApp(App):
     @work(thread=True, exclusive=True)
     def run_task(self, text, attachments):
         from ..agent.core import Agent
-        cfg = config_mod.load(self.cfg.path)
-        self.agent = Agent(cfg, approval_handler=self.approval_handler)
+        cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
+        self.agent = Agent(cfg, approval_handler=self.approval_handler,
+                           backend=self.backend_factory() if self.backend_factory else None)
         self.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, ev))
         self.agent.run_task(text, attachments)
 

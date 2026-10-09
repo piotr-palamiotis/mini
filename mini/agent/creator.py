@@ -102,7 +102,9 @@ class Creator:
         msg = (f"The installed tool {manifest['name']} v{manifest['version']} failed on the real task.\n"
                f"Problem: {problem}\nEvidence:\n{trim(evidence, 2500)}\n\n"
                f"Spec:\n{json.dumps(self.spec, indent=1)}\n\n{self._files_view()}\n\n"
-               "Add a test that reproduces the problem, fix the tool, then call `run_tests`.")
+               "Find the root cause first: why does the tool not produce what was asked? Check what it sends and "
+               "what it reads. Add a test that reproduces the problem, fix the cause (do not hide the failure), "
+               "then call `run_tests`.")
         self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES},
                          {"role": "user", "content": msg}]
         return self._fix_loop()

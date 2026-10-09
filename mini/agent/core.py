@@ -5,6 +5,7 @@ gets more authority than they allow.
 """
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -147,7 +148,7 @@ class Agent:
                    "repairs": self.repaired, "escalations": self.escalations,
                    "fallback": {"calls": self.fallback.calls, "tokens": self.fallback.tokens,
                                 "spend_usd": round(self.fallback.spend, 4)},
-                   "watchdogs": self._watchdog_counts(), "outputs": sorted(os.listdir(os.path.join(self.work, "out"))),
+                   "watchdogs": self._watchdog_counts(), "outputs": self.produced_files(),
                    "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
         self.log.emit("run_end", **{k: v for k, v in summary.items() if k != "registry_after"})
@@ -253,6 +254,7 @@ class Agent:
                 {"role": "user", "content": prompts.EXECUTE.format(task=task, understanding=json.dumps(understanding, indent=1),
                                                                    context=ctx, tools=listing(), files=self.list_work())}]
         last_invoke = {}
+        finish_rejections = 0
         while True:
             t = Turns(self, "execute", msgs, EXEC_TOOLS)
             try:
@@ -269,15 +271,26 @@ class Agent:
                 note = "\nWarning: same call as before. A third identical call in a row will be blocked." if guard == "warn" else ""
                 self.log.emit("tool_call", step="execute", name=name, args=args)
                 if name == "finish":
+                    problem = self._check_finish(args, understanding, finish_rejections)
+                    if problem:
+                        finish_rejections += 1
+                        self.log.emit("watchdog", name="finish_check", problem=problem, rejections=finish_rejections)
+                        t.result(name, "Not finished: " + problem)
+                        continue
                     answer = args.get("answer", "")
-                    self.log.emit("phase", phase="done", answer=answer, outputs=os.listdir(os.path.join(self.work, "out")))
+                    self.log.emit("phase", phase="done", answer=answer, outputs=self.produced_files())
                     return answer
                 if name == "invoke_tool":
                     text = self._invoke(args, last_invoke)
                 elif name == "read_file":
                     text = self._read(args)
                 elif name == "write_file":
-                    text = self._write(args, content)
+                    self._text_turn_done = False
+                    text = self._write(args, content, msgs)
+                    if self._text_turn_done:
+                        self.log.emit("tool_result", step="execute", name=name, text=text)
+                        t.user(text + note)
+                        continue
                 elif name == "need_tool":
                     try:
                         m = creator.create(args.get("need", ""), task, ctx)
@@ -333,20 +346,60 @@ class Agent:
             return data[:MAX_READ] + f"\n[... file is {len(data)} characters; first {MAX_READ} shown]"
         return data
 
-    def _write(self, args, content):
+    def produced_files(self):
+        out = []
+        for d, dirs, files in os.walk(self.work):
+            rel = os.path.relpath(d, self.work)
+            if rel == "in" or rel.startswith(("in" + os.sep, ".mini")):
+                continue
+            dirs[:] = [x for x in dirs if not x.startswith(".")]
+            out += [os.path.normpath(os.path.join(rel, f)) for f in files]
+        return sorted(out)
+
+    def _check_finish(self, args, understanding, rejections):
+        """Harness-side check of a finish call. Returns a problem or "" (after 2 rejections the agent may finish)."""
+        if rejections >= 2:
+            return ""
+        produced = self.produced_files()
+        for f in args.get("files") or []:
+            try:
+                full = self._path(f)
+            except PolicyError as e:
+                return str(e)
+            if not os.path.isfile(full) or os.path.getsize(full) == 0:
+                return f"{f} does not exist or is empty. Write it first. Files present: {', '.join(produced) or '(none)'}"
+        promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
+        if re.search(r"\bfiles?\b|\.[a-z]{2,4}\b", promised.lower()) and not produced:
+            return ("your plan produces a file, but no file was written in the working directory. Use write_file "
+                    "(or a tool) to create it, then finish with its path in files.")
+        return ""
+
+    def _write(self, args, content, msgs=None):
         try:
             full = self._path(args.get("path"))
         except PolicyError as e:
             return str(e)
-        files, problems = codeblocks.extract(content)
-        body = files.get(args.get("path", "").lstrip("./")) or (list(files.values())[0] if len(files) == 1 else None)
+        path = str(args.get("path", "")).lstrip("./")
+        body = None
+        if "```" in (content or ""):
+            body = codeblocks.single(content, path)[0]
         if body is None and isinstance(args.get("content"), str):
             body = args["content"]
+        if body is None and msgs is not None:
+            # text-only turn: the model sends the content as a fenced block with no tools offered
+            msgs.append({"role": "tool", "tool_name": "write_file", "content": "ok"})
+            ext = os.path.splitext(path)[1].lstrip(".") or "text"
+            msgs.append({"role": "user", "content": prompts.WRITE_CONTENT.format(path=path, lang=ext)})
+            t = Turns(self, "execute", msgs, [])
+            for _ in range(3):
+                reply = t.ask_text()
+                body, problems = codeblocks.single(reply.get("content") or "", path)
+                if body is not None:
+                    break
+                t.user(f"Not saved: {' '.join(problems)}. Reply with the content of {path} as one fenced block.")
+            self._text_turn_done = True
         if body is None:
-            m = codeblocks.FENCE.search(content)
-            body = m.group(3) if m else None
-        if body is None:
-            return "No content: put the file content in a fenced block in this reply. " + " ".join(problems)
+            return "No content received; the file was not written."
         mode = args.get("mode", "write")
         os.makedirs(os.path.dirname(full), exist_ok=True)
         old = open(full).read() if os.path.exists(full) else ""

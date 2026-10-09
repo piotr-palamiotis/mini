@@ -48,7 +48,7 @@ DEFAULTS = {
         "cpus": "2",
         "pids": 256,
         "timeout_s": 180,
-        "service_network": "mini-net",       # network of local services (Mailpit) and the egress forwarder
+        "service_network": "mini-net",       # network of local services (e.g. a demo mail server) and the egress forwarder
         "allowed_argv0": ["python", "python3", "pytest", "ls", "cat", "head", "tail", "wc", "file", "pip"],
     },
     "approvals": {

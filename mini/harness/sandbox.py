@@ -43,12 +43,23 @@ def validate_targets(targets):
     return sorted(set(out))
 
 
+PLACEHOLDERS = {"none", "null", "nil", "n/a", "na", "-", "no", "nothing", "stdlib", "builtin", "standard library"}
+
+
 def validate_packages(pkgs):
+    import sys
+    if not isinstance(pkgs, dict):
+        raise PolicyError("packages must be an object: {\"apt\": [...], \"pip\": [...]}")
     apt = sorted(set(pkgs.get("apt") or []))
     pip = sorted(set(pkgs.get("pip") or []))
     for p in apt + pip:
+        if str(p).strip().lower() in PLACEHOLDERS:
+            raise PolicyError(f"{p!r} is not a package; use an empty list when no packages are needed")
         if not PKG_RE.match(str(p)):
             raise PolicyError(f"invalid package name {p!r}")
+    for p in pip:
+        if re.split(r"[<>=!~]", p)[0].lower() in sys.stdlib_module_names:
+            raise PolicyError(f"{p!r} is part of the Python standard library; do not list it as a package")
     return {"apt": apt, "pip": pip}
 
 

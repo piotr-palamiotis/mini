@@ -3,7 +3,7 @@
 The tool container sits on an --internal network with no route out. Every host the manifest declares (and the
 user approved) is mapped in the tool's /etc/hosts to this forwarder, which listens on the declared ports and
 forwards a connection only when its destination is in the allowlist:
-  - a port with one declared host forwards to that host (SMTP, custom ports)
+  - a port with one declared host forwards to that host (any TCP protocol)
   - otherwise the destination comes from the TLS SNI name or the HTTP Host header
 Every decision is printed as one JSON line (the harness copies them into the run log).
 
