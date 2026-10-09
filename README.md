@@ -2,6 +2,8 @@
 
 An agent that builds its own tools, for the Frankenstein track of the Dusk Till Dawn hackathon.
 
+by Peter and Lukas
+
 You give mini-agent a task in plain language. It works out what the task needs and searches its tool registry.
 When a capability is missing, it writes a spec, the code and the tests, runs the tests in a sandbox,
 asks you to approve the install, and then finishes the task with the new tool. The next session finds the
