@@ -29,7 +29,7 @@ DEFAULTS = {
         "run_hard_wall_clock_s": 3600,       # hard stop for a whole run, no question asked
         "reply_max_tokens": 8192,
         "reply_max_s": 300,
-        "tokens_per_run": 600000,            # local tokens (prompt + output) per run
+        "tokens_per_run": 1500000,           # local tokens per run, prompt + output summed over every model call
         "max_repairs_per_task": 2,           # new versions after a failed real run
     },
     "watchdogs": {

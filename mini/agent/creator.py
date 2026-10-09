@@ -26,8 +26,6 @@ T_SPEC = fn("write_spec", "Write the spec of the new tool.", {
     "permissions": {"type": "object", "properties": {"network": {"type": "array", "items": S},
                                                      "packages": {"type": "object"}}},
     "edge_cases": {"type": "array", "items": S}}, ["name", "description", "input_schema", "output_schema", "edge_cases"])
-T_SUBMIT = fn("submit_code", "Save the fenced code blocks of this reply (tool.py, test_tool.py) and run the tests.", {
-    "note": S})
 T_REPLACE = fn("replace", "Replace one exact piece of text in a file. old must appear exactly once; include a few "
                "surrounding lines to make it unique. Never include line-number prefixes.",
                {"path": S, "old": S, "new": S}, ["path", "old", "new"])
@@ -35,14 +33,15 @@ T_REPLACE_LINES = fn("replace_lines", "Replace lines start..end (inclusive, numb
                      "Empty new text deletes the lines.",
                      {"path": S, "start": {"type": "integer"}, "end": {"type": "integer"}, "new": S},
                      ["path", "start", "end", "new"])
-T_REWRITE = fn("rewrite_file", "Replace a whole file with the fenced code block in this reply.", {"path": S}, ["path"])
+T_REWRITE = fn("rewrite_file", "Replace a whole file. The harness then asks you for the new content.", {"path": S}, ["path"])
 T_RUN_TESTS = fn("run_tests", "Run the tests in the sandbox.", {})
 T_UPDATE_SPEC = fn("update_spec", "Change the spec: description, schemas, permissions (network, packages) or edge "
                    "cases. Permission or package increases need the user's approval.",
                    {"description": S, "input_schema": OBJ, "output_schema": OBJ,
                     "permissions": {"type": "object"}, "edge_cases": {"type": "array", "items": S}})
-T_SANDBOX = fn("run_in_sandbox", "Run one inspection command in the tool's sandbox (argv list, no shell), "
-               "e.g. [\"python\", \"-c\", \"import x; print(x.__version__)\"].",
+T_SANDBOX = fn("run_in_sandbox", "Run one inspection command in the tool's sandbox: an argv list, no shell, "
+               "e.g. [\"python\", \"-c\", \"import x; print(x.__version__)\"]. Tool files are in /tool (read-only), "
+               "the working directory is an empty scratch directory.",
                {"argv": {"type": "array", "items": S}}, ["argv"])
 T_EXPLAIN = fn("explain", "Explain what still fails, why, and the one change you will make next.",
                {"what_fails": S, "why": S, "next_change": S}, ["what_fails", "why", "next_change"])
@@ -190,39 +189,42 @@ class Creator:
         return True, ""
 
     # ================================================================== code + tests
-    def _implicit_code(self, reply):
-        files, _ = codeblocks.extract(reply.get("content") or "")
-        if files:
-            return {"name": "submit_code", "arguments": {}}
+    def _ask_file(self, path, instruction, step):
+        """Text-only turn: the model answers with the complete file as a fenced block. Returns the content."""
+        a = self.a
+        self.messages.append({"role": "user", "content": instruction})
+        t = Turns(a, step, self.messages, [])
+        for _ in range(3):
+            reply = t.ask_text()
+            body, problems = codeblocks.single(reply.get("content") or "", path)
+            if body is not None:
+                return body
+            a.log.emit("info", text=f"no usable fenced block for {path}: {' '.join(problems)}")
+            t.user(f"Not saved: {' '.join(problems)}. Reply with the complete {path} as one fenced block "
+                   f"(```python {path} ... ```) and nothing else.")
         return None
 
     def _code_and_test(self, first):
         a = self.a
-        self.messages.append({"role": "user", "content": prompts.CODE.format(spec=json.dumps(self.spec, indent=1))})
-        t = Turns(a, "code", self.messages, [T_SUBMIT], implicit=self._implicit_code)
-        for _ in range(6):
-            reply = t.ask()
-            files, problems = codeblocks.extract(reply.get("content") or "")
-            files = {k.split("/")[-1]: v for k, v in files.items()}
-            missing = [f for f in FILES if f not in files]
-            if problems or missing:
-                t.result("submit_code", "Not saved. " + " ".join(problems) +
-                         (f" Missing files: {', '.join(missing)}." if missing else "") +
-                         " Reply with both complete files as fenced blocks named tool.py and test_tool.py.")
-                continue
-            for name in FILES:
-                self._write(name, files[name])
-            a.log.emit("code", tool=self.spec["name"], files={k: files[k] for k in FILES})
-            short = self._edge_case_gap()
-            if short:
-                t.result("submit_code", short)
-                return self._fix_loop(pending=None)
-            res = self._run_tests()
-            out = self._test_message(res)
-            verdict = a.wd.on_test(res["passed"], True, self._hash())
-            self.messages.append({"role": "tool", "tool_name": "submit_code", "content": out})
-            return self._after_test(verdict) or self._fix_loop()
-        raise AgentStop("no usable code after 6 replies")
+        spec_text = json.dumps(self.spec, indent=1)
+        intro = f"Spec approved:\n{spec_text}\n\n"
+        for path, what in (("tool.py", prompts.WHAT_TOOL),
+                           ("test_tool.py", prompts.WHAT_TESTS.format(edge_cases="; ".join(self.spec["edge_cases"])))):
+            body = self._ask_file(path, prompts.CODE_FILE.format(intro=intro, path=path, what=what), "code")
+            if body is None:
+                raise AgentStop(f"no usable {path} after 3 replies")
+            self._write(path, body)
+            intro = ""
+        a.log.emit("code", tool=self.spec["name"], files={k: open(os.path.join(self.files_dir, k)).read() for k in FILES})
+        short = self._edge_case_gap()
+        if short:
+            self.messages.append({"role": "user", "content": short + "\n\n" + self._files_view()})
+            return self._fix_loop()
+        res = self._run_tests()
+        out = self._test_message(res)
+        verdict = a.wd.on_test(res["passed"], True, self._hash())
+        self.messages.append({"role": "user", "content": out + ("" if res["passed"] else "\n\n" + self._files_view())})
+        return self._after_test(verdict) or self._fix_loop()
 
     def _edge_case_gap(self):
         tests = open(os.path.join(self.files_dir, "test_tool.py")).read().count("def test_")
@@ -346,8 +348,12 @@ class Creator:
                     if verdict == "restart":
                         break
                     continue
+                self._pending_result_done = False
                 text, step_back = self._edit(name, args, content)
-                t.result(name, text + note)
+                if self._pending_result_done:      # rewrite_file already answered; the content came in a text turn
+                    t.user(text + note)
+                else:
+                    t.result(name, text + note)
                 a.log.emit("tool_result", step="fix", name=name, text=trim(text, 1500))
                 if step_back:
                     self._step_back(step_back)
@@ -389,10 +395,15 @@ class Creator:
                 lines[s - 1:e] = new.split("\n") if new != "" else []
                 self._write(path, "\n".join(lines) + "\n")
             else:
-                files, problems = codeblocks.extract(content)
-                body = files.get(path) or (list(files.values())[0] if len(files) == 1 else None)
+                body = codeblocks.single(content, path)[0] if "```" in (content or "") else None
                 if body is None:
-                    return ("No fenced block for " + path + " in this reply. " + " ".join(problems)), None
+                    body = codeblocks.from_args({k: v for k, v in args.items() if k != "path"}, names=(path,)).get(path)
+                if body is None:
+                    self.messages.append({"role": "tool", "tool_name": name, "content": "ok"})
+                    body = self._ask_file(path, prompts.REWRITE.format(path=path), "fix")
+                    self._pending_result_done = True
+                if body is None:
+                    return f"No usable content for {path}; the file is unchanged.", None
                 self._write(path, body)
                 if a.wd.on_rewrite(path) == "step_back":
                     return f"{path} rewritten.", path

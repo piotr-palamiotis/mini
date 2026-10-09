@@ -35,7 +35,11 @@ class Turns:
     def result(self, name, text):
         self.messages.append({"role": "tool", "tool_name": name, "content": text})
 
-    def ask(self):
+    def ask_text(self):
+        """A text-only turn: no tools offered, the reply is plain text (used for fenced code files)."""
+        return self.ask(text_only=True)
+
+    def ask(self, text_only=False):
         a = self.a
         while True:
             a.check_abort()
@@ -44,7 +48,7 @@ class Turns:
                 raise AgentStop(f"hard wall-clock cap of {a.cfg['caps']['run_hard_wall_clock_s']} s per run reached")
             if a.wd.time_or_turns_exceeded():
                 self._limit_reached()
-            reply = a.backend.chat(a.model, self.messages, self.tools, think=a.cfg["thinking"].get(self.step, True),
+            reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True),
                                    options=a.model_options, on_delta=a.on_delta, stop_event=a.stop_event)
             a.tokens += (reply.get("prompt_tokens") or 0) + (reply.get("output_tokens") or 0)
             a.log.emit("model_reply", step=self.step, thinking=reply.get("thinking"), content=reply.get("content"),
@@ -56,6 +60,14 @@ class Turns:
             if a.tokens > a.cfg["caps"]["tokens_per_run"]:
                 a.log.emit("cap", cap="tokens_per_run", used=a.tokens, limit=a.cfg["caps"]["tokens_per_run"])
                 raise AgentStop(f"token cap reached: {a.tokens} > {a.cfg['caps']['tokens_per_run']}")
+            if text_only:
+                if a.wd.on_reply(reply, expect_call=False) == "runaway":
+                    self.messages.append({"role": "assistant", "content": "(reply discarded: too long)"})
+                    self.user(f"Your reply was cut off after {reply.get('output_tokens')} tokens / {reply.get('secs')} s. "
+                              "Make smaller changes: write a shorter file.")
+                    continue
+                self.messages.append({"role": "assistant", "content": reply.get("content") or ""})
+                return reply
             if not reply.get("tool_calls") and self.implicit:
                 call = self.implicit(reply)
                 if call:

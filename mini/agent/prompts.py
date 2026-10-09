@@ -79,17 +79,20 @@ Call `write_spec` with: name (snake_case), description (what it does, for later 
 output_schema (JSON Schema objects with properties and descriptions), permissions (network: list of
 "host:port"; packages: {{"apt": [...], "pip": [...]}}), edge_cases (list of short strings)."""
 
-CODE = """Spec approved:
-{spec}
+CODE_FILE = """{intro}Write {path} now: {what}
+Reply with only the complete file as one fenced code block, no tool call:
 
-Write the two files now. Reply with two fenced code blocks and call `submit_code`:
+```python {path}
+<complete file>
+```"""
 
-```python tool.py
-<complete tool code>
-```
+WHAT_TOOL = "the tool, with `def run(inputs: dict) -> dict`."
+WHAT_TESTS = "pytest tests with `from tool import run`, at least one test per edge case: {edge_cases}"
 
-```python test_tool.py
-<complete pytest tests, at least one per edge case>
+REWRITE = """Send the complete new {path} now as one fenced code block, no tool call:
+
+```python {path}
+<complete file>
 ```"""
 
 TEST_RESULT = """Attempt {attempt}/{budget}: tests {status}.
@@ -97,8 +100,8 @@ TEST_RESULT = """Attempt {attempt}/{budget}: tests {status}.
 
 FIX = """Read the error and diagnose it before you edit. If a test you wrote yourself fails, first check the
 test against the spec: the test may be wrong. Then change files with `replace` (exact text) or
-`replace_lines` (line numbers as shown), or rewrite a whole file with `rewrite_file` plus a fenced block.
-Then call `run_tests`. If the fix needs another package or network host, call `update_spec`."""
+`replace_lines` (line numbers as shown), or call `rewrite_file` to replace a whole file (the harness then
+asks you for the content). Then call `run_tests`. If the fix needs another package or network host, call `update_spec`."""
 
 STEP_BACK = """Stop editing. You have rewritten {path} {n} times. Call `explain` first: what still fails, why,
 and the one change you will make next."""
@@ -114,8 +117,8 @@ Current files:
 Last failing test output:
 {output}
 
-Diagnose the failure from the output above, then fix it. Write a new file with `rewrite_file` and a fenced
-block, or edit with `replace` / `replace_lines`. Then call `run_tests`."""
+Diagnose the failure from the output above, then fix it: edit with `replace` / `replace_lines`, or call
+`rewrite_file` for a whole new file. Then call `run_tests`."""
 
 EXECUTE = """Task from the user:
 {task}

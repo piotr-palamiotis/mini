@@ -116,6 +116,13 @@ class Agent:
         self.log.emit("run_start", task=task, attachments=[os.path.basename(a) for a in attachments],
                       model=self.model, backend=self.cfg["local"]["backend"], fallback_enabled=self.fallback.enabled,
                       caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
+        tl = time.time()
+        try:
+            self.backend.load(self.model, self.model_options)
+        except OSError as e:
+            self.log.emit("error", text=f"local backend not reachable: {e}")
+        self.log.emit("info", text=f"model {self.model} loaded in {time.time() - tl:.1f} s; swap baseline taken after loading",
+                      swap_used_mib=round(hwmon.swap_used_mib()))
         swap = hwmon.SwapWatch(self.cfg["watchdogs"]["swap_growth_mib"], self._swap_trip).begin()
         self.wd.reset_task()
         try:

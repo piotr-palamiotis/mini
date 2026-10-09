@@ -45,14 +45,17 @@ class Watchdogs:
         self.log.emit("watchdog", name=name, **kw)
 
     # ------------------------------------------------------------ per reply
-    def on_reply(self, reply):
-        """Returns None, 'runaway', 'parse_error', 'parse_limit', 'empty', or 'empty_limit'."""
+    def on_reply(self, reply, expect_call=True):
+        """Returns None, 'runaway', 'parse_error', 'parse_limit', 'empty', or 'empty_limit'.
+        expect_call=False: a text-only turn (the harness asked for a fenced file), only runaway output counts."""
         self.turns += 1
         if reply.get("done_reason") in ("length", "timeout") or reply.get("output_tokens", 0) >= self.caps["reply_max_tokens"] \
                 or reply.get("secs", 0) >= self.caps["reply_max_s"]:
             self.trigger("runaway_output", output_tokens=reply.get("output_tokens"), secs=reply.get("secs"),
                          limit_tokens=self.caps["reply_max_tokens"], limit_s=self.caps["reply_max_s"])
             return "runaway"
+        if not expect_call:
+            return None
         bad = [c for c in reply.get("tool_calls", []) if "_unparsed" in (c.get("arguments") or {})] or reply.get("raw_error")
         if bad:
             self.parse_errors += 1

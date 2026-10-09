@@ -24,7 +24,7 @@ task_turns = 30
 run_hard_wall_clock_s = 3600
 reply_max_tokens = 8192
 reply_max_s = 300
-tokens_per_run = 600000
+tokens_per_run = 1500000
 max_repairs_per_task = 2
 
 [watchdogs]

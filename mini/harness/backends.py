@@ -38,9 +38,20 @@ class Backend:
     def list_models(self):
         return []
 
+    def load(self, model, options=None):
+        """Load the model before a run, so loading is not counted against the run's watchdogs."""
+        return None
+
 
 class OllamaBackend(Backend):
     """Ollama native /api/chat with streaming."""
+
+    def load(self, model, options=None):
+        body = {"model": model, "keep_alive": "30m", "options": {"num_gpu": 999, **(options or {})}}
+        req = urllib.request.Request(self.ep.url + "/api/generate", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            r.read()
 
     def list_models(self):
         with urllib.request.urlopen(self.ep.url + "/api/tags", timeout=10) as r:

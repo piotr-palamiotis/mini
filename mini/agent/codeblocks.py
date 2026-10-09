@@ -16,8 +16,31 @@ ELISION = re.compile(r"^.*(\.\.\.|…).*(omitted|unchanged|rest of|remain|same a
                      r"|^\s*(#|//)?\s*(\.\.\.|…)\s*$", re.M | re.I)
 
 
+TEMPLATE_TOKENS = re.compile(r"<\|?(?:channel|message|end|start|turn|im_start|im_end)\|?>")
+
+
+def clean(text):
+    """Remove chat-template tokens that leak into content (they can glue text to an opening fence)."""
+    return TEMPLATE_TOKENS.sub("\n", text or "")
+
+
+def from_args(args, names=("tool.py", "test_tool.py")):
+    """Code the model put into tool-call arguments instead of fenced blocks. Returns {file name: code}."""
+    out = {}
+    for k, v in (args or {}).items():
+        if not isinstance(v, str) or "\n" not in v or len(v) < 40:
+            continue
+        key = k.lower()
+        if "test" in key and "test_tool.py" in names:
+            out["test_tool.py"] = v if v.endswith("\n") else v + "\n"
+        elif ("code" in key or "tool" in key or "content" in key or key.endswith("py")) and "def " in v:
+            out[names[0]] = v if v.endswith("\n") else v + "\n"
+    return out
+
+
 def extract(text):
     """Returns (files: {name: content}, problems: [str])."""
+    text = clean(text)
     files, problems = {}, []
     last_end = 0
     for m in FENCE.finditer(text):
@@ -58,3 +81,22 @@ def numbered(content, start=1):
         lines = lines[:-1]
     w = len(str(len(lines) + start))
     return "\n".join(f"{i:>{w}}| {ln}" for i, ln in enumerate(lines, start))
+
+
+def single(text, name):
+    """The content for one requested file: a block named `name`, or the only block in the reply."""
+    files, problems = extract(text)
+    if name in files:
+        return files[name], []
+    named = {k.split("/")[-1]: v for k, v in files.items()}
+    if name in named:
+        return named[name], []
+    blocks = list(FENCE.finditer(clean(text)))
+    if len(blocks) == 1:
+        body = blocks[0].group(3)
+        if ELISION.search(body):
+            return None, ["the block abbreviates code with '...' or 'omitted'; write the complete file"]
+        return (body if body.endswith("\n") else body + "\n"), []
+    if not blocks:
+        return None, problems + ["no complete fenced code block found (it may have been cut off)"]
+    return None, problems + [f"{len(blocks)} code blocks found; send only {name}"]
