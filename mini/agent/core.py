@@ -328,6 +328,9 @@ class Agent:
         if "error" in out:
             text += ("\nThe tool failed. If this is a bug in the tool (not a problem with your inputs), "
                      "call report_tool_bug.")
+        else:
+            text += ("\nCheck this output against the request before you go on: is any part missing, empty, marked "
+                     "as not found, or different from what was asked? If so, call report_tool_bug with what is wrong.")
         return text
 
     def _path(self, p):
@@ -390,10 +393,20 @@ class Agent:
             msgs.append({"role": "tool", "tool_name": "write_file", "content": "ok"})
             ext = os.path.splitext(path)[1].lstrip(".") or "text"
             msgs.append({"role": "user", "content": prompts.WRITE_CONTENT.format(path=path, lang=ext)})
-            t = Turns(self, "execute", msgs, [])
+            t = Turns(self, "write", msgs, [])
             for _ in range(3):
                 reply = t.ask_text()
-                body, problems = codeblocks.single(reply.get("content") or "", path)
+                text = reply.get("content") or ""
+                body, problems = codeblocks.single(text, path)
+                if body is None and text.strip() and "```" not in text:
+                    body = text.strip() + "\n"            # plain text reply: the content itself
+                if body is None:
+                    for c in reply.get("tool_calls") or []:   # the model called a tool anyway: take its content
+                        v = (c.get("arguments") or {}).get("content")
+                        if isinstance(v, str) and v.strip():
+                            body = v
+                            self.log.emit("info", text=f"content for {path} arrived in a tool-call argument; accepted")
+                            break
                 if body is not None:
                     break
                 t.user(f"Not saved: {' '.join(problems)}. Reply with the content of {path} as one fenced block.")
@@ -405,7 +418,9 @@ class Agent:
         old = open(full).read() if os.path.exists(full) else ""
         new = body + old if mode == "prepend" else old + body if mode == "append" else body
         open(full, "w").write(new)
-        return f"Wrote {os.path.relpath(full, self.work)} ({len(new)} characters, mode {mode})."
+        shown = new if len(new) <= 4000 else new[:2000] + f"\n[... {len(new) - 4000} characters ...]\n" + new[-2000:]
+        return (f"Wrote {os.path.relpath(full, self.work)} ({len(new)} characters, mode {mode}). The file now "
+                f"contains:\n{shown}\nDo not write it again unless something in it is wrong.")
 
     def _repair(self, creator, args, last_invoke, task, ctx):
         name = args.get("name", "")

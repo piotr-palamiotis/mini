@@ -20,7 +20,7 @@ DEFAULTS = {
         "temperature": 0.6,
     },
     "thinking": {                            # thinking per step
-        "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True,
+        "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,
     },
     "caps": {
         "attempts_per_tool": 10,             # one attempt = generate/fix code + run tests
@@ -49,6 +49,7 @@ DEFAULTS = {
         "pids": 256,
         "timeout_s": 180,
         "service_network": "mini-net",       # network of local services (e.g. a demo mail server) and the egress forwarder
+        "fault_injection": {},               # tests only: {"host:port": "reset"} makes egress reset those connections
         "allowed_argv0": ["python", "python3", "pytest", "ls", "cat", "head", "tail", "wc", "file", "pip"],
     },
     "approvals": {

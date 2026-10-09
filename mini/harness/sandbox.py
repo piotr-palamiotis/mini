@@ -131,6 +131,10 @@ class Sandbox:
                 "--read-only", "--sysctl", "net.ipv4.ip_unprivileged_port_start=0",
                 "-v", f"{SANDBOX_DIR}/egress.py:/mini/egress.py:ro", self.cfg["image"],
                 "python", "/mini/egress.py", json.dumps(targets)]
+        faults = {t: f for t, f in (self.cfg.get("fault_injection") or {}).items() if t in targets}
+        if faults:
+            args.append(json.dumps(faults))
+            self._emit("sandbox", action="fault_injection", faults=faults)
         r = self._cli(args)
         if r.returncode:
             self._cli(["network", "rm", "-f", net])
@@ -165,6 +169,9 @@ class Sandbox:
     def check_argv(self, argv):
         if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
             raise PolicyError("command must be a non-empty list of strings (argv), not a shell string")
+        if any(c in argv[0] for c in ' "\''):
+            raise PolicyError(f"argv[0] is {argv[0][:60]!r}: the whole command is in one string. Put each argument in "
+                              f"its own list item, e.g. [\"python\", \"-c\", \"print(1)\"]")
         if argv[0] not in self.cfg["allowed_argv0"]:
             raise PolicyError(f"'{argv[0]}' is not on the sandbox command allowlist: {', '.join(self.cfg['allowed_argv0'])}")
         if argv[0] == "pip" and (len(argv) < 2 or argv[1] not in ("list", "show", "freeze")):

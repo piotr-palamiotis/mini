@@ -69,6 +69,9 @@ CREATE_RULES = """You are building one new tool for the registry. The tool contr
 - Tests must not cause real side effects that cannot be undone (sending messages, changing remote systems):
   replace those calls with fakes via monkeypatch. Prefer fakes for network reads as well; keep at most one
   test that talks to a real service.
+- Real inputs often differ from a clean, simple example: other formats or encodings, content stored in a
+  different internal representation than expected, partial or damaged data. Name these in the edge cases and
+  handle them, so the tool works on the real input, not only on the test fixture.
 - Before you finish, check: missing or optional fields, off-by-one errors in indexes and buffers, empty input,
   network errors and timeouts, unexpected response shapes."""
 

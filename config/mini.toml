@@ -16,6 +16,7 @@ spec = true
 code = true
 fix = true
 execute = true
+write = false     # text-only turns that deliver document content
 
 [caps]
 attempts_per_tool = 10

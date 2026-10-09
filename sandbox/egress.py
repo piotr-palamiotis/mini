@@ -7,7 +7,8 @@ forwards a connection only when its destination is in the allowlist:
   - otherwise the destination comes from the TLS SNI name or the HTTP Host header
 Every decision is printed as one JSON line (the harness copies them into the run log).
 
-usage: python egress.py '<json list of "host:port">'
+usage: python egress.py '<json list of "host:port">' ['<json {"host:port": "reset"}>']
+The optional second argument is for failure-injection tests only: listed targets are accepted and then reset.
 """
 import json
 import select
@@ -67,6 +68,9 @@ def pipe(a, b):
         b.close()
 
 
+FAULTS = {}
+
+
 def handle(conn, port, hosts):
     dest = None
     try:
@@ -81,6 +85,11 @@ def handle(conn, port, hosts):
             first = b""
         if dest not in hosts:
             log(event="deny", dest=dest, port=port, reason="destination not declared")
+            conn.close()
+            return
+        if FAULTS.get(f"{dest}:{port}") == "reset":
+            log(event="fault_injected", dest=dest, port=port, fault="reset")
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
             conn.close()
             return
         up = socket.create_connection((dest, port), timeout=15)
@@ -106,6 +115,8 @@ def serve(port, hosts):
 
 def main():
     targets = json.loads(sys.argv[1])
+    if len(sys.argv) > 2:
+        FAULTS.update(json.loads(sys.argv[2]))
     by_port = {}
     for t in targets:
         host, port = t.rsplit(":", 1)

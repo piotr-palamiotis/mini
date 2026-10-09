@@ -199,6 +199,14 @@ class Creator:
         for _ in range(3):
             reply = t.ask_text()
             body, problems = codeblocks.single(reply.get("content") or "", path)
+            if body is None:
+                for c in reply.get("tool_calls") or []:       # the model called a tool anyway: take code from it
+                    got = codeblocks.from_args(c.get("arguments"), names=(path,) if path != "test_tool.py" else
+                                               ("tool.py", "test_tool.py"))
+                    if got.get(path) and not codeblocks.ELISION.search(got[path]):
+                        a.log.emit("info", text=f"{path} arrived in a tool-call argument; accepted")
+                        body = got[path]
+                        break
             if body is not None:
                 return body
             a.log.emit("info", text=f"no usable fenced block for {path}: {' '.join(problems)}")
