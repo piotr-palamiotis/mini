@@ -648,4 +648,4 @@ class Creator:
                    restarts=self.restarts, registry=a.registry.snapshot())
         a.created.append({"name": manifest["name"], "version": v, "created_by": created_by,
                           "attempts": manifest["attempts_used"], "restarts": self.restarts})
-        return a.registry.get(manifest["name"], v)
+        return a.registry.get(manifest["name"])

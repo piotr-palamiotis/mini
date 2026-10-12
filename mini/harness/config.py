@@ -90,6 +90,10 @@ DEFAULTS = {
         "extra_attempts": 3,                 # attempts granted after the user gives advice
         "max_rounds": 1,                     # advice rounds per tool
     },
+    "tools": {
+        "auto_accept": False,                # true: a tool a task builds goes straight to main (no review step)
+        "bin_dir": "~/.local/bin",           # accepted tools get a command here
+    },
     "lessons": {
         "enabled": True,                     # agent-written lessons from failures, kept in <state>/lessons.jsonl
         "max_in_prompt": 3,

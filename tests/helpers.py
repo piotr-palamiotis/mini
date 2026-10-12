@@ -14,6 +14,7 @@ def temp_config(**over):
     cfg["approvals"]["mode"] = "auto"
     cfg["approvals"]["auto_approve"] = ["confirm", "permissions", "install", "cap"]
     cfg["local"]["backend"] = "fake"                  # never reach a real model server from a test
+    cfg["tools"]["auto_accept"] = True                # tests that check staging turn this off
     cfg["free"]["enabled"] = False
     cfg["paid"]["enabled"] = False
     for path, v in over.items():

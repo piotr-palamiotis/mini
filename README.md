@@ -30,7 +30,7 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 .venv/bin/python -m mini setup                            # build the sandbox base image (rootless Podman)
 .venv/bin/python -m mini                                  # Textual UI
 .venv/bin/python -m mini run "task" --attach file.pdf     # headless, approvals in the terminal
-.venv/bin/python -m mini registry list|show|rollback|wipe
+.venv/bin/python -m mini tools list|staged|review|accept|discard|show|rollback|wipe
 ```
 
 Configuration lives in `config/mini.toml` (every key is documented in `mini/harness/config.py`). The UI has a
@@ -57,7 +57,8 @@ config screen for the same file.
      `update_spec` (any permission increase goes through the gate again), `run_in_sandbox` (an argv
      allowlist), `run_tests`. File content comes back in the tool results and stays current.
    - **Stop:** as soon as the tests pass, editing stops and the install dialog opens.
-   - **Install:** the tool goes into the registry as a new version, with its manifest and test results.
+   - **Install:** the tool is committed to its own git repo on the branch `task/<run>` (staged), with its
+     manifest and test results. The task uses it right away; other tasks see it once you accept it.
 5. **Execute.** The model invokes tools (each invocation runs in the sandbox), reads and writes files, and
    finishes. The harness checks each `finish` call: listed files must exist, and a plan that produces a file
    must have written one. If a tool misbehaves on the real input, `report_tool_bug` sends it back into the
@@ -101,6 +102,19 @@ budget stops at 10 and that restarts do not reset it.
   plus `pytest 8.3.5` (with its dependencies `iniconfig`, `packaging`, `pluggy`) and a non-root user `tool`
   (uid 1000). Nothing else. Extra apt or pip packages are requested in the spec, approved in the dialog,
   built into a derived image `mini-sandbox:pkg-<hash>`, and logged.
+
+## Tools are git repos
+
+- Each tool lives in `state/tools/<name>/`, a git repository. `main` holds the accepted versions, one commit
+  each, tagged `v1`, `v2`, ...
+- A task never writes to `main`. What it builds or repairs is staged on `task/<run>`; tasks running in
+  parallel each get their own branch.
+- `mini tools staged` lists what waits for you, `mini tools review NAME` shows the diff, the tests and which
+  model built it, `mini tools accept NAME` makes it the next version, `mini tools discard NAME` drops it. The
+  Registry tab in the UI has the same actions.
+- If another version was accepted after a task staged its own, accepting asks first: tools are generated
+  whole, so it replaces that version instead of merging the two (`--force`, or press Accept twice).
+- `[tools] auto_accept = true` skips the review step. `mini tools rollback NAME V` changes the active version.
 
 ## Model tiers
 

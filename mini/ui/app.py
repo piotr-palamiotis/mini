@@ -110,6 +110,8 @@ class MiniApp(App):
                     with Horizontal(id="reg-buttons"):
                         yield Input(placeholder="version", id="reg-version", restrict=r"[0-9]*", max_length=4)
                         yield Button("Roll back to version", id="rollback", variant="warning")
+                        yield Button("Accept staged", id="accept", variant="success")
+                        yield Button("Discard staged", id="discard", variant="error")
                     yield RichLog(id="reg-detail", wrap=True, min_width=1)
                 with TabPane("Config", id="tab-cfg"):
                     yield TextArea(config_mod.dumps(self.cfg), language="toml", id="cfg-text")
@@ -271,7 +273,12 @@ class MiniApp(App):
             t.add_row(m["name"], f"v{m['version']}", ",".join(map(str, reg.versions(m["name"]))), by,
                       ("pass: " if tr.get("passed") else "FAIL: ") + tr.get("summary", "")[:30],
                       json.dumps(m.get("attempts_used")), key=m["name"])
-        if not reg.names():
+        for st in reg.staged():
+            cb, tr = st["created_by"] or {}, st["test_results"] or {}
+            t.add_row(st["name"], "[staged]", f"run {st['run_id']}" + (" (outdated)" if st["outdated"] else ""),
+                      f"{cb.get('provider')}/{cb.get('model')}", ("pass: " if tr.get("passed") else "FAIL: ") +
+                      tr.get("summary", "")[:30], "", key=f"staged:{st['name']}:{st['run_id']}")
+        if not reg.names() and not reg.staged():
             self.query_one("#reg-detail", RichLog).clear().write("(registry is empty)")
 
     @on(DataTable.RowHighlighted, "#reg-table")
@@ -279,10 +286,17 @@ class MiniApp(App):
         if ev.row_key is None:
             return
         reg = Registry(self.cfg.abspath("state"))
-        m = reg.get(ev.row_key.value)
-        self.selected_tool = ev.row_key.value
         d = self.query_one("#reg-detail", RichLog)
         d.clear()
+        key = ev.row_key.value
+        if key.startswith("staged:"):
+            _, name, run = key.split(":", 2)
+            self.selected_tool, self.selected_run = name, run
+            d.write(f"{name} staged by run {run}. Accept makes it the next version; discard deletes it.\n")
+            d.write(reg.diff(name, run))
+            return
+        self.selected_tool, self.selected_run = key, None
+        m = reg.get(key)
         d.write(json.dumps({k: v for k, v in m.items() if not k.startswith("_")}, indent=1))
 
     @on(Button.Pressed, "#rollback")
@@ -297,6 +311,36 @@ class MiniApp(App):
             self.chat(f"[b]rollback:[/b] {name} active version is now v{v}")
         except ValueError as e:
             self.chat(f"[red]{escape(str(e))}[/red]")
+        self.refresh_registry()
+
+    @on(Button.Pressed, "#accept")
+    def accept_staged(self):
+        self._staged_action("accept")
+
+    @on(Button.Pressed, "#discard")
+    def discard_staged(self):
+        self._staged_action("discard")
+
+    def _staged_action(self, action):
+        from ..harness.registry import RegistryError
+        name, run = getattr(self, "selected_tool", None), getattr(self, "selected_run", None)
+        if not run:
+            self.chat("[yellow]select a [staged] row first[/yellow]")
+            return
+        reg = Registry(self.cfg.abspath("state"))
+        try:
+            if action == "accept":
+                outdated = any(s["outdated"] for s in reg.staged() if s["name"] == name and s["run_id"] == run)
+                v = reg.accept(name, run, force=outdated and getattr(self, "confirm_replace", None) == (name, run))
+                self.chat(f"[b green]accepted[/b green] {name} as v{v}")
+            else:
+                reg.discard(name, run)
+                self.chat(f"discarded the staged {name} from run {run}")
+            self.confirm_replace = None
+        except RegistryError as e:
+            self.confirm_replace = (name, run)           # a second press replaces the newer version
+            self.chat(f"[yellow]{escape(str(e))}[/yellow] Press Accept again to replace it.")
+        self.selected_run = None
         self.refresh_registry()
 
     # ------------------------------------------------------------ config screen

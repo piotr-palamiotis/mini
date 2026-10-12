@@ -90,6 +90,10 @@ enabled = true
 extra_attempts = 3
 max_rounds = 1
 
+[tools]
+auto_accept = false      # tools built in a task stay staged until you accept them (mini tools accept NAME)
+bin_dir = "~/.local/bin" # accepted tools get a command here
+
 [lessons]
 enabled = true
 max_in_prompt = 3

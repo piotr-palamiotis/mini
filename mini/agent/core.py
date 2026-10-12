@@ -73,7 +73,7 @@ class Agent:
         self.tier_tokens, self.tiers_used, self.escalated_from = {}, [], None
         self._use_tier(self.start_tier)
         self.local_t0 = time.time()
-        self.registry = Registry(cfg.abspath("state"))
+        self.registry = Registry(cfg.abspath("state"), run_id=self.log.run_id, auto_accept=cfg["tools"]["auto_accept"])
         self.lessons = LessonStore(cfg.abspath("state"))
         self.sandbox = Sandbox(cfg, self.log)
         self.gate = ApprovalGate(cfg, self.log, approval_handler)

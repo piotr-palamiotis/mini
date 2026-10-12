@@ -2,7 +2,8 @@
 
   python -m mini ui                                   Textual UI (default)
   python -m mini run "task" [--attach FILE] [--auto] [--no-confirm] [--model local|free|paid] [--label L]
-  python -m mini registry list|show NAME [VERSION]|rollback NAME VERSION|wipe
+  python -m mini tools list|staged|show NAME [VERSION]|review NAME|accept NAME|discard NAME|rollback NAME VERSION|wipe
+                     review/accept/discard take --run RUN when more than one task staged the tool
   python -m mini setup                                build the sandbox base image if missing
 
 --auto is for unattended test runs: every approval request is decided by the auto policy from config
@@ -31,10 +32,12 @@ def main(argv=None):
     r.add_argument("--no-escalate", action="store_true", help="stay on the start tier")
     r.add_argument("--label", default="")
     r.add_argument("--quiet", action="store_true")
-    g = sub.add_parser("registry")
-    g.add_argument("action", choices=["list", "show", "rollback", "wipe"])
+    g = sub.add_parser("tools", aliases=["registry"])
+    g.add_argument("action", choices=["list", "staged", "show", "review", "accept", "discard", "rollback", "wipe"])
     g.add_argument("name", nargs="?")
     g.add_argument("version", nargs="?", type=int)
+    g.add_argument("--run", help="the run that staged the tool (when there is more than one)")
+    g.add_argument("--force", action="store_true", help="accept even if a newer version was accepted meanwhile")
     sub.add_parser("setup")
     le = sub.add_parser("lessons")
     le.add_argument("action", choices=["list", "wipe"])
@@ -59,23 +62,8 @@ def main(argv=None):
         print(json.dumps({k: s[k] for k in ("run_id", "status", "answer", "error", "secs", "created", "escalations",
                                             "tiers", "watchdogs", "outputs")}, indent=1))
         return 0 if s["status"] == "success" else 1
-    if a.cmd == "registry":
-        reg = Registry(cfg.abspath("state"))
-        if a.action == "list":
-            for m in reg.list_tools():
-                print(f"{m['name']:<28} v{m['version']} of {reg.versions(m['name'])}  "
-                      f"{m['created_by']['provider']}/{m['created_by']['model']}  {m['description'][:70]}")
-            if not reg.names():
-                print("(registry is empty)")
-        elif a.action == "show":
-            print(json.dumps(reg.get(a.name, a.version), indent=1))
-        elif a.action == "rollback":
-            reg.set_active(a.name, a.version)
-            print(f"{a.name}: active version is now {a.version}")
-        elif a.action == "wipe":
-            reg.wipe()
-            print("registry wiped")
-        return 0
+    if a.cmd in ("tools", "registry"):
+        return tools_cmd(cfg, a)
     if a.cmd == "lessons":
         from .harness.lessons import LessonStore, format_lessons
         store = LessonStore(cfg.abspath("state"))
@@ -93,6 +81,66 @@ def main(argv=None):
         return 0
     from .ui.app import run_ui
     return run_ui(cfg)
+
+
+def tools_cmd(cfg, a):
+    from .harness.registry import RegistryError
+    reg = Registry(cfg.abspath("state"))
+    need = {"show", "review", "accept", "discard", "rollback"}
+    if a.action in need and not a.name:
+        print(f"usage: mini tools {a.action} NAME", file=sys.stderr)
+        return 2
+    staged = reg.staged()
+
+    def pick_run():
+        runs = [s["run_id"] for s in staged if s["name"] == a.name]
+        if a.run:
+            return a.run
+        if len(runs) == 1:
+            return runs[0]
+        raise RegistryError(f"{a.name}: nothing staged" if not runs else
+                            f"{a.name} is staged by several runs, pick one with --run: {', '.join(runs)}")
+    try:
+        if a.action == "list":
+            for m in reg.list_tools():
+                print(f"{m['name']:<28} v{m['version']} of {reg.versions(m['name'])}  "
+                      f"{m['created_by']['provider']}/{m['created_by']['model']}  {m['description'][:70]}")
+            if not reg.names():
+                print("(no accepted tools)")
+            if staged:
+                print(f"\n{len(staged)} staged, waiting for review: mini tools staged")
+        elif a.action == "staged":
+            for s in staged:
+                cb, tr = s["created_by"] or {}, s["test_results"] or {}
+                print(f"{s['name']:<28} run {s['run_id']}  {cb.get('provider')}/{cb.get('model')}  "
+                      f"tests: {tr.get('summary', '?')}" + ("  [a newer version was accepted since]" if s["outdated"] else ""))
+            if not staged:
+                print("(nothing staged)")
+        elif a.action == "show":
+            print(json.dumps({k: v for k, v in (reg.get(a.name, a.version) or {}).items() if not k.startswith("_")}, indent=1))
+        elif a.action == "review":
+            run = pick_run()
+            s = next(x for x in staged if x["name"] == a.name and x["run_id"] == run)
+            print(f"{a.name} staged by run {run}: {s['description']}\nbuilt by: {json.dumps(s['created_by'])}\n"
+                  f"tests: {(s['test_results'] or {}).get('summary')}\n")
+            print(reg.diff(a.name, run))
+        elif a.action == "accept":
+            v = reg.accept(a.name, pick_run(), force=a.force)
+            print(f"{a.name}: accepted as v{v}")
+        elif a.action == "discard":
+            run = pick_run()
+            reg.discard(a.name, run)
+            print(f"{a.name}: staged version from run {run} discarded")
+        elif a.action == "rollback":
+            reg.set_active(a.name, a.version)
+            print(f"{a.name}: active version is now {a.version}")
+        elif a.action == "wipe":
+            reg.wipe()
+            print("registry wiped")
+    except (RegistryError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

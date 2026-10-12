@@ -5,6 +5,7 @@ import os
 import unittest
 
 from mini.agent.core import Agent
+from mini.harness.registry import Registry
 from tests.helpers import call, fake_backend, fence, step, temp_config
 
 TOOL_BAD = '''
@@ -114,6 +115,21 @@ class PipelineTest(unittest.TestCase):
         reg.set_active("count_text_lines", 1)
         self.assertEqual(reg.get("count_text_lines")["version"], 1)
         self.assertEqual(reg.versions("count_text_lines"), [1, 2])
+
+    def test_staged_tool_is_used_by_its_own_task_only(self):
+        cfg = temp_config(**{"tools.auto_accept": False})
+        agent = Agent(cfg, backend=fake_backend(script()), label="staged")
+        src = os.path.join(agent.run_dir, "a.txt")
+        open(src, "w").write("x\ny\n")
+        s = agent.run_task("How many lines does a.txt have?", [src])
+        self.assertEqual(s["status"], "success", s["error"])
+        inv = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
+        self.assertIn({"lines": 2}, [e.get("output") for e in inv if e["kind"] == "invoke"])
+        other = Registry(cfg.abspath("state"))
+        self.assertEqual(other.names(), [])
+        self.assertEqual([x["run_id"] for x in other.staged()], [s["run_id"]])
+        self.assertEqual(other.accept("count_text_lines", s["run_id"]), 1)
+        self.assertEqual(Registry(cfg.abspath("state")).names(), ["count_text_lines"])
 
 
 if __name__ == "__main__":
