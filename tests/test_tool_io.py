@@ -167,6 +167,17 @@ class ToolIOTest(unittest.TestCase):
         self.assertEqual(open(os.path.join(self.cwd, "z.txt")).read(), "b\n-- f")
 
 
+class AnswerStagingTest(unittest.TestCase):
+    def test_a_host_file_in_a_text_answer_is_copied_in(self):
+        from mini.harness.ask import GateAsker
+        work, src = tempfile.mkdtemp(), os.path.join(tempfile.mkdtemp(), "data.txt")
+        open(src, "w").write("x")
+        gate = type("G", (), {"request": lambda self, *a, **k: Decision(True, "answer", src, "user")})()
+        r = GateAsker(gate, None, work, "t")({"op": "ask", "key": "p", "prompt": "Path", "kind": "text"})
+        self.assertEqual(r, {"answer": "in/data.txt"})
+        self.assertTrue(os.path.isfile(os.path.join(work, "in", "data.txt")))
+
+
 class InTaskTest(unittest.TestCase):
     def script(self):
         return [step(call("understand", goal="write a note", inputs=[], outputs=["file"], plan="use note_writer")),

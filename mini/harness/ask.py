@@ -1,7 +1,8 @@
 """Who answers a tool's questions. Each asker takes the question message from mini_io
 ({"op": "ask", key, prompt, kind, choices, default}) and returns {"answer": value} or {"error": why}.
 "say" messages are shown and get no reply. File answers are host paths: they are copied into the run's work
-directory under in/ and the tool gets the relative path.
+directory under in/ and the tool gets the relative path. That holds for any answer naming an existing host file,
+whatever kind the tool asked for, the same as for values given as command-line arguments.
 """
 import getpass
 import os
@@ -81,7 +82,7 @@ class TerminalAsker:
                     print(f"  no such file: {a}", file=self.out)
                     continue
                 if a:
-                    return a
+                    return stage_file(self.work, a) or a      # a host file named in any answer is copied in
             print("  (answer needed; Ctrl-D cancels)", file=self.out)
 
 
@@ -125,4 +126,6 @@ class GateAsker:
         if kind == "file":
             staged = stage_file(self.work, a)
             return {"answer": staged} if staged else {"error": f"no such file: {a}"}
+        if os.path.isabs(os.path.expanduser(a)) and os.path.isfile(os.path.expanduser(a)):
+            return {"answer": stage_file(self.work, a)}        # a host file named in any answer is copied in
         return {"answer": a}
