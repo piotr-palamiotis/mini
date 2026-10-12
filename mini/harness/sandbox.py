@@ -152,6 +152,8 @@ class Sandbox:
 
     # ------------------------------------------------------------ network
     def _start_egress(self, targets, rid):
+        if self._cli(["network", "exists", self.cfg["service_network"]]).returncode:
+            self._cli(["network", "create", self.cfg["service_network"]])
         net = f"mini-sbx-{rid}"
         r = self._cli(["network", "create", "--internal", net])
         if r.returncode:

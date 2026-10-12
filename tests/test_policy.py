@@ -1,6 +1,8 @@
 """Sandbox policy: argv allowlist, undeclared network and paths are unreachable, no host secrets.
-Needs podman, mini-sandbox:base, and demo/services.sh up (Mailpit on mini-net)."""
+Needs podman and mini-sandbox:base. The test starts its own service container (svc, ports 1025 and 8025) on the
+service network, standing in for a local service the user runs."""
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -15,8 +17,8 @@ def tcp(h, p):
     except Exception as e:
         return "BLOCKED"
 res = {}
-res["mailpit:1025"] = tcp("mailpit", 1025)
-res["mailpit:8025"] = tcp("mailpit", 8025)
+res["svc:1025"] = tcp("svc", 1025)
+res["svc:8025"] = tcp("svc", 8025)
 res["example.com:443"] = tcp("example.com", 443)
 res["1.1.1.1:53"] = tcp("1.1.1.1", 53)
 res["10.0.2.2:11434"] = tcp("10.0.2.2", 11434)
@@ -50,7 +52,23 @@ def run_probe(sb, network):
 class PolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.sb = Sandbox(temp_config())
+        cfg = temp_config()
+        cls.sb = Sandbox(cfg)
+        net = cfg["sandbox"]["service_network"]
+        if subprocess.run(["podman", "network", "exists", net]).returncode:
+            subprocess.run(["podman", "network", "create", net], check=True, capture_output=True)
+        subprocess.run(["podman", "rm", "-f", "svc"], capture_output=True)
+        subprocess.run(["podman", "run", "-d", "--rm", "--name", "svc", "--network", net, cfg["sandbox"]["image"], "python", "-c",
+                        "import socket,threading,time\n"
+                        "def srv(p):\n"
+                        "    s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('',p)); s.listen()\n"
+                        "    while True: s.accept()[0].close()\n"
+                        "for p in (1025,8025): threading.Thread(target=srv,args=(p,),daemon=True).start()\n"
+                        "time.sleep(3600)"], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.run(["podman", "rm", "-f", "-t", "0", "svc"], capture_output=True)
 
     def test_argv_allowlist(self):
         for bad in ("ls -R", ["bash", "-c", "id"], ["curl", "x"], ["sh"], [], ["pip", "install", "x"]):
@@ -66,18 +84,18 @@ class PolicyTest(unittest.TestCase):
 
     def test_no_network_by_default(self):
         res, r = run_probe(self.sb, [])
-        for k in ("mailpit:1025", "mailpit:8025", "example.com:443", "1.1.1.1:53", "10.0.2.2:11434",
+        for k in ("svc:1025", "svc:8025", "example.com:443", "1.1.1.1:53", "10.0.2.2:11434",
                   "host.containers.internal:11434"):
             self.assertEqual(res[k], "BLOCKED", k)
         self.assertEqual(r["egress"], [])
         self._no_host_access(res)
 
     def test_only_declared_targets(self):
-        res, r = run_probe(self.sb, ["mailpit:1025"])
-        self.assertEqual(res["mailpit:1025"], "OPEN")
-        for k in ("mailpit:8025", "example.com:443", "1.1.1.1:53", "10.0.2.2:11434", "host.containers.internal:11434"):
+        res, r = run_probe(self.sb, ["svc:1025"])
+        self.assertEqual(res["svc:1025"], "OPEN")
+        for k in ("svc:8025", "example.com:443", "1.1.1.1:53", "10.0.2.2:11434", "host.containers.internal:11434"):
             self.assertEqual(res[k], "BLOCKED", k)
-        self.assertTrue(any(e["event"] == "allow" and e["dest"] == "mailpit" for e in r["egress"]))
+        self.assertTrue(any(e["event"] == "allow" and e["dest"] == "svc" for e in r["egress"]))
         self._no_host_access(res)
 
     def _no_host_access(self, res):

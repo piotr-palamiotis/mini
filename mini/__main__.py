@@ -37,11 +37,7 @@ def main(argv=None):
     sub.add_parser("setup")
     le = sub.add_parser("lessons")
     le.add_argument("action", choices=["list", "wipe"])
-    u = sub.add_parser("ui")
-    u.add_argument("--task", help="demo: type this task in automatically")
-    u.add_argument("--attach", action="append", default=[])
-    u.add_argument("--exit-when-done", action="store_true")
-    u.add_argument("--exit-delay", type=float, default=6, help="seconds to keep the final screen before exiting")
+    sub.add_parser("ui")
     a = ap.parse_args(argv)
     cfg = config_mod.load(a.config)
 
@@ -95,8 +91,6 @@ def main(argv=None):
         print("sandbox image ready:", cfg["sandbox"]["image"])
         return 0
     from .ui.app import run_ui
-    if a.cmd == "ui":
-        return run_ui(cfg, a.task, a.attach, a.exit_when_done, a.exit_delay)
     return run_ui(cfg)
 
 

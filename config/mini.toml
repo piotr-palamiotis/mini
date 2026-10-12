@@ -80,9 +80,7 @@ max_in_prompt = 3
 [environment]
 # Facts about the user's environment, shown to the agent as given (like a user telling an assistant about
 # their setup). Set by the user, never by the agent.
-facts = [
-  "Outgoing email: SMTP server at host mailpit, port 1025, plain SMTP without TLS and without authentication. Send from mini@example.local.",
-]
+facts = []
 
 [paths]
 state = "state"

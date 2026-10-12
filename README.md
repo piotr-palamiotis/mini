@@ -1,16 +1,16 @@
 # mini
 
-An agent that builds its own tools, for the Frankenstein track of the Dusk Till Dawn hackathon.
+A personal agent that builds its own tools. Started at the Dusk Till Dawn hackathon (Frankenstein track):
+[demo video](https://youtu.be/CYJnR0hDpY8).
 
 by Peter and Lukas
 
-You give mini-agent a task in plain language. It works out what the task needs and searches its tool registry.
+You give mini a task in plain language. It works out what the task needs and searches its tool registry.
 When a capability is missing, it writes a spec, the code and the tests, runs the tests in a sandbox,
 asks you to approve the install, and then finishes the task with the new tool. The next session finds the
 tool in the registry and reuses it.
 
-Inference is local by default: gemma4:12b (Q4_K_M) on Ollama, thinking on, 64k context, fully in VRAM on an
-RX 6700 XT. A cloud model is only a capped fallback, and only after you approve it.
+Inference is local first. A cloud model is only used after the local model runs out of time or attempts.
 
 mini has two parts:
 
@@ -19,17 +19,11 @@ mini has two parts:
   and the run log.
 - **mini-agent** (`mini/agent/`) runs the loop: parse → confirm → gap detection → tool creation → execution.
 
-Demo video: [youtu.be/CYJnR0hDpY8](https://youtu.be/CYJnR0hDpY8)
-
-The test results are in [docs/test-report.md](docs/test-report.md). The demo shot list is in
-[docs/shot-list.md](docs/shot-list.md).
-
 ## Quick start
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is standard library only
 .venv/bin/python -m mini setup                            # build the sandbox base image (rootless Podman)
-demo/services.sh up                                       # Mailpit: SMTP mailpit:1025, inbox http://127.0.0.1:8025
 .venv/bin/python -m mini                                  # Textual UI
 .venv/bin/python -m mini run "task" --attach file.pdf     # headless, approvals in the terminal
 .venv/bin/python -m mini registry list|show|rollback|wipe
@@ -65,20 +59,6 @@ config screen for the same file.
    must have written one. If a tool misbehaves on the real input, `report_tool_bug` sends it back into the
    creation loop as a new version (at most 2 repairs per task). `need_tool` builds a capability discovered
    during execution.
-
-## Hackathon rules: how each is met
-
-| Rule | How |
-|---|---|
-| 1. No pre-written capabilities | The registry starts empty. No tool, template, few-shot example or demo hint exists in the code. `tests/test_prompts_generic.py` fails if a demo word (email, smtp, weather, pdf, ocr, markdown, …) appears anywhere in `mini/agent`, `mini/harness` or `sandbox`. `.gitignore` excludes `state/` and `runs/`, and the same test checks that nothing there is committed. |
-| 2. The gap comes from the task | Gap detection only sees the task and the registry. There is no "build tool X" anywhere. |
-| 3. Sandbox only | All generated code (tests and real runs) runs in rootless Podman, never on the host (see Sandbox). |
-| 4. No install without passing tests | Install is only reachable from a passing test run, and the test output is in the log. |
-| 5. Caps in code, set in config | `[caps]`, `[watchdogs]` and `[fallback]` in `config/mini.toml`, enforced in `watchdogs.py`, `turns.py`, `fallback.py` and `hwmon.py`. |
-| 6. Authority cannot grow by itself | Network targets and packages live in the manifest. Any increase opens the approval gate, and the sandbox enforces exactly the approved set. |
-| 7. No toy capabilities | The demo tools send mail over SMTP, fetch a live forecast, and convert PDFs with OCR. |
-| 8. Reuse listed | See "Reused from the earlier mini" below. |
-| 9. No provider agent features | The fallback runs as `claude -p --tools ""`, with no MCP, no settings and no slash commands. It is text in, text out. `tests/test_fallback.py` includes a live probe showing it cannot use tools. |
 
 ## Watchdogs (all thresholds in `[watchdogs]` / `[caps]`)
 
@@ -133,37 +113,3 @@ budget stops at 10 and that restarts do not reset it.
   the cap cannot be overshot.
 - Tools built by the fallback carry `created_by.fallback = true` and show as `[FALLBACK]` in the registry
   browser and the log.
-
-## Reused from the earlier mini (rule 8)
-
-Harness boilerplate only. No capability was reused.
-
-- `mini/harness/backends.py`: copied from `offline-ai/mini/backends.py` (Ollama `/api/chat` streaming,
-  OpenAI-compatible streaming, fake backend). Changes: reply caps come from config, a local `Endpoint` class,
-  and `load()` for warm-up.
-- `mini/agent/codeblocks.py`: the `ELISION` regex (detects "..." and "lines omitted") comes from
-  `offline-ai/mini/engine.py`.
-- Design ideas, not code: `replace` / `replace_lines` edit tools, file content inside tool results, and a
-  fail-streak restart (all from `engine.py`). The shell-string command policy (`policy.py`) was **not**
-  reused. Its quote-splitting bug caused 7 of 9 command denials in earlier runs. Commands are now argv lists.
-
-## What is real
-
-(Filled in from the test campaign: see docs/test-report.md.)
-
-## What is simulated
-
-- **Mail.** Mailpit is a local SMTP server with a web inbox. No mail leaves the machine. The SMTP host comes
-  from a user-set environment fact in `config/mini.toml` (`[environment] facts`), the way a user would tell
-  an assistant where their mail server is.
-- **The demo PDF** is generated (`demo/make_pdf.py`, seeded and byte-for-byte reproducible). Pages 2 and 4 are
-  rasterized "scans" with rotation, blur and noise. The ground truth (`demo/ground_truth.json`) is used only
-  by the graders and is never visible to the agent.
-- **"API returning an error"** in failure injection is a connection reset at the egress forwarder. An HTTP
-  5xx response body is not simulated.
-- **Approvals during the test campaign** were decided by a logged auto-policy (`--auto`), not a person. The
-  dialogs themselves are tested in `tests/test_ui.py`.
-
-## What is missing
-
-(Filled in after the campaign.)

@@ -1,5 +1,5 @@
-"""Agent prompts. All generic: nothing here may name a demo task, tool, API, file format or library.
-(Hackathon rule 1. tests/test_prompts_generic.py checks a deny-list of demo words against this file.)
+"""Agent prompts. All generic: nothing here may name a task, tool, API, file format or library.
+Nothing about a capability is hardcoded; tests/test_prompts_generic.py checks a deny-list of domain words.
 
 The prompt states the rules; the harness enforces them (watchdogs.py). Plain-text warnings alone do not work.
 """
