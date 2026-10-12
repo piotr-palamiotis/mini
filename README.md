@@ -30,10 +30,17 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 `mini setup` goes through each piece, says what is missing, and asks before it changes anything:
 
 1. **Sandbox:** podman (prints the `sudo apt` command if missing) and the sandbox image (builds it).
-2. **Local model:** builds llama.cpp with Vulkan if needed (pinned release; prints the `sudo apt` line for
-   missing build tools), lets you pick a model from Ollama's store or any GGUF file, picks the GPU and the
-   context size, and runs `llama-server` as a systemd user service started at boot. With
-   `[local] backend = "ollama"` it checks Ollama instead.
+2. **Local models:** a checklist of local backends: llama.cpp (llama-server with Vulkan), Ollama, and any
+   other OpenAI-compatible server (LM Studio, vLLM, ...). Tick several and pick which comes first: each task
+   runs on the first one that answers with its model, so the others are a fallback (`[local] use` and
+   `[backends.*]` in the config). For llama.cpp, setup builds exactly the release mini is tested with,
+   **`b11567` (commit `972b5fc`)**, and checks that the installed `llama-server` is that build and that it
+   can load the model you picked (the GGUF's architecture is read from the file and looked up in the built
+   library). Tested with gemma4 12B and qwen3.5 9B, Vulkan on an RX 6700 XT, tool calls via `--jinja`,
+   thinking via `--reasoning-format auto`, 64k context with a q8_0 KV cache. The pin lives in
+   `mini/setup.py` (`LLAMA_TAG`, `LLAMA_COMMIT`). Models come from Ollama's store (no second copy on disk)
+   or any GGUF file; setup also picks the GPU and the context size and runs `llama-server` as a systemd
+   user service started at boot. Prints the `sudo apt` line for missing build tools.
 3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
 4. **Cloud tiers (optional):** installs OmniRoute with npm if missing, runs it as a user service bound to
    127.0.0.1 with an API key required, walks you through the dashboard (providers, an API key, the combos

@@ -259,6 +259,26 @@ class FakeBackend(Backend):
 BACKENDS = {"ollama": OllamaBackend, "openai": OpenAIBackend, "fake": FakeBackend}
 
 
+def has_model(entry, timeout=3):
+    """Does the server in entry ({backend, url, model, api_key_env}) answer and list entry's model?"""
+    import urllib.request
+    from .config import secret
+    try:
+        if entry["backend"] == "ollama":
+            with urllib.request.urlopen(entry["url"].rstrip("/") + "/api/tags", timeout=timeout) as r:
+                names = [m.get("name") for m in json.loads(r.read()).get("models", [])]
+        else:
+            key = secret(entry.get("api_key_env", ""))
+            req = urllib.request.Request(entry["url"].rstrip("/") + "/models",
+                                         headers={"Authorization": "Bearer " + key} if key else {})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = json.loads(r.read())
+            names = [m.get("id") or m.get("name") for m in body.get("data") or body.get("models") or []]
+        return entry["model"] in names
+    except (OSError, ValueError):
+        return False
+
+
 def make_backend(endpoint):
     if endpoint.type not in BACKENDS:
         raise ValueError(f"unknown endpoint type {endpoint.type!r}; known: {', '.join(BACKENDS)}")

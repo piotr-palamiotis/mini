@@ -19,7 +19,11 @@ DEFAULTS = {
         "gpu_env": "",                       # e.g. "GGML_VK_VISIBLE_DEVICES=0"; applied to launch_cmd
         "launch_cmd": [],                    # optional argv to start a local server (llama-server ...)
         "temperature": 0.6,
+        "use": [],                           # local backends in order of preference, from [backends.<name>];
+                                             # a task runs on the first that answers and has its model.
+                                             # Empty: the backend/url/model above.
     },
+    "backends": {},                          # name -> {backend, url, model, num_ctx?}; written by mini setup
     "thinking": {                            # thinking per step
         "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,
     },
@@ -122,6 +126,14 @@ def _merge(base, over):
 
 TIERS = ("local", "free", "paid")
 ENV_FILE = os.path.expanduser("~/.config/mini/env")
+
+
+def local_candidates(cfg):
+    """[(name, local config)] in order of preference: [local] use, each merged over [local]."""
+    names = [n for n in cfg["local"].get("use") or [] if n in cfg.get("backends", {})]
+    if not names:
+        return [("local", dict(cfg["local"]))]
+    return [(n, {**cfg["local"], **cfg["backends"][n]}) for n in names]
 
 
 def secret(name):

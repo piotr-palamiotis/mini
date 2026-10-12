@@ -35,9 +35,13 @@ class Gateway(BaseHTTPRequestHandler):
 
 
 class ScriptUI:
-    def __init__(self, yes=(), text=(), secret=(), choice=()):
+    def __init__(self, yes=(), text=(), secret=(), choice=(), checklist=()):
         self._yes, self._text, self._secret, self._choice = list(yes), list(text), list(secret), list(choice)
+        self._checklist = list(checklist)
         self.said = []
+
+    def checklist(self, prompt, options, checked=()):
+        return self._checklist.pop(0) if self._checklist else list(checked)
 
     def say(self, t):
         self.said.append(t)
@@ -154,6 +158,62 @@ class SetupTest(unittest.TestCase):
         self.assertFalse(setup.needs_setup(self.cfg))
         self.assertEqual(json.load(open(setup.marker(self.cfg)))["open"], ["b", "c"])
         self.assertFalse(tomllib.load(open(self.cfg.path, "rb"))["free"]["enabled"], "no cloud: tiers turned off")
+
+    def test_gguf_header(self):
+        import struct
+        from mini.harness.gguf import architecture, metadata
+        p = os.path.join(self.tmp, "m.gguf")
+
+        def kv_str(k, v):
+            return struct.pack("<Q", len(k)) + k.encode() + struct.pack("<I", 8) + struct.pack("<Q", len(v)) + v.encode()
+        arr = struct.pack("<Q", 3) + b"a.b" + struct.pack("<I", 9) + struct.pack("<IQ", 4, 2) + struct.pack("<II", 1, 2)
+        with open(p, "wb") as f:
+            f.write(b"GGUF" + struct.pack("<IQQ", 3, 0, 3) + arr + kv_str("general.architecture", "testarch")
+                    + kv_str("general.name", "N"))
+        self.assertEqual(architecture(p), "testarch")
+        self.assertEqual(metadata(p, ("general.name",)), {"general.name": "N"})
+
+    def test_backend_checklist_and_order(self):
+        self.cfg["local"].update(backend="openai", url="http://127.0.0.1:8080/v1", model="m:1", use=[])
+        self.cfg["backends"] = {}
+        ui = ScriptUI(checklist=[[setup.BACKENDS["llamacpp"], setup.BACKENDS["ollama"]]], choice=[setup.BACKENDS["ollama"]])
+        setup.choose_backends(self.cfg, ui)
+        data = tomllib.load(open(self.cfg.path, "rb"))
+        self.assertEqual(data["local"]["use"], ["ollama", "llamacpp"])
+        self.assertEqual(data["backends"]["llamacpp"], {"backend": "openai", "url": "http://127.0.0.1:8080/v1",
+                                                         "model": "m:1", "gguf": "ollama:m:1"})
+        self.assertEqual(data["backends"]["ollama"]["url"], "http://127.0.0.1:11434")
+
+    def test_llama_version_and_architecture_checks(self):
+        entry = {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "m", "gguf": "/x.gguf"}
+        with mock.patch.object(setup, "llama_server_bin", return_value="/bin/llama-server"), \
+                mock.patch.object(setup, "llama_commit", return_value="0000000"), \
+                mock.patch.object(setup, "llama_supports", return_value=False), \
+                mock.patch("mini.harness.gguf.architecture", return_value="newarch"), \
+                mock.patch.object(setup, "unit_state", return_value=(False, False, False, False)):
+            cs = {c.key: c for c in setup.backend_checks(self.cfg, "llamacpp", entry)}
+        self.assertFalse(cs["llama_version"].ok)
+        self.assertIn("0000000", cs["llama_version"].detail)
+        self.assertIn(setup.LLAMA_TAG, cs["llama_version"].fix_text)
+        self.assertFalse(cs["llama_arch"].ok)
+        self.assertIn("newarch", cs["llama_arch"].detail)
+        with mock.patch.object(setup, "llama_server_bin", return_value=None):
+            cs = setup.backend_checks(self.cfg, "llamacpp", entry)
+        self.assertEqual([c.key for c in cs], ["llama_install"])
+
+    def test_task_falls_back_to_the_next_backend(self):
+        from mini.agent.core import Agent
+        os.environ["MINI_TEST_GW_KEY"] = KEY
+        self.cfg["local"]["use"] = ["llamacpp", "custom"]
+        self.cfg["backends"] = {"llamacpp": {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "x"},
+                                "custom": {"backend": "openai", "url": self.url, "model": "mini-free",
+                                           "api_key_env": "MINI_TEST_GW_KEY"}}
+        a = Agent(self.cfg, label="fallback")
+        self.assertEqual(a.local_backend, "custom")
+        self.assertEqual((a.model, a.cfg["local"]["url"]), ("mini-free", self.url))
+        self.assertEqual(self.cfg["local"]["use"], ["llamacpp", "custom"], "the shared config is not changed")
+        st = setup.tier_status(self.cfg)
+        self.assertEqual(st["local"], (True, "mini-free via custom (also: llamacpp); llamacpp is down"))
 
 
 if __name__ == "__main__":

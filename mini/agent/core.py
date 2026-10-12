@@ -7,6 +7,7 @@ Model tiers (config [local], [free], [paid], [routing]): a task starts on routin
 the local model runs out of time (routing.local_budget_s) or attempts, the task moves to free by itself and stays
 there. Paid is only used when the user picks it; it lasts for the task. The conversation carries over on a switch.
 """
+import copy
 import json
 import os
 import re
@@ -20,7 +21,8 @@ from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness import hwmon
 from ..harness.approvals import ApprovalGate
 from ..harness.ask import GateAsker
-from ..harness.backends import Endpoint, make_backend
+from ..harness.backends import Endpoint, has_model, make_backend
+from ..harness.config import local_candidates
 from ..harness.eventlog import RunLog
 from ..harness.lessons import LessonStore
 from ..harness.registry import Registry
@@ -73,6 +75,7 @@ class Agent:
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
             self.tier_backends["local"] = backend
+        self.local_backend = self._pick_local()
         self.start_tier = start_tier or cfg["routing"]["start"]
         self.tier_tokens, self.tiers_used, self.escalated_from = {}, [], None
         self._use_tier(self.start_tier)
@@ -94,6 +97,23 @@ class Agent:
         self.on_delta = lambda kind, text: self.log.emit("delta", stream=kind, text=text)
 
     # ------------------------------------------------------------ model tiers
+    def _pick_local(self):
+        """With several local backends ([local] use), the first that answers and has its model becomes [local]
+        for this task. Returns its name."""
+        cands = local_candidates(self.cfg)
+        if len(cands) == 1 or "local" in self.tier_backends:
+            return cands[0][0]
+        for name, entry in cands:
+            if has_model(entry):
+                break
+        else:
+            name, entry = cands[0]                    # none answers: keep the first, its error shows up in the log
+        self.cfg = copy.deepcopy(self.cfg)
+        self.cfg["local"] = entry
+        if name != cands[0][0]:
+            self.log.emit("info", text=f"local backend {cands[0][0]} is not available; using {name} ({entry['model']})")
+        return name
+
     def _backend_for(self, tier):
         if tier not in self.tier_backends:
             tc = self.cfg[tier]
@@ -184,7 +204,7 @@ class Agent:
         for a in attachments:
             shutil.copy(a, os.path.join(self.work, "in", os.path.basename(a)))
         self.log.emit("run_start", task=task, attachments=[os.path.basename(a) for a in attachments],
-                      model=self.model, tier=self.tier, backend=self.cfg[self.tier]["backend"],
+                      model=self.model, tier=self.tier, backend=self.cfg[self.tier]["backend"], local=self.local_backend,
                       caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
         tl = time.time()
         try:
