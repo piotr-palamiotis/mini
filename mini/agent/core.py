@@ -19,11 +19,13 @@ from .creator import Creator, ToolFailed, trim
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness import hwmon
 from ..harness.approvals import ApprovalGate
+from ..harness.ask import GateAsker
 from ..harness.backends import Endpoint, make_backend
 from ..harness.eventlog import RunLog
 from ..harness.lessons import LessonStore
 from ..harness.registry import Registry
 from ..harness.sandbox import PolicyError, Sandbox
+from ..harness.settings import MissingSetting, SettingsStore
 from ..harness.watchdogs import Watchdogs
 
 S = {"type": "string"}
@@ -54,8 +56,10 @@ def describe_tool(m, full=True):
                          + (f" ({v.get('description')})" if full and isinstance(v, dict) and v.get("description") else "")
                          for k, v in props.items()) or "-"
     src = m.get("created_by", {}).get("provider", "?")
+    sets = ", ".join(f"{d['key']} ({d.get('description', '')})" for d in m.get("settings") or [])
     return (f"- {m['name']} (v{m['version']}, built by {src}): {m['description']}\n"
-            f"    inputs: {fields(m.get('input_schema'))}\n    outputs: {fields(m.get('output_schema'))}")
+            f"    inputs: {fields(m.get('input_schema'))}\n    outputs: {fields(m.get('output_schema'))}"
+            + (f"\n    saved settings: {sets}" if sets else ""))
 
 
 class Agent:
@@ -74,6 +78,7 @@ class Agent:
         self._use_tier(self.start_tier)
         self.local_t0 = time.time()
         self.registry = Registry(cfg.abspath("state"), run_id=self.log.run_id, auto_accept=cfg["tools"]["auto_accept"])
+        self.settings = SettingsStore(cfg.abspath("state"))
         self.lessons = LessonStore(cfg.abspath("state"))
         self.sandbox = Sandbox(cfg, self.log)
         self.gate = ApprovalGate(cfg, self.log, approval_handler)
@@ -380,8 +385,17 @@ class Agent:
         req = [k for k in ((m.get("input_schema") or {}).get("required") or []) if k not in inputs]
         if req:
             return f"Missing required inputs for {name}: {', '.join(req)}.\n" + describe_tool(m)
-        self.log.emit("invoke", tool=name, version=m["version"], inputs=inputs)
-        out, res = self.sandbox.invoke_tool(m, m["_dir"], self.work, inputs)
+        asker = GateAsker(self.gate, self.log, self.work, name)
+        try:
+            settings = self.settings.resolve(m, asker)
+            network = self.settings.network(m, settings)
+        except MissingSetting as e:
+            return (f"{name} cannot run: {e}. Tell the user in your answer what to save "
+                    f"(mini settings, or run the tool once from the terminal).")
+        self.log.emit("invoke", tool=name, version=m["version"], inputs=inputs,
+                      settings=sorted(settings) or None, network=network or None)
+        out, res = self.sandbox.invoke_tool(m, m["_dir"], self.work, inputs, on_message=asker, settings=settings,
+                                            network=network)
         last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:],
                              "network": res.get("network_note") or None}
         self.log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])

@@ -47,15 +47,30 @@ Call `decide_coverage` with:
 - missing: one entry per missing capability. Describe a general, reusable capability (everything that varies
   between uses is an input), not a one-off for this exact task. Empty list if everything is covered."""
 
-CREATE_RULES = """You are building one new tool for the registry. The tool contract:
-- tool.py defines `def run(inputs: dict) -> dict`. Inputs follow the input schema. Return a dict that follows
-  the output schema. On failure raise an exception with a clear message (ValueError for bad input,
+CREATE_RULES = """You are building one new tool for the registry. The user also runs it from the terminal as a
+command: with all values as arguments in one line, or with none and the tool asks. The tool contract:
+- tool.py defines `def run(inputs: dict, io) -> dict`. Inputs follow the input schema. Return a dict that
+  follows the output schema. On failure raise an exception with a clear message (ValueError for bad input,
   RuntimeError for failures of external systems).
+- Get every value the user provides with `io.ask(key, prompt, kind, choices=None, default=None)`, where key
+  is a property of the input schema. It returns inputs[key] when the caller gave it, otherwise it asks the
+  user. kind: "text", "number", "confirm" (returns bool), "choice" (one of choices), "file" (a path in the
+  working directory), "secret". Ask in a sensible order; ask follow-up questions only when they apply.
+  Required input-schema fields are the ones the tool cannot do without.
+- Values that stay the same between uses (an account, a server, credentials, a default) are saved settings,
+  declared in the spec, never asked on every run and never hardcoded. `io.setting(key)` returns the saved
+  value (a dict with the fields of its schema). The harness asks the user for a missing setting before the
+  tool starts and saves it; reuse an existing setting key when one fits.
+- `io.say(text)` shows a line to the user while the tool works. Do not use print() or input().
+- Before an action with an effect outside the working directory (sending, deleting, changing something),
+  ask for confirmation with io.ask(..., kind="confirm") unless the caller already passed it.
 - The working directory is a scratch directory. File paths in inputs and outputs are relative to it.
   Write output files under out/ and return their relative paths.
 - Use the Python standard library unless the spec declares packages. System packages (apt) and Python packages
   (pip) must be listed in the spec; the user approves them and the harness installs them in the sandbox.
-- Network access works only to the hosts declared in the spec as "host:port". Everything else is blocked.
+- Network access works only to the hosts declared in the spec as "host:port", or "setting:<key>" when the
+  host and port come from a saved setting (its schema then has the fields host and port). Everything else
+  is blocked.
   Prefer free public services that need no API key. Never put credentials in code.
 - Return exactly what was asked for. If the requested item is not available, raise an error that says so;
   never substitute other data silently.
@@ -63,7 +78,10 @@ CREATE_RULES = """You are building one new tool for the registry. The tool contr
   that produced nothing is visible instead of silently missing.
 - Keep the tool general: everything that varies between uses is an input. Do not hardcode values from the
   current task except as documented defaults.
-- test_tool.py uses pytest and `from tool import run`. Write at least one test per edge case in the spec.
+- test_tool.py uses pytest, `from tool import run` and `from mini_io import ScriptedIO, MissingInput`.
+  ScriptedIO(answers={key: value}, settings={key: value}, inputs={...}) answers questions by key and records
+  them in .asked; a missing answer raises MissingInput. Call run(inputs, io) with it. Write at least one
+  test per edge case in the spec, including the questions asked when inputs are missing.
 - Tests build their own inputs with known content (deterministic, fixed seeds) under pytest's tmp_path, and
   assert against that known content: exact values, or a similarity threshold where processing is lossy.
 - Tests must not cause real side effects that cannot be undone (sending messages, changing remote systems):
@@ -82,9 +100,16 @@ Context (the user's task that needs it): {task}
 
 Names already used in the registry: {names}
 
-Call `write_spec` with: name (snake_case), description (what it does, for later search), input_schema and
-output_schema (JSON Schema objects with properties and descriptions), permissions (network: list of
-"host:port"; packages: {{"apt": [...], "pip": [...]}}), edge_cases (list of short strings)."""
+Saved settings that already exist (reuse a key when it fits; never invent values): {settings}
+
+First work out how the tool should work for the user, then call `write_spec` with: name (snake_case),
+description (what it does, for later search), input_schema and output_schema (JSON Schema objects with
+properties and descriptions; every value the tool may ask for is an input property), settings (list of
+{{key, description, schema, secret}} for values saved once: schema is a JSON Schema object, secret lists its
+secret fields; empty list if none), interaction (the steps of the tool as the user experiences them, in
+order: which settings it needs and what happens when one is missing, which questions it asks and when,
+confirmations, the action, the result), permissions (network: list of "host:port" or "setting:<key>";
+packages: {{"apt": [...], "pip": [...]}}), edge_cases (list of short strings). The user reviews this plan."""
 
 CODE_FILE = """{intro}Write {path} now: {what}
 Reply with only the complete file as one fenced code block, no tool call:
@@ -93,8 +118,9 @@ Reply with only the complete file as one fenced code block, no tool call:
 <complete file>
 ```"""
 
-WHAT_TOOL = "the tool, with `def run(inputs: dict) -> dict`."
-WHAT_TESTS = "pytest tests with `from tool import run`, at least one test per edge case: {edge_cases}"
+WHAT_TOOL = "the tool, with `def run(inputs: dict, io) -> dict`, following the interaction steps in the spec."
+WHAT_TESTS = ("pytest tests with `from tool import run` and `from mini_io import ScriptedIO, MissingInput`, at least "
+              "one test per edge case: {edge_cases}")
 
 REWRITE = """Send the complete new {path} now as one fenced code block, no tool call:
 
@@ -155,7 +181,9 @@ Tools you can invoke (inputs must follow the input schema):
 Files in the working directory:
 {files}
 
-Complete the task now. Call `invoke_tool` to run a tool. Tool outputs come back as JSON. Use `read_file` and
+Complete the task now. Call `invoke_tool` to run a tool. Pass every input you already know from the task;
+the tool asks the user only for what is missing, and saved settings are filled in by the harness. Tool outputs
+come back as JSON. Use `read_file` and
 `write_file` for files in the working directory (write_file takes the content as a fenced block in the same
 reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that
 no tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked

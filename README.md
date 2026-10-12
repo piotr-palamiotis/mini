@@ -30,7 +30,9 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 .venv/bin/python -m mini setup                            # build the sandbox base image (rootless Podman)
 .venv/bin/python -m mini                                  # Textual UI
 .venv/bin/python -m mini run "task" --attach file.pdf     # headless, approvals in the terminal
-.venv/bin/python -m mini tools list|staged|review|accept|discard|show|rollback|wipe
+.venv/bin/python -m mini tools list|staged|review|accept|discard|show|rollback|shims|wipe
+.venv/bin/python -m mini tool NAME [--field VALUE ...]   # run a tool; it asks for what you leave out
+.venv/bin/python -m mini settings list|show|set|delete KEY
 ```
 
 Configuration lives in `config/mini.toml` (every key is documented in `mini/harness/config.py`). The UI has a
@@ -115,6 +117,26 @@ budget stops at 10 and that restarts do not reset it.
 - If another version was accepted after a task staged its own, accepting asks first: tools are generated
   whole, so it replaces that version instead of merging the two (`--force`, or press Accept twice).
 - `[tools] auto_accept = true` skips the review step. `mini tools rollback NAME V` changes the active version.
+
+## Tools that ask, and tools on your PATH
+
+Nothing about a tool's dialogue is written into mini. When the agent specs a new tool it also plans how the
+tool works for you: which **saved settings** it needs (an account, a server, a default) and what happens when
+one is missing, which **questions** it asks and in what order, what it confirms before acting. With
+`confirm_first` on, you see that plan before any code is written and can revise it in plain words.
+
+- The tool contract is `run(inputs, io)`. `io.ask(key, prompt, kind)` returns the value when the caller passed
+  it and otherwise asks: in the terminal, as a dialog in the UI, or (unattended) as an error that tells the
+  agent to pass the value. Kinds: text, number, confirm, choice, file, secret. Tests drive it with
+  `ScriptedIO` (`sandbox/mini_io.py`).
+- Saved settings are declared in the manifest with a JSON schema; `state/settings/<key>.json`, mode 600.
+  mini asks for a missing one before the tool starts. Secret fields are never echoed or logged, and a tool
+  only gets the settings it declares. A network target can come from a setting (`setting:<key>`, fields
+  host and port), so a tool can reach a server you name without the address being in the code.
+- `mini tools accept NAME` also writes a command into `[tools] bin_dir` (`~/.local/bin`): run `NAME` with no
+  arguments and it asks, or give everything in one line (`NAME --title x --body y --go`). If the name is
+  taken by another command, it becomes `mini-NAME`. It runs in the same sandbox with the same permissions;
+  files it writes under `out/` land in your current directory.
 
 ## Model tiers
 

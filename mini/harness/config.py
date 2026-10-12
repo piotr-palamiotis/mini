@@ -55,7 +55,7 @@ DEFAULTS = {
     "approvals": {
         "confirm_first": True,
         "mode": "ask",                       # ask | auto (headless runs; every auto decision is logged)
-        "auto_approve": [],                  # kinds approved in auto mode: confirm, permissions, install, consult, cap
+        "auto_approve": [],                  # kinds approved in auto mode: confirm, plan, permissions, install, consult, cap, question
         "auto_choice": {"confirm": "proceed", "cap": "hint"},
     },
     # Cloud tiers through an OpenAI-compatible gateway (OmniRoute). The model names are gateway combos, so the

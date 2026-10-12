@@ -48,9 +48,13 @@ class ApprovalScreen(ModalScreen):
             yield Label(f"[{self.kind.upper()}] {self.title_text}", id="title")
             with VerticalScroll(id="details"):
                 for k, v in self.details.items():
+                    if str(k).startswith("_"):
+                        continue
                     val = v if isinstance(v, str) else json.dumps(v, indent=1)
                     yield Static(f"[b]{escape(str(k))}[/b]: {escape(val)}")
-            yield Input(placeholder="optional note / hint / clarification for the agent", id="note")
+            yield Input(placeholder="your answer" if self.kind == "question" else
+                        "optional note / hint / clarification for the agent", id="note",
+                        password=bool(self.details.get("_secret")))
             with Horizontal(id="buttons"):
                 for i, o in enumerate(self.options):
                     yield Button(o, id=f"opt-{i}", variant="success" if i == 0 else
@@ -331,8 +335,9 @@ class MiniApp(App):
         try:
             if action == "accept":
                 outdated = any(s["outdated"] for s in reg.staged() if s["name"] == name and s["run_id"] == run)
+                from ..toolcli import write_shim
                 v = reg.accept(name, run, force=outdated and getattr(self, "confirm_replace", None) == (name, run))
-                self.chat(f"[b green]accepted[/b green] {name} as v{v}")
+                self.chat(f"[b green]accepted[/b green] {name} as v{v}; command: {escape(write_shim(self.cfg, name))}")
             else:
                 reg.discard(name, run)
                 self.chat(f"discarded the staged {name} from run {run}")

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 
@@ -210,8 +211,10 @@ class Sandbox:
         if argv[0] == "pip" and (len(argv) < 2 or argv[1] not in ("list", "show", "freeze")):
             raise PolicyError("pip may only list packages here; request packages through the spec instead")
 
-    def run(self, argv, work_dir, tool_dir=None, network=(), image=None, timeout=None, purpose=""):
-        """Run argv in a fresh container. Returns dict(exit_code, output, secs, timed_out, egress)."""
+    def run(self, argv, work_dir, tool_dir=None, network=(), image=None, timeout=None, purpose="", on_message=None):
+        """Run argv in a fresh container. Returns dict(exit_code, output, secs, timed_out, egress).
+        on_message(msg) -> reply dict or None: the container's stdout carries JSON-line messages (a tool asking a
+        question); each reply goes back on its stdin. Time spent in on_message does not count against the timeout."""
         self.check_argv(argv)
         targets = validate_targets(network)
         rid = uuid.uuid4().hex[:10]
@@ -220,9 +223,11 @@ class Sandbox:
         args = ["run", "--rm", "--name", name, "--read-only", "--tmpfs", "/tmp:rw,size=512m,exec",
                 "--memory", self.cfg["memory"], "--memory-swap", self.cfg["memory"], "--cpus", str(self.cfg["cpus"]),
                 "--pids-limit", str(self.cfg["pids"]), "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-                "-e", "HOME=/tmp", "-e", "PYTHONPATH=/tool",
+                "-e", "HOME=/tmp", "-e", "PYTHONPATH=/tool:/mini",
                 "-v", f"{os.path.realpath(work_dir)}:/work:rw", "-v", f"{SANDBOX_DIR}/runner.py:/mini/runner.py:ro",
-                "-w", "/work"]
+                "-v", f"{SANDBOX_DIR}/mini_io.py:/mini/mini_io.py:ro", "-w", "/work"]
+        if on_message:
+            args.append("-i")
         if self.engine == "podman":
             args += ["--userns", "keep-id:uid=1000,gid=1000"]
         if tool_dir:
@@ -242,8 +247,14 @@ class Sandbox:
         t0 = time.time()
         timed_out = False
         try:
-            r = self._cli(args, timeout=timeout)
-            code, out = r.returncode, (r.stdout + ("\n" + r.stderr if r.stderr else ""))
+            if on_message:
+                code, out, timed_out = self._run_live(args, timeout, on_message)
+                if timed_out:
+                    self._cli(["rm", "-f", "-t", "0", name])
+                    out += f"\n[sandbox] killed after {timeout} s timeout"
+            else:
+                r = self._cli(args, timeout=timeout)
+                code, out = r.returncode, (r.stdout + ("\n" + r.stderr if r.stderr else ""))
         except subprocess.TimeoutExpired as e:
             self._cli(["rm", "-f", "-t", "0", name])
             timed_out, code = True, -1
@@ -258,20 +269,72 @@ class Sandbox:
                    egress=egress_events or None)
         return res
 
-    def invoke_tool(self, manifest, tool_dir, work_dir, inputs, timeout=None):
+    def _run_live(self, args, timeout, on_message):
+        """Run with a JSON-line message channel on stdin/stdout. Returns (exit code, output, timed out)."""
+        p = subprocess.Popen([self.engine] + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, bufsize=1)
+        err, plain, waited = [], [], [0.0]
+        threading.Thread(target=lambda: err.extend(p.stderr), daemon=True).start()
+        t0 = time.time()
+        done = threading.Event()
+
+        def watch():                                   # the timeout clock stops while the user answers
+            while not done.wait(0.5):
+                if time.time() - t0 - waited[0] > timeout:
+                    p.kill()
+                    return
+        threading.Thread(target=watch, daemon=True).start()
+        for line in p.stdout:
+            try:
+                msg = json.loads(line)
+                if not isinstance(msg, dict) or "op" not in msg:
+                    raise ValueError
+            except ValueError:
+                plain.append(line)
+                continue
+            tw = time.time()
+            reply = on_message(msg)
+            waited[0] += time.time() - tw
+            if reply is not None:
+                try:
+                    p.stdin.write(json.dumps(reply) + "\n")
+                    p.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+        code = p.wait()
+        done.set()
+        timed_out = time.time() - t0 - waited[0] > timeout
+        return (-1 if timed_out else code), "".join(plain) + ("\n" + "".join(err) if err else ""), timed_out
+
+    def invoke_tool(self, manifest, tool_dir, work_dir, inputs, timeout=None, on_message=None, settings=None,
+                    network=None):
         """Run a registered code tool on inputs. Returns (output dict, sandbox result)."""
         meta = os.path.join(work_dir, ".mini")
         os.makedirs(meta, exist_ok=True)
-        json.dump(inputs, open(os.path.join(meta, "input.json"), "w"))
-        outp = os.path.join(meta, "output.json")
+        with open(os.path.join(meta, "input.json"), "w") as f:
+            json.dump(inputs, f)
+        outp, setp = os.path.join(meta, "output.json"), os.path.join(meta, "settings.json")
         if os.path.exists(outp):
             os.remove(outp)
         perms = manifest.get("permissions") or {}
         image = self.ensure_image(perms.get("packages"))
-        res = self.run(["python", "/mini/runner.py"], work_dir, tool_dir=tool_dir, network=perms.get("network") or [],
-                       image=image, timeout=timeout, purpose=f"invoke {manifest['name']} v{manifest.get('version', '?')}")
+        if network is None:
+            network = [t for t in perms.get("network") or [] if not t.startswith("setting:")]
+        if settings:                                   # only the settings the manifest declares; removed after the run
+            fd = os.open(setp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(settings, f)
         try:
-            out = json.load(open(outp))
+            res = self.run(["python", "/mini/runner.py"], work_dir, tool_dir=tool_dir, network=network, image=image,
+                           timeout=timeout, purpose=f"invoke {manifest['name']} v{manifest.get('version', '?')}",
+                           on_message=on_message or (lambda msg: {"error": "no one to ask: pass this value in the inputs"}
+                                                     if msg.get("op") == "ask" else None))
+        finally:
+            if os.path.exists(setp):
+                os.remove(setp)
+        try:
+            with open(outp) as f:
+                out = json.load(f)
         except (OSError, ValueError):
             out = {"error": "NoOutput", "message": "the tool produced no output.json", "sandbox_output": res["output"][-2000:]}
         return out, res

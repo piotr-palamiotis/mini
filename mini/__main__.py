@@ -4,6 +4,9 @@
   python -m mini run "task" [--attach FILE] [--auto] [--no-confirm] [--model local|free|paid] [--label L]
   python -m mini tools list|staged|show NAME [VERSION]|review NAME|accept NAME|discard NAME|rollback NAME VERSION|wipe
                      review/accept/discard take --run RUN when more than one task staged the tool
+  python -m mini tool NAME [--field VALUE ...]        run an accepted tool; it asks for what is not given
+  python -m mini tools shims                          (re)write the PATH commands of accepted tools
+  python -m mini settings list|show KEY|set KEY|delete KEY
   python -m mini setup                                build the sandbox base image if missing
 
 --auto is for unattended test runs: every approval request is decided by the auto policy from config
@@ -19,6 +22,15 @@ from .harness.sandbox import Sandbox
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    head = argv[:2] if argv[:1] == ["--config"] else []
+    rest = argv[len(head):]
+    if rest[:1] == ["tool"]:                         # tool arguments belong to the tool's own parser
+        if len(rest) < 2 or rest[1].startswith("-"):
+            print("usage: mini tool NAME [--field VALUE ...]", file=sys.stderr)
+            return 2
+        from .toolcli import run_tool
+        return run_tool(config_mod.load(head[1] if head else None), rest[1], rest[2:])
     ap = argparse.ArgumentParser(prog="mini")
     ap.add_argument("--config")
     sub = ap.add_subparsers(dest="cmd")
@@ -26,18 +38,21 @@ def main(argv=None):
     r.add_argument("task")
     r.add_argument("--attach", action="append", default=[])
     r.add_argument("--auto", action="store_true")
-    r.add_argument("--auto-approve", default="confirm,permissions,install,cap")
+    r.add_argument("--auto-approve", default="confirm,plan,permissions,install,cap")
     r.add_argument("--no-confirm", action="store_true")
     r.add_argument("--model", choices=["local", "free", "paid"], help="tier to start on (default: routing.start)")
     r.add_argument("--no-escalate", action="store_true", help="stay on the start tier")
     r.add_argument("--label", default="")
     r.add_argument("--quiet", action="store_true")
     g = sub.add_parser("tools", aliases=["registry"])
-    g.add_argument("action", choices=["list", "staged", "show", "review", "accept", "discard", "rollback", "wipe"])
+    g.add_argument("action", choices=["list", "staged", "show", "review", "accept", "discard", "rollback", "shims", "wipe"])
     g.add_argument("name", nargs="?")
     g.add_argument("version", nargs="?", type=int)
     g.add_argument("--run", help="the run that staged the tool (when there is more than one)")
     g.add_argument("--force", action="store_true", help="accept even if a newer version was accepted meanwhile")
+    st = sub.add_parser("settings")
+    st.add_argument("action", choices=["list", "show", "set", "delete"])
+    st.add_argument("key", nargs="?")
     sub.add_parser("setup")
     le = sub.add_parser("lessons")
     le.add_argument("action", choices=["list", "wipe"])
@@ -64,6 +79,9 @@ def main(argv=None):
         return 0 if s["status"] == "success" else 1
     if a.cmd in ("tools", "registry"):
         return tools_cmd(cfg, a)
+    if a.cmd == "settings":
+        from .toolcli import settings_cmd
+        return settings_cmd(cfg, a.action, a.key)
     if a.cmd == "lessons":
         from .harness.lessons import LessonStore, format_lessons
         store = LessonStore(cfg.abspath("state"))
@@ -125,8 +143,16 @@ def tools_cmd(cfg, a):
                   f"tests: {(s['test_results'] or {}).get('summary')}\n")
             print(reg.diff(a.name, run))
         elif a.action == "accept":
+            from .toolcli import write_shim
             v = reg.accept(a.name, pick_run(), force=a.force)
-            print(f"{a.name}: accepted as v{v}")
+            print(f"{a.name}: accepted as v{v}; command: {write_shim(cfg, a.name)}")
+        elif a.action == "shims":
+            from .toolcli import sync_shims
+            written, removed = sync_shims(cfg)
+            for p in written:
+                print("command:", p)
+            for p in removed:
+                print("removed:", p)
         elif a.action == "discard":
             run = pick_run()
             reg.discard(a.name, run)
@@ -135,7 +161,9 @@ def tools_cmd(cfg, a):
             reg.set_active(a.name, a.version)
             print(f"{a.name}: active version is now {a.version}")
         elif a.action == "wipe":
+            from .toolcli import sync_shims
             reg.wipe()
+            sync_shims(cfg)
             print("registry wiped")
     except (RegistryError, ValueError) as e:
         print(e, file=sys.stderr)

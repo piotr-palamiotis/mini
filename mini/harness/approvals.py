@@ -8,7 +8,7 @@ Modes (config [approvals]):
 """
 import sys
 
-KINDS = ("confirm", "permissions", "install", "consult", "cap")
+KINDS = ("confirm", "permissions", "install", "consult", "cap", "plan", "question")
 
 
 class Decision:
@@ -36,16 +36,22 @@ class ApprovalGate:
             d = self.handler(kind, title, details, list(options))
         else:
             d = self._terminal(kind, title, details, options)
-        self.log.emit("approval", phase="decided", req=kind, approved=d.approved, choice=d.choice, note=d.note,
-                      decided_by=d.decided_by)
+        self.log.emit("approval", phase="decided", req=kind, approved=d.approved, choice=d.choice,
+                      note="***" if details.get("_secret") and d.note else d.note, decided_by=d.decided_by)
         return d
 
     @staticmethod
     def _terminal(kind, title, details, options):
-        print(f"\n=== APPROVAL: {title} ===", file=sys.stderr)
+        print(f"\n=== {'QUESTION' if kind == 'question' else 'APPROVAL'}: {title} ===", file=sys.stderr)
         for k, v in details.items():
-            print(f"  {k}: {v}", file=sys.stderr)
-        print("  options: " + " / ".join(options), file=sys.stderr)
+            if not k.startswith("_"):
+                print(f"  {k}: {v}", file=sys.stderr)
+        print("  options: " + " / ".join(options) + ("   (type: answer YOUR TEXT)" if "answer" in options else ""),
+              file=sys.stderr)
+        if details.get("_secret"):
+            import getpass
+            secret = getpass.getpass("secret> ")
+            return Decision(bool(secret), "answer" if secret else "cancel", secret, "user")
         ans = input("> ").strip()
         choice = ans.split(" ", 1)[0] if ans else options[-1]
         note = ans.split(" ", 1)[1] if " " in ans else ""

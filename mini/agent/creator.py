@@ -18,12 +18,16 @@ from . import codeblocks, prompts
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE
 from ..harness.sandbox import PolicyError, validate_packages, validate_targets
+from ..harness.settings import KEY_RE, validate_declarations
 from ..harness.lessons import format_lessons
 
 S = {"type": "string"}
 OBJ = {"type": "object"}
 T_SPEC = fn("write_spec", "Write the spec of the new tool.", {
     "name": S, "description": S, "input_schema": OBJ, "output_schema": OBJ,
+    "settings": {"type": "array", "items": {"type": "object", "properties": {
+        "key": S, "description": S, "schema": OBJ, "secret": {"type": "array", "items": S}}}},
+    "interaction": {"type": "array", "items": S},
     "permissions": {"type": "object", "properties": {"network": {"type": "array", "items": S},
                                                      "packages": {"type": "object"}}},
     "edge_cases": {"type": "array", "items": S}}, ["name", "description", "input_schema", "output_schema", "edge_cases"])
@@ -36,9 +40,10 @@ T_REPLACE_LINES = fn("replace_lines", "Replace lines start..end (inclusive, numb
                      ["path", "start", "end", "new"])
 T_REWRITE = fn("rewrite_file", "Replace a whole file. The harness then asks you for the new content.", {"path": S}, ["path"])
 T_RUN_TESTS = fn("run_tests", "Run the tests in the sandbox.", {})
-T_UPDATE_SPEC = fn("update_spec", "Change the spec: description, schemas, permissions (network, packages) or edge "
-                   "cases. Permission or package increases need the user's approval.",
-                   {"description": S, "input_schema": OBJ, "output_schema": OBJ,
+T_UPDATE_SPEC = fn("update_spec", "Change the spec: description, schemas, settings, interaction, permissions (network, "
+                   "packages) or edge cases. Permission or package increases need the user's approval.",
+                   {"description": S, "input_schema": OBJ, "output_schema": OBJ, "settings": {"type": "array"},
+                    "interaction": {"type": "array", "items": S},
                     "permissions": {"type": "object"}, "edge_cases": {"type": "array", "items": S}})
 T_SANDBOX = fn("run_in_sandbox", "Run one inspection command in the tool's sandbox: an argv list, no shell, "
                "e.g. [\"python\", \"-c\", \"import x; print(x.__version__)\"]. Tool files are in /tool (read-only), "
@@ -99,7 +104,7 @@ class Creator:
         shutil.rmtree(self.build, ignore_errors=True)
         shutil.copytree(manifest["_dir"], os.path.join(self.build, "files"))
         self.files_dir = os.path.join(self.build, "files")
-        keys = ("name", "description", "input_schema", "output_schema", "permissions", "edge_cases")
+        keys = ("name", "description", "input_schema", "output_schema", "settings", "interaction", "permissions", "edge_cases")
         self.spec = {k: manifest.get(k) for k in keys}
         self.approved_perms = self._norm_perms(manifest.get("permissions"))
         self.image = a.sandbox.ensure_image(self.approved_perms["packages"])
@@ -130,7 +135,8 @@ class Creator:
         names = ", ".join(a.registry.names()) or "(none)"
         self.messages = [{"role": "system", "content": prompts.SYSTEM},
                          {"role": "user", "content": self._lessons_block() + prompts.SPEC.format(
-                             rules=prompts.CREATE_RULES, need=self.need, task=self.task, context=self.context, names=names)}]
+                             rules=prompts.CREATE_RULES, need=self.need, task=self.task, context=self.context, names=names,
+                             settings=self._settings_listing())}]
         t = Turns(a, "spec", self.messages, [T_SPEC])
         for _ in range(6):
             reply = t.ask()
@@ -150,17 +156,63 @@ class Creator:
             if not ok:
                 t.result("write_spec", msg + " Write a spec that works without it, or with less.")
                 continue
+            revised = self._review_plan()
+            if revised:
+                t.result("write_spec", "The user revised the plan: " + revised + "\nCall write_spec again with the "
+                                       "plan changed accordingly.")
+                continue
             t.result("write_spec", "Spec accepted." + (" " + msg if msg else ""))
             return
         raise AgentStop("no valid spec after 6 tries")
 
-    def _norm_perms(self, p):
+    def _settings_listing(self):
+        recs = self.a.settings.list()
+        return "; ".join(f"{r['key']}: {r['description']} (fields: {', '.join((r.get('schema') or {}).get('properties') or {})})"
+                         for r in recs) or "(none)"
+
+    def _review_plan(self):
+        """confirm_first: the user sees how the tool will work (settings, questions, actions) before any code.
+        Returns the user's revision, or "" to go ahead."""
+        a = self.a
+        if not a.cfg["approvals"]["confirm_first"]:
+            return ""
+        sp = self.spec
+        props = (sp["input_schema"] or {}).get("properties") or {}
+        d = a.gate.request("plan", f"Plan for the new tool {sp['name']}", {
+            "does": sp["description"],
+            "saved settings": "; ".join(f"{x['key']}: {x['description']} (fields: {', '.join((x['schema'].get('properties') or {}))}"
+                                        + (f"; secret: {', '.join(x['secret'])}" if x["secret"] else "") + ")"
+                                        for x in sp["settings"]) or "-",
+            "how it works": "\n".join(f"{i}. {x}" for i, x in enumerate(sp["interaction"], 1)) or "-",
+            "one-line use": f"{sp['name']} " + " ".join(f"--{k} ..." for k in props) if props else sp["name"],
+            "network": ", ".join(sp["permissions"]["network"]) or "none",
+            "edge cases": "; ".join(sp["edge_cases"])}, options=("proceed", "revise", "cancel"))
+        if d.choice == "cancel" or not d.approved:
+            raise AgentStop(f"the user cancelled the tool {sp['name']} at its plan")
+        if d.choice == "revise" and (d.note or "").strip():
+            a.log.emit("plan", tool=sp["name"], revised=d.note)
+            return d.note.strip()
+        return ""
+
+    def _norm_perms(self, p, settings=None):
+        """Network targets are "host:port", or "setting:<key>" for a host:port the user saves in a declared setting."""
         p = p or {}
-        return {"network": validate_targets(p.get("network") or []), "packages": validate_packages(p.get("packages") or {})}
+        net = [str(t) for t in p.get("network") or []]
+        keys = {d.get("key") for d in (settings if settings is not None else (self.spec or {}).get("settings") or [])}
+        refs = [t for t in net if t.startswith("setting:")]
+        for t in refs:
+            if not KEY_RE.match(t[8:]) or t[8:] not in keys:
+                raise PolicyError(f"{t}: network from a setting needs that key in the spec's settings")
+        return {"network": validate_targets([t for t in net if t not in refs]) + refs,
+                "packages": validate_packages(p.get("packages") or {})}
 
     def _clean_spec(self, s):
+        settings = [{"key": d["key"], "description": str(d.get("description", "")), "schema": d["schema"],
+                     "secret": list(d.get("secret") or [])} for d in s.get("settings") or []]
         return {"name": s["name"], "description": s["description"].strip(), "input_schema": s["input_schema"],
-                "output_schema": s["output_schema"], "permissions": self._norm_perms(s.get("permissions")),
+                "output_schema": s["output_schema"], "settings": settings,
+                "interaction": [str(x) for x in s.get("interaction") or []],
+                "permissions": self._norm_perms(s.get("permissions"), settings),
                 "edge_cases": [str(e) for e in s.get("edge_cases") or []]}
 
     def _validate_spec(self, s, new):
@@ -178,8 +230,13 @@ class Creator:
                 return f"{k} must be a JSON Schema object."
         if not isinstance(s["edge_cases"], list):
             return "edge_cases must be a list of strings."
+        problem = validate_declarations(s.get("settings") or [])
+        if problem:
+            return problem
+        if not isinstance(s.get("interaction") or [], list):
+            return "interaction must be a list of short steps."
         try:
-            self._norm_perms(s.get("permissions"))
+            self._norm_perms(s.get("permissions"), s.get("settings") or [])
         except PolicyError as e:
             return str(e) + "."
         return None
@@ -193,8 +250,9 @@ class Creator:
         new_pip = [p for p in perms["packages"]["pip"] if p not in old["packages"]["pip"]]
         if new_net or new_apt or new_pip:
             d = a.gate.request("permissions", f"Tool {self.spec['name']} requests more authority", {
-                "tool": self.spec["name"], "network (new)": new_net or "-", "apt packages (new)": new_apt or "-",
-                "pip packages (new)": new_pip or "-", "why": self.spec["description"]})
+                "tool": self.spec["name"], "network (new)": [t if not t.startswith("setting:") else
+                                                             f"the host:port you save in setting {t[8:]}" for t in new_net] or "-",
+                "apt packages (new)": new_apt or "-", "pip packages (new)": new_pip or "-", "why": self.spec["description"]})
             if not d.approved:
                 return False, "The user refused these permissions: " + json.dumps({"network": new_net, "apt": new_apt, "pip": new_pip})
         self.approved_perms = perms
@@ -283,8 +341,9 @@ class Creator:
         work = os.path.join(self.build, "testwork")
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
+        net = [t for t in self.approved_perms["network"] if not t.startswith("setting:")]   # tests fake those
         res = a.sandbox.run(["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "/tool/test_tool.py"],
-                            work, tool_dir=self.files_dir, network=self.approved_perms["network"], image=self.image,
+                            work, tool_dir=self.files_dir, network=net, image=self.image,
                             purpose=f"tests {self.spec['name']}")
         passed = res["exit_code"] == 0
         summary = next((ln for ln in reversed(res["output"].strip().split("\n")) if ln.strip()), "")
@@ -497,12 +556,17 @@ class Creator:
             return f"{path} updated. Current content:\n{codeblocks.numbered(cur)}", None
         if name == "update_spec":
             spec = dict(self.spec)
-            for k in ("description", "input_schema", "output_schema", "edge_cases"):
+            for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction"):
                 if args.get(k):
                     spec[k] = args[k]
-            if "permissions" in args:
+            if "settings" in args:
+                problem = validate_declarations(args["settings"] or [])
+                if problem:
+                    return f"Spec change rejected: {problem}", None
+                spec["settings"] = self._clean_spec({**spec, "settings": args["settings"]})["settings"]
+            if "permissions" in args or "settings" in args:
                 try:
-                    spec["permissions"] = self._norm_perms(args["permissions"])
+                    spec["permissions"] = self._norm_perms(args.get("permissions", spec["permissions"]), spec["settings"])
                 except PolicyError as e:
                     return f"Spec change rejected: {e}", None
             ok, msg = self._approve_permissions(spec["permissions"])
@@ -516,7 +580,8 @@ class Creator:
             try:
                 work = os.path.join(self.build, "testwork")
                 os.makedirs(work, exist_ok=True)
-                res = a.sandbox.run(argv, work, tool_dir=self.files_dir, network=self.approved_perms["network"],
+                net = [t for t in self.approved_perms["network"] if not t.startswith("setting:")]
+                res = a.sandbox.run(argv, work, tool_dir=self.files_dir, network=net,
                                     image=self.image, timeout=60, purpose="inspect")
             except PolicyError as e:
                 a.log.emit("watchdog", name="command_policy", argv=argv, reason=str(e))

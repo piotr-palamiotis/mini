@@ -45,7 +45,7 @@ class UITest(unittest.TestCase):
                 self.assertEqual(reg.names(), ["count_text_lines"])
                 self.assertEqual(app.query_one("#reg-table").row_count, 1)
         asyncio.run(go())
-        self.assertEqual(seen, ["confirm", "install"])
+        self.assertEqual(seen, ["confirm", "plan", "install"])
 
     def test_model_command_paid_lasts_one_task(self):
         cfg = temp_config(**{"approvals.confirm_first": False, "paid.enabled": True})
