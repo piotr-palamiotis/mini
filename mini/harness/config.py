@@ -5,6 +5,7 @@ Values missing from the file fall back to DEFAULTS, so an old file keeps working
 """
 import copy
 import os
+import re
 import tomllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -192,3 +193,31 @@ def save(cfg, path=None):
     path = path or cfg.path
     with open(path, "w") as f:
         f.write(dumps({k: v for k, v in cfg.items()}))
+
+
+def set_values(path, updates):
+    """Change keys in a TOML file in place, keeping its comments and layout. updates: {section: {key: value}}.
+    Missing keys are added at the end of their section, missing sections at the end of the file."""
+    lines = open(path).read().splitlines() if os.path.exists(path) else []
+    for sec, kv in updates.items():
+        start = next((i for i, ln in enumerate(lines) if ln.strip() == f"[{sec}]"), None)
+        if start is None:
+            lines += ["", f"[{sec}]"] + [f"{k} = {_fmt(v)}" for k, v in kv.items()]
+            continue
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+        for k, v in kv.items():
+            pat = re.compile(rf"^(\s*){re.escape(k)}\s*=\s*(.*?)(\s+#.*)?$")
+            for i in range(start + 1, end):
+                m = pat.match(lines[i])
+                if m:
+                    lines[i] = f"{m.group(1)}{k} = {_fmt(v)}{m.group(3) or ''}"
+                    break
+            else:
+                last = max((i for i in range(start, end) if lines[i].strip()), default=start)
+                lines.insert(last + 1, f"{k} = {_fmt(v)}")
+                end += 1
+    text = "\n".join(lines) + "\n"
+    tomllib.loads(text)                                   # never write a file that does not parse
+    with open(path + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(path + ".tmp", path)

@@ -21,13 +21,55 @@ mini has two parts:
 
 ## Quick start
 
+```sh
+python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is standard library only
+.venv/bin/python -m mini setup                            # guided first-run setup (also offered on first launch)
+.venv/bin/python -m mini doctor                           # check everything, change nothing
+```
+
+`mini setup` goes through each piece, says what is missing, and asks before it changes anything:
+
+1. **Sandbox:** podman (prints the `sudo apt` command if missing) and the sandbox image (builds it).
+2. **Local model:** builds llama.cpp with Vulkan if needed (pinned release; prints the `sudo apt` line for
+   missing build tools), lets you pick a model from Ollama's store or any GGUF file, picks the GPU and the
+   context size, and runs `llama-server` as a systemd user service started at boot. With
+   `[local] backend = "ollama"` it checks Ollama instead.
+3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
+4. **Cloud tiers (optional):** installs OmniRoute with npm if missing, runs it as a user service bound to
+   127.0.0.1 with an API key required, walks you through the dashboard (providers, an API key, the combos
+   `mini-free` and `mini-paid`), checks the key and saves it to `~/.config/mini/env` (mode 600). You can
+   also rename the combos or turn a tier off.
+
+It never replaces a systemd unit it did not write without asking (and keeps a `.bak`). The UI shows the state
+of each tier at startup and on `/status`.
+
+```sh
+python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is standard library only
+.venv/bin/python -m mini setup                            # guided first-run setup (also offered on first launch)
+.venv/bin/python -m mini doctor                           # check everything, change nothing
+```
+
+`mini setup` goes through each piece, says what is missing, and asks before it changes anything:
+
+1. **Sandbox:** podman (prints the `sudo apt` command if missing) and the sandbox image (builds it).
+2. **Local model:** builds llama.cpp with Vulkan if needed (pinned release; prints the `sudo apt` line for
+   missing build tools), lets you pick a model from Ollama's store or any GGUF file, picks the GPU and the
+   context size, and runs `llama-server` as a systemd user service started at boot. Or keeps Ollama, if
+   `[local] backend = "ollama"`.
+3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
+4. **Cloud tiers (optional):** installs OmniRoute with npm if missing, runs it as a user service bound to
+   127.0.0.1 with an API key required, walks you through the dashboard (providers, an API key, the combos
+   `mini-free` and `mini-paid`), checks the key and saves it to `~/.config/mini/env` (mode 600). You can
+   also rename the combos or turn a tier off.
+
+It never replaces a systemd unit it did not write without asking (and keeps a `.bak`). The UI shows the state
+of each tier at startup and on `/status`.
+
 Local model (llama.cpp, Vulkan): `llama-server` runs as the systemd user unit `llama-server.service` on
 127.0.0.1:8080 and loads gemma4:12b straight from Ollama's store (`scripts/ollama-gguf gemma4:12b` prints the GGUF
 path), so the weights are not on disk twice. `systemctl --user status llama-server` shows it.
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is standard library only
-.venv/bin/python -m mini setup                            # build the sandbox base image (rootless Podman)
 .venv/bin/python -m mini                                  # Textual UI
 .venv/bin/python -m mini run "task" --attach file.pdf     # headless, approvals in the terminal
 .venv/bin/python -m mini tools list|staged|review|accept|discard|show|rollback|shims|wipe

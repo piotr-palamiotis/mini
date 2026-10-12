@@ -7,7 +7,8 @@
   python -m mini tool NAME [--field VALUE ...]        run an accepted tool; it asks for what is not given
   python -m mini tools shims                          (re)write the PATH commands of accepted tools
   python -m mini settings list|show KEY|set KEY|delete KEY
-  python -m mini setup                                build the sandbox base image if missing
+  python -m mini setup                                guided setup: sandbox, local model, cloud gateway
+  python -m mini doctor                               check the setup, change nothing
 
 --auto is for unattended test runs: every approval request is decided by the auto policy from config
 ([approvals] auto_approve / auto_choice) and logged as decided_by=auto-policy.
@@ -54,6 +55,7 @@ def main(argv=None):
     st.add_argument("action", choices=["list", "show", "set", "delete"])
     st.add_argument("key", nargs="?")
     sub.add_parser("setup")
+    sub.add_parser("doctor")
     le = sub.add_parser("lessons")
     le.add_argument("action", choices=["list", "wipe"])
     sub.add_parser("ui")
@@ -62,6 +64,9 @@ def main(argv=None):
 
     if a.cmd == "run":
         from .agent.core import Agent
+        from .setup import needs_setup
+        if needs_setup(cfg):
+            print("note: mini is not set up on this machine yet; `mini setup` helps, `mini doctor` checks", file=sys.stderr)
         if a.auto:
             cfg["approvals"]["mode"] = "auto"
             cfg["approvals"]["auto_approve"] = [k for k in a.auto_approve.split(",") if k]
@@ -92,11 +97,13 @@ def main(argv=None):
             print(format_lessons(store.all()) or "(no lessons yet)")
         return 0
     if a.cmd == "setup":
-        sb = Sandbox(cfg)
-        if not sb.image_exists(cfg["sandbox"]["image"]):
-            sb.build_base()
-        print("sandbox image ready:", cfg["sandbox"]["image"])
-        return 0
+        from .setup import wizard
+        return wizard(cfg)
+    if a.cmd == "doctor":
+        from .setup import doctor
+        return doctor(cfg)
+    from .setup import first_run_offer
+    first_run_offer(cfg)
     from .ui.app import run_ui
     return run_ui(cfg)
 

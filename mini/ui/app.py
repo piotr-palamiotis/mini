@@ -130,7 +130,21 @@ class MiniApp(App):
             f"{t}: {self.cfg[t]['model']}" + ("" if self.cfg[t].get("enabled", True) else " (off)") for t in TIERS) +
             f"\nTasks start on {self.cfg['routing']['start']}; local moves to free after "
             f"{self.cfg['routing']['local_budget_s'] // 60} min. /model to choose the next task's model.")
+        self.check_tiers()
         self.query_one("#prompt", Input).focus()
+
+    @work(thread=True)
+    def check_tiers(self):
+        from ..setup import tier_status
+        try:
+            st = tier_status(self.cfg)
+        except Exception as e:   # noqa: BLE001 - a status probe must never break the UI
+            st = {"status": (False, str(e))}
+        mark = {True: "[green]ok[/green]", False: "[red]!![/red]", None: "[dim]--[/dim]"}
+        line = "   ".join(f"{t} {mark[ok]} {escape(text)}" for t, (ok, text) in st.items())
+        bad = any(ok is False for ok, _ in st.values())
+        self.call_from_thread(self.chat, line + ("\n[dim]mini doctor shows how to fix it; mini setup fixes it[/dim]"
+                                                 if bad else ""))
 
     # ------------------------------------------------------------ status
     def update_status(self):
@@ -224,8 +238,12 @@ class MiniApp(App):
             return
         if text == "/help":
             self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"
+                      "/status        check the local model and the cloud tiers\n"
                       "/model [local|free|paid]   model for the next task (paid lasts one task)\n"
                       "Config tab: edit and save the TOML config (models, routing, caps, watchdogs).")
+            return
+        if text == "/status":
+            self.check_tiers()
             return
         if text.split()[0] == "/model":
             arg = text[6:].strip()
