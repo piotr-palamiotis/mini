@@ -369,6 +369,8 @@ def backend_checks(cfg, name, entry):
     models = models_in(mdir)
     out.append(Check("models", f"models in {mdir}", bool(models),
                      ", ".join(models) if models else "no GGUF files there yet",
+                     fix=None if models else lambda ui: choose_models_dir(cfg, ui),
+                     fix_text="choose the folder that holds your GGUF files",
                      manual="" if models else f"put GGUF files in {mdir} (NAME.gguf, or NAME/ with its mmproj-*.gguf); "
                                               f"models from Ollama: scripts/ollama-export {mdir}"))
     if not models:
@@ -442,6 +444,16 @@ def build_llama(cfg, ui):
         os.symlink(os.path.join(src, "build", "bin", "llama-server"), link)
     if sh(["systemctl", "--user", "is-active", "llama-server"]).stdout.strip() == "active":
         _run(["systemctl", "--user", "restart", "llama-server"], ui)         # serve with the new build
+
+
+def choose_models_dir(cfg, ui):
+    d = os.path.abspath(os.path.expanduser(ui.text("Folder with your GGUF models", cfg["llamacpp"]["models_dir"])))
+    found = models_in(d)
+    if not found:
+        raise SetupError(f"no models in {d} (NAME.gguf, or NAME/ with the model and its mmproj-*.gguf)")
+    ui.say("found: " + ", ".join(found))
+    config_mod.set_values(cfg.path, {"llamacpp": {"models_dir": d}})
+    cfg["llamacpp"]["models_dir"] = d
 
 
 def gpu_devices(server):
