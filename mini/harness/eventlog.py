@@ -2,7 +2,7 @@
 
 Event kinds (data is a dict):
   run_start, run_end, phase, model_reply, tool_call, tool_result, registry_state, gap, spec, code,
-  test_run, attempt, watchdog, approval, sandbox, install, invoke, fallback, cap, error, info, delta
+  test_run, attempt, watchdog, approval, sandbox, install, invoke, tier, cap, error, info, delta
 "delta" events (streamed thinking/content) go to subscribers only, not to the files.
 """
 import json

@@ -1,7 +1,7 @@
 """mini command line.
 
   python -m mini ui                                   Textual UI (default)
-  python -m mini run "task" [--attach FILE] [--auto] [--no-confirm] [--fallback on|off] [--label L]
+  python -m mini run "task" [--attach FILE] [--auto] [--no-confirm] [--model local|free|paid] [--label L]
   python -m mini registry list|show NAME [VERSION]|rollback NAME VERSION|wipe
   python -m mini setup                                build the sandbox base image if missing
 
@@ -25,9 +25,10 @@ def main(argv=None):
     r.add_argument("task")
     r.add_argument("--attach", action="append", default=[])
     r.add_argument("--auto", action="store_true")
-    r.add_argument("--auto-approve", default="confirm,permissions,install,escalate,cap")
+    r.add_argument("--auto-approve", default="confirm,permissions,install,cap")
     r.add_argument("--no-confirm", action="store_true")
-    r.add_argument("--fallback", choices=["on", "off"])
+    r.add_argument("--model", choices=["local", "free", "paid"], help="tier to start on (default: routing.start)")
+    r.add_argument("--no-escalate", action="store_true", help="stay on the start tier")
     r.add_argument("--label", default="")
     r.add_argument("--quiet", action="store_true")
     g = sub.add_parser("registry")
@@ -48,15 +49,15 @@ def main(argv=None):
             cfg["approvals"]["auto_approve"] = [k for k in a.auto_approve.split(",") if k]
         if a.no_confirm:
             cfg["approvals"]["confirm_first"] = False
-        if a.fallback:
-            cfg["fallback"]["enabled"] = a.fallback == "on"
-        agent = Agent(cfg, label=a.label)
+        if a.no_escalate:
+            cfg["routing"]["auto_escalate"] = False
+        agent = Agent(cfg, label=a.label, start_tier=a.model)
         if not a.quiet:
             from .harness.eventlog import RunLog
             agent.log.subscribe(lambda ev: ev["kind"] != "delta" and print(RunLog.format(ev)[:1500], flush=True))
         s = agent.run_task(a.task, a.attach)
         print(json.dumps({k: s[k] for k in ("run_id", "status", "answer", "error", "secs", "created", "escalations",
-                                            "fallback", "watchdogs", "outputs")}, indent=1))
+                                            "tiers", "watchdogs", "outputs")}, indent=1))
         return 0 if s["status"] == "success" else 1
     if a.cmd == "registry":
         reg = Registry(cfg.abspath("state"))

@@ -56,17 +56,32 @@ auto_approve = []
 confirm = "proceed"
 cap = "hint"
 
-[fallback]
+# Cloud tiers go through OmniRoute (http://127.0.0.1:20128). The model names are OmniRoute combos: pick the
+# actual models in its dashboard. The API key is read from $OMNIROUTE_API_KEY or ~/.config/mini/env.
+[free]
 enabled = true
-provider = "claude_cli"
-model = "sonnet"
-attempts_per_tool = 3
-tokens_per_run = 60000
-spend_usd_per_run = 0.5
-max_output_tokens = 8000
-price_in_per_mtok = 3.75
-price_out_per_mtok = 15.0
-timeout_s = 300
+backend = "openai"
+url = "http://127.0.0.1:20128/v1"
+model = "mini-free"
+api_key_env = "OMNIROUTE_API_KEY"
+temperature = 0.4
+thinking_controls = false
+tokens_per_run = 3000000
+
+[paid]
+enabled = true
+backend = "openai"
+url = "http://127.0.0.1:20128/v1"
+model = "mini-paid"
+api_key_env = "OMNIROUTE_API_KEY"
+temperature = 0.4
+thinking_controls = false
+tokens_per_run = 2000000
+
+[routing]
+start = "local"          # local | free | paid
+local_budget_s = 900     # local model time per task, then the task moves to free
+auto_escalate = true     # local -> free without asking; paid is only used when you pick it
 
 [consult]
 enabled = true

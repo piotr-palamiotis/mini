@@ -19,11 +19,12 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, Ri
 
 from ..harness import config as config_mod
 from ..harness.approvals import Decision
+from ..harness.config import TIERS
 from ..harness.eventlog import RunLog
 from ..harness.registry import Registry
 
 KIND_STYLE = {"watchdog": "bold yellow", "cap": "bold red", "error": "bold red", "test_run": "cyan",
-              "install": "bold green", "approval": "magenta", "fallback": "bold blue", "gap": "bold",
+              "install": "bold green", "approval": "magenta", "tier": "bold blue", "gap": "bold",
               "registry_state": "dim", "sandbox": "dim", "phase": "bold white", "attempt": "cyan"}
 
 
@@ -87,9 +88,9 @@ class MiniApp(App):
         self.backend_factory = backend_factory      # tests inject a scripted model
         self.agent = None
         self.attachments = []
-        self.attempt = (0, cfg["caps"]["attempts_per_tool"], "local")
+        self.next_tier = cfg["routing"]["start"]
+        self.attempt = (0, cfg["caps"]["attempts_per_tool"], self.next_tier)
         self.cap_hit = ""
-        self.spend = 0.0
         self.busy = False
         self.live_text = ""
 
@@ -119,17 +120,18 @@ class MiniApp(App):
     def on_mount(self):
         self.update_status()
         self.refresh_registry()
-        self.chat("[b]mini[/b] ready. Local model: " + self.cfg["local"]["model"] +
-                  f" via {self.cfg['local']['backend']}. Fallback: " +
-                  (f"{self.cfg['fallback']['provider']} ({self.cfg['fallback']['model']})" if self.cfg["fallback"]["enabled"] else "disabled"))
+        self.chat("[b]mini[/b] ready. " + "  ".join(
+            f"{t}: {self.cfg[t]['model']}" + ("" if self.cfg[t].get("enabled", True) else " (off)") for t in TIERS) +
+            f"\nTasks start on {self.cfg['routing']['start']}; local moves to free after "
+            f"{self.cfg['routing']['local_budget_s'] // 60} min. /model to choose the next task's model.")
         self.query_one("#prompt", Input).focus()
 
     # ------------------------------------------------------------ status
     def update_status(self):
         n, budget, who = self.attempt
-        parts = [f"model {self.cfg['local']['model']}",
-                 f"[b]attempt {n}/{budget}[/b]" + (" (fallback)" if who == "fallback" else ""),
-                 f"fallback ${self.spend:.3f}/{self.cfg['fallback']['spend_usd_per_run']}" if self.cfg["fallback"]["enabled"] else "fallback off",
+        tier = who if self.busy else self.next_tier
+        parts = [f"[b]{tier}[/b] {self.cfg[tier]['model']}" + ("" if self.busy else " (next task)"),
+                 f"[b]attempt {n}/{budget}[/b]",
                  "[b yellow]running[/b yellow]" if self.busy else "idle"]
         if self.cap_hit:
             parts.append(f"[b white on red] CAP: {escape(self.cap_hit)} [/]")
@@ -148,19 +150,21 @@ class MiniApp(App):
         self.live_text = ""
         line = RunLog.format(ev)
         self.query_one("#log", RichLog).write(Text(line[:4000], style=KIND_STYLE.get(k, "")))
-        if k == "attempt":
-            prov = ev.get("provider", "local")
+        if k == "run_start":
+            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], ev.get("tier", "local"))
+        elif k == "attempt":
             budget = ev.get("budget", self.cfg["caps"]["attempts_per_tool"])
-            self.attempt = (ev["n"], budget, prov)
+            self.attempt = (ev["n"], budget, ev.get("tier", self.attempt[2]))
+        elif k == "tier":
+            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], ev["tier"])
+            self.chat(f"[b blue]model switched[/b blue] {ev['previous']} -> {ev['tier']} ({escape(ev['model'])}): "
+                      f"{escape(ev.get('why', ''))}" + ("\n[dim]task data now leaves this machine[/dim]" if ev.get("leaves_machine") else ""))
         elif k == "phase" and ev.get("phase") in ("create", "repair"):
-            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], "local")
+            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], self.attempt[2])
             self.chat(f"[b]building a new tool[/b] for: {escape(str(ev.get('need') or ev.get('tool')))}")
         elif k == "cap" or (k == "watchdog" and ev.get("name") in ("attempt_budget", "time_turn_limit", "hardware_swap")):
             self.cap_hit = ev.get("cap") or ev.get("name")
             self.chat(f"[b red]cap reached:[/b red] {escape(self.cap_hit)}")
-        elif k == "fallback" and ev.get("phase") == "reply":
-            self.spend = ev.get("total_spend_usd", self.spend)
-            self.chat(f"[b blue]fallback reply[/b blue] ({ev.get('output_tokens')} tokens, ${ev.get('cost_usd')})")
         elif k == "gap":
             self.chat(f"[b]gap detection:[/b] use {ev.get('use') or '-'}; missing {ev.get('missing') or '-'}")
         elif k == "test_run":
@@ -214,23 +218,40 @@ class MiniApp(App):
             return
         if text == "/help":
             self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"
-                      "Config tab: edit and save the TOML config (caps, watchdogs, backend, fallback).")
+                      "/model [local|free|paid]   model for the next task (paid lasts one task)\n"
+                      "Config tab: edit and save the TOML config (models, routing, caps, watchdogs).")
+            return
+        if text.split()[0] == "/model":
+            arg = text[6:].strip()
+            if arg not in TIERS:
+                self.chat(f"next task: [b]{self.next_tier}[/b]. Choose: /model {'|'.join(TIERS)}")
+            elif not self.cfg[arg].get("enabled", True):
+                self.chat(f"[yellow]{arg} is disabled in the config[/yellow]")
+            else:
+                self.next_tier = arg
+                self.chat(f"next task runs on [b]{arg}[/b] ({escape(self.cfg[arg]['model'])})" +
+                          ("; after it, back to " + self.cfg["routing"]["start"] if arg == "paid" else ""))
+            self.update_status()
             return
         if self.busy:
             self.chat("[yellow]a task is running[/yellow]")
             return
         self.chat(f"[b cyan]you:[/b cyan] {escape(text)}" + (f"  [dim](attached: {', '.join(os.path.basename(a) for a in self.attachments)})[/dim]" if self.attachments else ""))
-        self.busy, self.cap_hit, self.spend = True, "", 0.0
+        self.busy, self.cap_hit = True, ""
+        tier = self.next_tier
+        if tier == "paid":                                   # paid lasts one task
+            self.next_tier = self.cfg["routing"]["start"]
+        self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], tier)
         self.update_status()
-        self.run_task(text, list(self.attachments))
+        self.run_task(text, list(self.attachments), tier)
         self.attachments = []
 
     @work(thread=True, exclusive=True)
-    def run_task(self, text, attachments):
+    def run_task(self, text, attachments, tier):
         from ..agent.core import Agent
         cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
-        self.agent = Agent(cfg, approval_handler=self.approval_handler,
-                           backend=self.backend_factory() if self.backend_factory else None)
+        self.agent = Agent(cfg, approval_handler=self.approval_handler, start_tier=tier,
+                           tier_backends={tier: self.backend_factory()} if self.backend_factory else None)
         self.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, ev))
         self.agent.run_task(text, attachments)
 
@@ -245,7 +266,7 @@ class MiniApp(App):
         t.add_columns("tool", "active", "versions", "built by", "tests", "attempts")
         for m in reg.list_tools():
             cb = m.get("created_by", {})
-            by = f"{cb.get('provider')}/{cb.get('model')}" + (" [FALLBACK]" if cb.get("fallback") else "")
+            by = f"{cb.get('provider')}/{cb.get('model')}" + (f" (from {cb['escalated_from']})" if cb.get("escalated_from") else "")
             tr = m.get("test_results") or {}
             t.add_row(m["name"], f"v{m['version']}", ",".join(map(str, reg.versions(m["name"]))), by,
                       ("pass: " if tr.get("passed") else "FAIL: ") + tr.get("summary", "")[:30],
@@ -288,10 +309,7 @@ class MiniApp(App):
         except tomllib.TOMLDecodeError as e:
             msg.update(f"[red]not saved: {escape(str(e))}[/red]")
             return
-        if data.get("local", {}).get("num_ctx") != self.cfg["local"]["num_ctx"]:
-            msg.update("[yellow]context size changed: this needs the owner's approval (VRAM budget). Saved anyway.[/yellow]")
-        else:
-            msg.update(f"[green]saved to {escape(self.cfg.path)}; applies to the next task[/green]")
+        msg.update(f"[green]saved to {escape(self.cfg.path)}; applies to the next task[/green]")
         with open(self.cfg.path, "w") as f:
             f.write(text)
         self.cfg = config_mod.load(self.cfg.path)

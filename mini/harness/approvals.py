@@ -1,4 +1,4 @@
-"""Approval gate. Installs, permission increases, the confirm-first step, cloud escalation and cap decisions all
+"""Approval gate. Installs, permission increases, the confirm-first step, model-tier choices and cap decisions all
 pass through request(). The agent cannot answer for the user.
 
 Modes (config [approvals]):
@@ -8,7 +8,7 @@ Modes (config [approvals]):
 """
 import sys
 
-KINDS = ("confirm", "permissions", "install", "consult", "escalate", "cap")
+KINDS = ("confirm", "permissions", "install", "consult", "cap")
 
 
 class Decision:

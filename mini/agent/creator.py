@@ -4,7 +4,7 @@ Enforced in code:
   - an attempt is one generate/fix of the code followed by a test run; the budget is caps.attempts_per_tool
   - as soon as the tests pass, editing stops and the install gate opens (no extra tests or refactors)
   - restarts after a fail streak happen inside the budget and do not reset it
-  - after the budget: offer the cloud fallback (approval dialog) or stop and report
+  - after the budget: local moves to the free tier by itself; then the user can advise, pick paid, or stop
   - a permission or package increase always goes through the approval gate
 """
 import hashlib
@@ -15,10 +15,9 @@ import shutil
 import time
 
 from . import codeblocks, prompts
-from .turns import AgentStop, EscalateRequested, RestartRequested, Turns, fn
+from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE
 from ..harness.sandbox import PolicyError, validate_packages, validate_targets
-from ..harness.fallback import FallbackCapError
 from ..harness.lessons import format_lessons
 
 S = {"type": "string"}
@@ -87,7 +86,6 @@ class Creator:
         self.consults = 0
         self.errors = {}
         self.last_output, self.last_hash = "", None
-        self.local_attempts = 0
         a.log.emit("phase", phase="create", need=need)
         self._spec_phase()
         return self._code_and_test(first=True)
@@ -106,7 +104,7 @@ class Creator:
         self.approved_perms = self._norm_perms(manifest.get("permissions"))
         self.image = a.sandbox.ensure_image(self.approved_perms["packages"])
         self.parent = manifest["version"]
-        self.restarts, self.last_output, self.last_hash, self.local_attempts = 0, "", None, 0
+        self.restarts, self.last_output, self.last_hash = 0, "", None
         self.consults = 0
         self.errors = {}
         if a.cfg["lessons"]["enabled"]:
@@ -372,9 +370,8 @@ class Creator:
     def _after_test(self, verdict):
         """Handle the watchdog verdict after a test run. Returns a manifest when the tool is installed."""
         self.last_hash = self._hash()
-        self.local_attempts = self.a.wd.attempts
         if verdict == "review":
-            return self._install(provider="local")
+            return self._install()
         if verdict == "budget":
             return self._budget_exhausted()
         if verdict == "restart":
@@ -403,8 +400,6 @@ class Creator:
             except RestartRequested:
                 self._restart()
                 continue
-            except EscalateRequested:
-                return self._escalate(reason="the user chose the fallback at the time/turn limit")
             content = reply.get("content") or ""
             tested = False
             for call in reply["tool_calls"]:
@@ -436,7 +431,7 @@ class Creator:
                     done = self._after_test(verdict)
                     if done:
                         return done
-                    if verdict == "restart":
+                    if verdict in ("restart", "budget"):      # fresh conversation or a new model: drop the rest of this reply
                         break
                     continue
                 self._pending_result_done = False
@@ -541,44 +536,53 @@ class Creator:
             a.log.emit("tool_call", step="step_back", name=c["name"], args=c["arguments"])
             t.result(c["name"], "Noted. Make that one change now, then run the tests.")
 
-    # ================================================================== budget, fallback, install
+    # ================================================================== budget, tiers, install
     def _consult_user(self):
-        """Budget used up: the agent asks the user for advice before the fallback or giving up.
-        Returns True when the user gave advice (the budget was extended), False otherwise."""
+        """Budget used up and no automatic move left: ask the user. Returns "advice" (the budget was extended),
+        "paid" (the user picked the paid tier for this task) or None (stop)."""
         a = self.a
         cc = a.cfg["consult"]
-        if not cc["enabled"] or self.consults >= cc["max_rounds"]:
-            return False
+        can_advise = cc["enabled"] and self.consults < cc["max_rounds"]
+        if not can_advise and not a.offer_paid():
+            return None
         recurring = sorted(self.errors.items(), key=lambda x: -x[1])[:5]
         q = None
-        try:
-            msgs = list(self.messages) + [{"role": "user", "content":
-                "You have used all attempts. Call `ask_for_advice`: explain to the user, in plain words, what you are "
-                "building, what keeps failing, what you already tried, and ask one concrete question whose answer "
-                "would help you most."}]
-            reply = Turns(a, "fix", msgs, [T_ASK_HELP]).ask()
-            for c in reply["tool_calls"]:
-                if c["name"] == "ask_for_advice" and c["arguments"].get("question"):
-                    q = {k: str(c["arguments"].get(k, ""))[:600] for k in ("building", "keeps_failing", "tried", "question")}
-                    break
-        except AgentStop:
-            raise
-        except Exception as e:   # noqa: BLE001
-            a.log.emit("error", text=f"advice request not written by the model: {e}")
+        if can_advise:
+            try:
+                msgs = list(self.messages) + [{"role": "user", "content":
+                    "You have used all attempts. Call `ask_for_advice`: explain to the user, in plain words, what you are "
+                    "building, what keeps failing, what you already tried, and ask one concrete question whose answer "
+                    "would help you most."}]
+                reply = Turns(a, "fix", msgs, [T_ASK_HELP]).ask()
+                for c in reply["tool_calls"]:
+                    if c["name"] == "ask_for_advice" and c["arguments"].get("question"):
+                        q = {k: str(c["arguments"].get(k, ""))[:600] for k in ("building", "keeps_failing", "tried", "question")}
+                        break
+            except AgentStop:
+                raise
+            except Exception as e:   # noqa: BLE001
+                a.log.emit("error", text=f"advice request not written by the model: {e}")
         if q is None:
             q = {"building": self.spec["description"], "keeps_failing": recurring[0][0] if recurring else "the tests",
                  "tried": f"{a.wd.attempts} attempts", "question": "What should I change so that it works?"}
         self.consults += 1
-        d = a.gate.request("consult", "mini is stuck and would like your advice", {
-            "tool": self.spec["name"], "building": q["building"], "keeps failing": q["keeps_failing"],
-            "already tried": q["tried"],
-            "recurring errors": "; ".join(f"{s} (x{n})" for s, n in recurring) or "-",
-            "attempts used": f"{a.wd.attempts}/{a.wd.budget}", "question": q["question"],
-            "if you answer": f"{cc['extra_attempts']} more attempts with your advice"}, options=("send advice", "skip"))
+        options = (("send advice",) if can_advise else ()) + (("use paid",) if a.offer_paid() else ()) + ("stop",)
+        details = {"tool": self.spec["name"], "model": f"{a.tier} ({a.model})", "building": q["building"],
+                   "keeps failing": q["keeps_failing"], "already tried": q["tried"],
+                   "recurring errors": "; ".join(f"{s} (x{n})" for s, n in recurring) or "-",
+                   "attempts used": json.dumps(a.wd.tier_attempts), "question": q["question"]}
+        if can_advise:
+            details["send advice"] = f"{cc['extra_attempts']} more attempts with your advice (write it in the note)"
+        if a.offer_paid():
+            details["use paid"] = f"the paid model ({a.cfg['paid']['model']}) takes over for the rest of this task"
+        d = a.gate.request("consult", "mini is stuck and would like your advice", details, options=options)
+        if d.approved and d.choice == "use paid":
+            a.log.emit("consult", answered=True, choice="paid", decided_by=d.decided_by)
+            return "paid"
         advice = (d.note or "").strip()
-        if not d.approved or d.choice == "skip" or not advice:
+        if not d.approved or d.choice != "send advice" or not advice:
             a.log.emit("consult", answered=False, decided_by=d.decided_by)
-            return False
+            return None
         a.log.emit("consult", answered=True, advice=advice, extra_attempts=cc["extra_attempts"])
         a.wd.extend_budget(cc["extra_attempts"])
         self.advice = advice
@@ -586,76 +590,46 @@ class Creator:
         self.messages.append({"role": "user", "content":
             f"Advice from the user: {advice}\n\nUse it. You have {cc['extra_attempts']} more attempts. Fix the code "
             "(replace, replace_lines or rewrite_file), then call `run_tests`."})
-        return True
+        return "advice"
 
     def _budget_exhausted(self):
         a = self.a
         self._record_lesson("failed")
-        if self._consult_user():
+        if a.auto_escalate(f"{a.wd.attempts} attempts on {self.spec['name']} failed on the local model"):
+            self._handover()
             return None
-        if not a.fallback.enabled:
-            a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.attempts, fallback="disabled")
-            raise ToolFailed(f"{self.spec['name']}: tests still fail after {a.wd.attempts} attempts; fallback disabled")
-        return self._escalate(reason=f"{a.wd.attempts} local attempts failed")
+        choice = self._consult_user()
+        if choice == "advice":
+            return None
+        if choice == "paid":
+            a.switch_tier("paid", f"the user picked paid after {a.wd.attempts} failed attempts", "user")
+            self._handover()
+            return None
+        a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.tier_attempts, tier=a.tier)
+        raise ToolFailed(f"{self.spec['name']}: tests still fail after {sum(a.wd.tier_attempts.values())} attempts")
 
-    def _escalate(self, reason):
+    def _handover(self):
+        """A stronger model takes over the tool: fresh conversation with the spec, the files and the last failure."""
         a = self.a
-        prov = a.fallback.provider
-        d = a.gate.request("escalate", "Escalate to the cloud fallback?", {
-            "provider": f"{prov.name} ({a.cfg['fallback']['model']})", "why": reason,
-            "local attempts failed": a.wd.attempts, "tool": self.spec["name"],
-            "data leaving this machine": "the task text, the tool spec, the last code and the failing test output",
-            "caps": f"{a.cfg['fallback']['attempts_per_tool']} attempts, {a.cfg['fallback']['tokens_per_run']} tokens, "
-                    f"${a.cfg['fallback']['spend_usd_per_run']} per run"}, options=("escalate", "stop"))
-        if not d.approved or d.choice == "stop":
-            a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.attempts, fallback="declined")
-            raise ToolFailed(f"{self.spec['name']}: tests still fail after {a.wd.attempts} attempts; fallback declined")
-        a.escalations += 1
-        last_good_local = a.wd.attempts
-        for i in range(1, a.cfg["fallback"]["attempts_per_tool"] + 1):
-            tool_src = open(os.path.join(self.files_dir, "tool.py")).read() if os.path.exists(os.path.join(self.files_dir, "tool.py")) else ""
-            test_src = open(os.path.join(self.files_dir, "test_tool.py")).read() if os.path.exists(os.path.join(self.files_dir, "test_tool.py")) else ""
-            prompt = prompts.FALLBACK.format(rules=prompts.CREATE_RULES, attempts=last_good_local, task=self.task,
-                                             spec=json.dumps(self.spec, indent=1), tool=tool_src, test=test_src,
-                                             output=trim(self.last_output, 3000))
-            a.log.emit("attempt", n=i, budget=a.cfg["fallback"]["attempts_per_tool"], provider="fallback")
-            try:
-                r = a.fallback.complete(prompts.FALLBACK_SYSTEM, prompt)
-            except FallbackCapError as e:
-                raise ToolFailed(str(e))
-            if r["error"] and not r["text"]:
-                self.last_output = f"(fallback error: {r['error']})"
-                continue
-            files, problems = codeblocks.extract(r["text"])
-            files = {k.split("/")[-1]: v for k, v in files.items()}
-            if not all(f in files for f in FILES):
-                self.last_output = "fallback reply did not contain both files. " + " ".join(problems)
-                a.log.emit("error", text=self.last_output)
-                continue
-            for name in FILES:
-                self._write(name, files[name])
-            a.log.emit("code", tool=self.spec["name"], provider="fallback", files={k: files[k] for k in FILES})
-            res = self._run_tests()
-            a.log.emit("attempt", n=i, budget=a.cfg["fallback"]["attempts_per_tool"], provider="fallback", passed=res["passed"])
-            if res["passed"]:
-                self.fallback_attempts = i
-                return self._install(provider="fallback")
-        a.log.emit("cap", cap="fallback_attempts", tool=self.spec["name"], attempts=a.cfg["fallback"]["attempts_per_tool"])
-        raise ToolFailed(f"{self.spec['name']}: fallback could not make the tests pass either")
+        a.log.emit("phase", phase="handover", tool=self.spec["name"], tier=a.tier, model=a.model)
+        self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES},
+                         {"role": "user", "content": self._lessons_block() + prompts.HANDOVER.format(
+                             attempts=json.dumps(a.wd.tier_attempts), spec=json.dumps(self.spec, indent=1),
+                             files=self._files_view(), output=trim(self.last_output))}]
+        self.messages.append({"role": "user", "content": prompts.FIX})
 
-    def _install(self, provider):
+    def _install(self):
         a = self.a
-        if provider == "local" and a.wd.attempts > 1:
+        if a.wd.attempts > 1:
             self._record_lesson("fixed")
-        if provider == "local":
-            created_by = {"provider": "local", "model": a.model, "backend": a.cfg["local"]["backend"]}
-        else:
-            created_by = {"provider": a.fallback.provider.name, "model": a.cfg["fallback"]["model"], "fallback": True}
+        created_by = {"provider": a.tier, "model": a.model, "backend": a.cfg[a.tier]["backend"]}
+        if a.escalated_from:
+            created_by["escalated_from"] = a.escalated_from
         manifest = dict(self.spec)
         manifest.update({
             "kind": "code", "files": sorted(os.listdir(self.files_dir)), "test_file": "test_tool.py",
             "test_results": self.last_test, "created_by": created_by,
-            "attempts_used": {"local": self.local_attempts, "fallback": getattr(self, "fallback_attempts", 0)},
+            "attempts_used": dict(a.wd.tier_attempts),
             "restarts": self.restarts, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "image": self.image, "parent_version": self.parent, "run_id": a.log.run_id,
         })

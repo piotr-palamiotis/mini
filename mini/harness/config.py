@@ -55,20 +55,35 @@ DEFAULTS = {
     "approvals": {
         "confirm_first": True,
         "mode": "ask",                       # ask | auto (headless runs; every auto decision is logged)
-        "auto_approve": [],                  # kinds approved in auto mode: confirm, permissions, install, escalate, cap
+        "auto_approve": [],                  # kinds approved in auto mode: confirm, permissions, install, consult, cap
         "auto_choice": {"confirm": "proceed", "cap": "hint"},
     },
-    "fallback": {
+    # Cloud tiers through an OpenAI-compatible gateway (OmniRoute). The model names are gateway combos, so the
+    # actual models are chosen in the gateway's dashboard, not here. The key comes from api_key_env or ~/.config/mini/env.
+    "free": {
         "enabled": True,
-        "provider": "claude_cli",
-        "model": "sonnet",
-        "attempts_per_tool": 3,
-        "tokens_per_run": 60000,
-        "spend_usd_per_run": 0.50,
-        "max_output_tokens": 8000,           # per call; with the prices below this bounds the worst case of one call
-        "price_in_per_mtok": 3.75,           # estimate (Sonnet input incl. cache writes), USD per million tokens
-        "price_out_per_mtok": 15.0,
-        "timeout_s": 300,
+        "backend": "openai",
+        "url": "http://127.0.0.1:20128/v1",
+        "model": "mini-free",
+        "api_key_env": "OMNIROUTE_API_KEY",
+        "temperature": 0.4,
+        "thinking_controls": False,          # do not send llama.cpp-only thinking fields to the gateway
+        "tokens_per_run": 3000000,
+    },
+    "paid": {
+        "enabled": True,
+        "backend": "openai",
+        "url": "http://127.0.0.1:20128/v1",
+        "model": "mini-paid",
+        "api_key_env": "OMNIROUTE_API_KEY",
+        "temperature": 0.4,
+        "thinking_controls": False,
+        "tokens_per_run": 2000000,
+    },
+    "routing": {
+        "start": "local",                    # tier a task starts on: local | free | paid
+        "local_budget_s": 900,               # local model time per task; then the task moves to free
+        "auto_escalate": True,               # local -> free without asking; paid is only ever the user's choice
     },
     "consult": {
         "enabled": True,                     # when the attempt budget runs out, ask the user for advice first
@@ -98,6 +113,27 @@ def _merge(base, over):
         else:
             out[k] = v
     return out
+
+
+TIERS = ("local", "free", "paid")
+ENV_FILE = os.path.expanduser("~/.config/mini/env")
+
+
+def secret(name):
+    """A credential from the environment, else from ~/.config/mini/env (KEY=VALUE lines). Never from the repo."""
+    if not name:
+        return ""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        with open(ENV_FILE) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k.strip() == name and not line.lstrip().startswith("#"):
+                    return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
 
 
 class Config(dict):

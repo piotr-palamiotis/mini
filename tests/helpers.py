@@ -12,8 +12,10 @@ def temp_config(**over):
     cfg["paths"]["state"] = os.path.join(d, "state")
     cfg["paths"]["runs"] = os.path.join(d, "runs")
     cfg["approvals"]["mode"] = "auto"
-    cfg["approvals"]["auto_approve"] = ["confirm", "permissions", "install", "escalate", "cap"]
-    cfg["fallback"]["enabled"] = False
+    cfg["approvals"]["auto_approve"] = ["confirm", "permissions", "install", "cap"]
+    cfg["local"]["backend"] = "fake"                  # never reach a real model server from a test
+    cfg["free"]["enabled"] = False
+    cfg["paid"]["enabled"] = False
     for path, v in over.items():
         sec, key = path.split(".")
         cfg[sec][key] = v

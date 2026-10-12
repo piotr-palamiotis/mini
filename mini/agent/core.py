@@ -1,7 +1,11 @@
 """mini-agent: parse -> confirm-first -> gap detection -> create missing tools -> complete the task with them.
 
-The harness objects (backend, sandbox, registry, gate, fallback, watchdogs, log) are handed in; the agent never
+The harness objects (backends, sandbox, registry, gate, watchdogs, log) are handed in; the agent never
 gets more authority than they allow.
+
+Model tiers (config [local], [free], [paid], [routing]): a task starts on routing.start (local by default). When
+the local model runs out of time (routing.local_budget_s) or attempts, the task moves to free by itself and stays
+there. Paid is only used when the user picks it; it lasts for the task. The conversation carries over on a switch.
 """
 import json
 import os
@@ -12,12 +16,11 @@ import time
 
 from . import codeblocks, prompts
 from .creator import Creator, ToolFailed, trim
-from .turns import AgentStop, EscalateRequested, RestartRequested, Turns, fn
+from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness import hwmon
 from ..harness.approvals import ApprovalGate
 from ..harness.backends import Endpoint, make_backend
 from ..harness.eventlog import RunLog
-from ..harness.fallback import Fallback
 from ..harness.lessons import LessonStore
 from ..harness.registry import Registry
 from ..harness.sandbox import PolicyError, Sandbox
@@ -56,26 +59,27 @@ def describe_tool(m, full=True):
 
 
 class Agent:
-    def __init__(self, cfg, approval_handler=None, backend=None, fallback_provider=None, label="", log=None):
+    def __init__(self, cfg, approval_handler=None, backend=None, tier_backends=None, start_tier=None, label="", log=None):
         self.cfg = cfg
         self.log = log or RunLog(cfg.abspath("runs"), label=label)
         self.run_dir = self.log.dir
         self.work = os.path.join(self.run_dir, "work")
         os.makedirs(os.path.join(self.work, "in"), exist_ok=True)
         os.makedirs(os.path.join(self.work, "out"), exist_ok=True)
-        lc = cfg["local"]
-        self.model = lc["model"]
-        self.backend = backend or make_backend(Endpoint(lc["backend"], lc["url"], options={},
-                                                        max_tokens=cfg["caps"]["reply_max_tokens"],
-                                                        timeout_s=cfg["caps"]["reply_max_s"]))
-        self.model_options = {"num_ctx": lc["num_ctx"], "temperature": lc["temperature"]} if lc["backend"] == "ollama" \
-            else {"temperature": lc["temperature"]}
+        self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
+        if backend is not None:
+            self.tier_backends["local"] = backend
+        self.start_tier = start_tier or cfg["routing"]["start"]
+        self.tier_tokens, self.tiers_used, self.escalated_from = {}, [], None
+        self._use_tier(self.start_tier)
+        self.local_t0 = time.time()
         self.registry = Registry(cfg.abspath("state"))
         self.lessons = LessonStore(cfg.abspath("state"))
         self.sandbox = Sandbox(cfg, self.log)
         self.gate = ApprovalGate(cfg, self.log, approval_handler)
-        self.fallback = Fallback(cfg, self.log, fallback_provider)
         self.wd = Watchdogs(cfg, self.log)
+        self.wd.tier = self.tier
+        self.local_budget_noted = False
         self.stop_event = threading.Event()
         self.abort_reason = None
         self.tokens = 0
@@ -83,6 +87,64 @@ class Agent:
         self.escalations = 0
         self.run_t0 = time.time()
         self.on_delta = lambda kind, text: self.log.emit("delta", stream=kind, text=text)
+
+    # ------------------------------------------------------------ model tiers
+    def _backend_for(self, tier):
+        if tier not in self.tier_backends:
+            tc = self.cfg[tier]
+            self.tier_backends[tier] = make_backend(Endpoint(
+                tc["backend"], tc["url"], options={}, api_key_env=tc.get("api_key_env", ""),
+                max_tokens=self.cfg["caps"]["reply_max_tokens"], timeout_s=self.cfg["caps"]["reply_max_s"]))
+        return self.tier_backends[tier]
+
+    def _use_tier(self, tier):
+        tc = self.cfg[tier]
+        self.tier, self.backend, self.model = tier, self._backend_for(tier), tc["model"]
+        self.model_options = {"temperature": tc["temperature"]}
+        if tc["backend"] == "ollama":
+            self.model_options["num_ctx"] = tc["num_ctx"]
+        if tc.get("thinking_controls") is False:
+            self.model_options["thinking_controls"] = False
+        if tier not in self.tiers_used:
+            self.tiers_used.append(tier)
+
+    def tier_available(self, tier):
+        """Enabled in config and answering. A gateway that is down must not eat the task's time."""
+        if tier == self.tier or not self.cfg[tier].get("enabled", True):
+            return False
+        try:
+            self._backend_for(tier).list_models()
+            return True
+        except (OSError, ValueError) as e:
+            self.log.emit("error", text=f"{tier} tier not reachable at {self.cfg[tier]['url']}: {e}")
+            return False
+
+    def switch_tier(self, tier, why, decided_by):
+        prev = self.tier
+        self._use_tier(tier)
+        self.wd.tier = tier
+        self.wd.reset_tool()                                 # the new model gets a full attempt budget
+        self.escalated_from = self.escalated_from or prev
+        self.escalations += 1
+        self.log.emit("tier", previous=prev, tier=tier, model=self.model, why=why, decided_by=decided_by,
+                      leaves_machine=tier != "local")
+
+    def local_time_up(self):
+        return self.tier == "local" and time.time() - self.local_t0 > self.cfg["routing"]["local_budget_s"]
+
+    def auto_escalate(self, why):
+        """local -> free without asking (routing.auto_escalate). False when free is off or unreachable."""
+        if self.tier != "local" or not self.cfg["routing"]["auto_escalate"] or not self.tier_available("free"):
+            return False
+        self.switch_tier("free", why, "auto")
+        return True
+
+    def offer_paid(self):
+        """Paid is an option in a dialog only when it is configured and not already in use."""
+        return self.tier != "paid" and self.cfg["paid"].get("enabled", True)
+
+    def tier_tokens_cap(self):
+        return self.cfg["caps"]["tokens_per_run"] if self.tier == "local" else self.cfg[self.tier]["tokens_per_run"]
 
     # ------------------------------------------------------------ control
     def abort(self, reason):
@@ -117,15 +179,16 @@ class Agent:
         for a in attachments:
             shutil.copy(a, os.path.join(self.work, "in", os.path.basename(a)))
         self.log.emit("run_start", task=task, attachments=[os.path.basename(a) for a in attachments],
-                      model=self.model, backend=self.cfg["local"]["backend"], fallback_enabled=self.fallback.enabled,
+                      model=self.model, tier=self.tier, backend=self.cfg[self.tier]["backend"],
                       caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
         tl = time.time()
         try:
             self.backend.load(self.model, self.model_options)
         except OSError as e:
-            self.log.emit("error", text=f"local backend not reachable: {e}")
+            self.log.emit("error", text=f"{self.tier} backend not reachable: {e}")
         self.log.emit("info", text=f"model {self.model} loaded in {time.time() - tl:.1f} s; swap baseline taken after loading",
                       swap_used_mib=round(hwmon.swap_used_mib()))
+        self.local_t0 = time.time()
         swap = hwmon.SwapWatch(self.cfg["watchdogs"]["swap_growth_mib"], self._swap_trip).begin()
         self.wd.reset_task()
         try:
@@ -146,10 +209,9 @@ class Agent:
         finally:
             swap.stop()
         summary = {"run_id": self.log.run_id, "task": task, "status": status, "answer": answer, "error": error,
-                   "secs": round(time.time() - t0, 1), "local_tokens": self.tokens, "created": self.created,
+                   "secs": round(time.time() - t0, 1), "tokens": self.tokens, "created": self.created,
                    "repairs": self.repaired, "escalations": self.escalations,
-                   "fallback": {"calls": self.fallback.calls, "tokens": self.fallback.tokens,
-                                "spend_usd": round(self.fallback.spend, 4)},
+                   "tiers": {"start": self.start_tier, "used": self.tiers_used, "tokens": self.tier_tokens},
                    "watchdogs": self._watchdog_counts(), "outputs": self.produced_files(),
                    "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
@@ -261,7 +323,7 @@ class Agent:
             t = Turns(self, "execute", msgs, EXEC_TOOLS)
             try:
                 reply = t.ask()
-            except (RestartRequested, EscalateRequested):
+            except RestartRequested:
                 raise AgentStop("stopped at the time/turn limit during execution")
             content = reply.get("content") or ""
             for call in reply["tool_calls"]:

@@ -68,11 +68,12 @@ config screen for the same file.
 | Repeated passing test | 2 unchanged reruns, still passing | Straight to review |
 | File rewritten too often | More than 3 full rewrites of one file | Forced `explain` step: what fails, why, next change |
 | Failed attempts in a row | 3 failing test runs after edits | Fresh conversation with spec, current files and failing output. Counts toward the 10 attempts. |
-| Attempt budget | 10 attempts on one tool | Cloud fallback dialog if enabled, otherwise stop and report |
+| Attempt budget | 10 attempts on one tool, per model tier | Local: the task moves to free. Then a dialog: advice, paid, or stop |
 | Unparseable tool call | Parse or JSON error | "Resend as one small call", up to 5x. Not an attempt. |
 | Empty reply / lost call | No tool call | One nudge. Not an attempt. |
 | Runaway output | 8,192 tokens or 300 s per reply | The reply is discarded with "make smaller changes" |
-| Time and turn limits | 20 min or 30 turns per tool creation / execution phase | Dialog: hint, restart, fallback, stop |
+| Local time budget | 15 min of local model time per task | The task moves to free and stays there |
+| Time and turn limits | 20 min or 30 turns per tool creation / execution phase | Dialog: hint, restart, paid, stop |
 | Hard run cap | 3600 s per run, 1.5M local tokens per run | Stop |
 | Command policy | argv allowlist | Commands are argv lists and never touch a shell. Denials are logged. |
 | Hardware | Swap grows by more than 250 MiB | Abort the run. The baseline is taken after the model is loaded. |
@@ -91,25 +92,26 @@ budget stops at 10 and that restarts do not reset it.
   `--internal` network with no route out. Each declared host resolves to an egress forwarder container
   (`sandbox/egress.py`), which forwards only to the allowlist and picks the destination by TLS SNI or HTTP
   Host. Every allow and deny is logged. `tests/test_policy.py` checks that undeclared hosts, raw IPs, the
-  host loopback, the Ollama port, host paths and host env vars are all unreachable.
+  host loopback, the model server ports, host paths and host env vars are all unreachable.
 - **Sandbox base image** (`sandbox/Containerfile.base`): `python:3.12-slim` (Debian 13.6, Python 3.12.14),
   plus `pytest 8.3.5` (with its dependencies `iniconfig`, `packaging`, `pluggy`) and a non-root user `tool`
   (uid 1000). Nothing else. Extra apt or pip packages are requested in the spec, approved in the dialog,
   built into a derived image `mini-sandbox:pkg-<hash>`, and logged.
 
-## Cloud fallback
+## Model tiers
 
-- One interface (`mini/harness/fallback.py: Provider`). The first provider is the Claude subscription through
-  `claude -p` and the existing Claude Code login, with no API key in the repo. Codex CLI, Gemini CLI or an
-  API-key endpoint can be added as further `Provider` subclasses.
-- Text in, text out. The reply's code blocks go through the same sandbox tests and install gate.
-- It escalates only after the 10-attempt budget runs out (or when you pick "fallback" at a time/turn limit).
-  The dialog shows the provider, the reason, how many local attempts failed, and that task content leaves the
-  machine.
-- It sends a compact summary: the task, the spec, the last code and the failing test output. Never the
-  conversation.
-- Caps per run: 3 attempts per tool, 60k tokens, and $0.50 estimated spend. Before every call the worst case
-  (estimated input plus `CLAUDE_CODE_MAX_OUTPUT_TOKENS` = 8000 at Sonnet prices) must fit in what is left, so
-  the cap cannot be overshot.
-- Tools built by the fallback carry `created_by.fallback = true` and show as `[FALLBACK]` in the registry
-  browser and the log.
+| Tier | What | When |
+|---|---|---|
+| `local` | llama.cpp `llama-server` (or Ollama) on this machine | Every task starts here (`routing.start`) |
+| `free` | OmniRoute combo `mini-free`: free cloud models with failover | Automatically, when local has used its 15 min or its attempt budget. Stays for the rest of the task |
+| `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Lasts one task |
+
+- Config: `[local]`, `[free]`, `[paid]`, `[routing]` in `config/mini.toml`. Free and paid are OpenAI-compatible
+  endpoints; the actual models behind `mini-free` and `mini-paid` are chosen in OmniRoute's dashboard.
+- The OmniRoute API key is read from `$OMNIROUTE_API_KEY` or `~/.config/mini/env` (`OMNIROUTE_API_KEY=...`). It is
+  never in the repo and never reaches a sandbox.
+- A switch keeps the conversation: the new model carries on from where the old one stopped. After a used-up
+  attempt budget it gets a fresh conversation with the spec, the files and the last failure instead.
+- Every switch is logged as a `tier` event and shown in the UI, including that task data now leaves the machine.
+  Tools record which tier built them (`created_by.provider`, `escalated_from`) and attempts per tier.
+- `mini run --model free` starts on another tier; `--no-escalate` stays on the start tier.

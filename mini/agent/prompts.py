@@ -127,6 +127,20 @@ Last failing test output:
 Diagnose the failure from the output above, then fix it: edit with `replace` / `replace_lines`, or call
 `rewrite_file` for a whole new file. Then call `run_tests`."""
 
+HANDOVER = """You take over building this tool from another model. Its attempts so far, per model tier: {attempts}.
+
+Spec:
+{spec}
+
+Current files:
+{files}
+
+Last failing test output:
+{output}
+
+Diagnose the failure from the output above. Keep what works; fix what does not. Fix the tests too if they
+contradict the spec."""
+
 EXECUTE = """Task from the user:
 {task}
 
@@ -147,40 +161,6 @@ reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If
 no tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked
 (the requested item, not a different or nearby one). If it does not, that is a tool bug: call `report_tool_bug`.
 When the task is done, call `finish` with the answer for the user and the list of files you produced."""
-
-FALLBACK_SYSTEM = """You fix one Python tool for an agent harness. You have no tools: reply with text only.
-Reply with exactly two fenced code blocks, the complete files, named in the info string:
-```python tool.py
-...
-```
-```python test_tool.py
-...
-```
-Keep the spec, its permissions and its packages exactly as given; you cannot change them."""
-
-FALLBACK = """{rules}
-
-The local model could not make this tool pass its tests in {attempts} attempts.
-
-Task that needs the tool: {task}
-
-Spec:
-{spec}
-
-Last tool.py:
-```python
-{tool}
-```
-
-Last test_tool.py:
-```python
-{test}
-```
-
-Last failing test output:
-{output}
-
-Write corrected complete files. Fix the tests too if they contradict the spec."""
 
 WRITE_CONTENT = """Send the content of {path} now as one fenced block, no tool call:
 

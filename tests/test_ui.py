@@ -7,7 +7,7 @@ import unittest
 
 from mini.harness.registry import Registry
 from mini.ui.app import ApprovalScreen, MiniApp
-from tests.helpers import fake_backend, temp_config
+from tests.helpers import call, fake_backend, step, temp_config
 from tests.test_pipeline import script
 
 
@@ -46,6 +46,32 @@ class UITest(unittest.TestCase):
                 self.assertEqual(app.query_one("#reg-table").row_count, 1)
         asyncio.run(go())
         self.assertEqual(seen, ["confirm", "install"])
+
+    def test_model_command_paid_lasts_one_task(self):
+        cfg = temp_config(**{"approvals.confirm_first": False, "paid.enabled": True})
+        cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")
+        quick = lambda: fake_backend([step(call("understand", goal="g", inputs=[], outputs=["n"], plan="1")),
+                                      step(call("decide_coverage", reasoning="none needed", use=[], missing=[])),
+                                      step(call("finish", answer="done"))])
+        app = MiniApp(cfg, backend_factory=quick)
+        used = []
+
+        async def go():
+            async with app.run_test(size=(180, 50)) as pilot:
+                await pilot.press(*"/model paid")
+                await pilot.press("enter")
+                self.assertIn("paid", str(app.query_one("#status").render()))
+                for _ in range(2):
+                    await pilot.press(*"say done")
+                    await pilot.press("enter")
+                    for _ in range(100):
+                        await pilot.pause(0.1)
+                        if not app.busy:
+                            break
+                    used.append(app.agent.start_tier)
+                self.assertIn("local", str(app.query_one("#status").render()))
+        asyncio.run(go())
+        self.assertEqual(used, ["paid", "local"])
 
 
 if __name__ == "__main__":

@@ -24,8 +24,8 @@ class Endpoint:
         self.max_tokens, self.timeout_s = max_tokens, timeout_s
 
     def api_key(self):
-        import os
-        return os.environ.get(self.api_key_env, "") if self.api_key_env else ""
+        from .config import secret
+        return secret(self.api_key_env)
 
 
 class Backend:
@@ -152,13 +152,16 @@ class OpenAIBackend(Backend):
 
     def chat(self, model, messages, tools, think=False, options=None, on_delta=None, stop_event=None):
         opts = {**self.ep.options, **(options or {})}
-        body = {"model": model, "messages": self._convert(messages), "tools": tools, "stream": True,
-                "max_tokens": opts.pop("max_tokens", self.ep.max_tokens)}
-        kw = dict(opts.pop("chat_template_kwargs", {}))
-        kw.setdefault("enable_thinking", bool(think))
-        body["chat_template_kwargs"] = kw
-        if not think:
-            body["reasoning_budget"] = 0
+        body = {"model": model, "messages": self._convert(messages), "stream": True,
+                "stream_options": {"include_usage": True}, "max_tokens": opts.pop("max_tokens", self.ep.max_tokens)}
+        if tools:
+            body["tools"] = tools
+        if opts.pop("thinking_controls", True):          # llama-server fields; a gateway may reject them
+            kw = dict(opts.pop("chat_template_kwargs", {}))
+            kw.setdefault("enable_thinking", bool(think))
+            body["chat_template_kwargs"] = kw
+            if not think:
+                body["reasoning_budget"] = 0
         body.update({k: v for k, v in opts.items() if k in ("temperature", "top_p", "top_k", "min_p", "repeat_penalty",
                                                               "presence_penalty", "seed", "reasoning_budget")})
         req = urllib.request.Request(self.ep.url + "/chat/completions", data=json.dumps(body).encode(), headers=self._headers())
@@ -170,6 +173,9 @@ class OpenAIBackend(Backend):
             r = urllib.request.urlopen(req, timeout=self.ep.timeout_s)
         except urllib.error.HTTPError as e:
             out["raw_error"] = f"HTTP {e.code}: {e.read()[:300]!r}"
+            return out
+        except urllib.error.URLError as e:
+            out["raw_error"] = f"unreachable: {e.reason}"
             return out
         except (socket.timeout, TimeoutError):
             out.update(done_reason="timeout", secs=round(time.time() - t0, 2))
@@ -194,9 +200,10 @@ class OpenAIBackend(Backend):
                     out["output_tokens"] = ev["usage"].get("completion_tokens") or 0
                 for ch in ev.get("choices") or []:
                     d = ch.get("delta") or {}
-                    if d.get("reasoning_content"):
-                        out["thinking"] += d["reasoning_content"]
-                        on_delta and on_delta("thinking", d["reasoning_content"])
+                    rc = d.get("reasoning_content") or d.get("reasoning")
+                    if isinstance(rc, str) and rc:
+                        out["thinking"] += rc
+                        on_delta and on_delta("thinking", rc)
                     if d.get("content"):
                         out["content"] += d["content"]
                         on_delta and on_delta("content", d["content"])
