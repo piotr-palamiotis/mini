@@ -21,6 +21,10 @@ mini has two parts:
 
 ## Quick start
 
+Local model (llama.cpp, Vulkan): `llama-server` runs as the systemd user unit `llama-server.service` on
+127.0.0.1:8080 and loads gemma4:12b straight from Ollama's store (`scripts/ollama-gguf gemma4:12b` prints the GGUF
+path), so the weights are not on disk twice. `systemctl --user status llama-server` shows it.
+
 ```sh
 python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is standard library only
 .venv/bin/python -m mini setup                            # build the sandbox base image (rootless Podman)

@@ -1,10 +1,12 @@
 # mini configuration. Missing keys fall back to mini/harness/config.py DEFAULTS.
 
 [local]
-backend = "ollama"
-url = "http://127.0.0.1:11434"
+# llama.cpp llama-server (systemd user unit llama-server.service, Vulkan, 64k context set there).
+# For Ollama instead: backend = "ollama", url = "http://127.0.0.1:11434".
+backend = "openai"
+url = "http://127.0.0.1:8080/v1"
 model = "gemma4:12b"
-num_ctx = 65536
+num_ctx = 65536          # used by the ollama backend only
 gpu_env = ""
 launch_cmd = []
 temperature = 0.6

@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Print the GGUF file of an Ollama model, so llama-server can load it without a second copy on disk.
+
+usage: scripts/ollama-gguf MODEL[:TAG] [--part model|projector|draft]
+The models directory comes from $OLLAMA_MODELS, else the ollama service's setting, else ~/.ollama/models.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def models_dir():
+    if os.environ.get("OLLAMA_MODELS"):
+        return os.environ["OLLAMA_MODELS"]
+    try:
+        unit = subprocess.run(["systemctl", "cat", "ollama"], capture_output=True, text=True).stdout
+        m = re.search(r'^Environment="?OLLAMA_MODELS=([^"\n]+)', unit, re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return os.path.expanduser("~/.ollama/models")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 2
+    name, _, tag = argv[0].partition(":")
+    part = argv[argv.index("--part") + 1] if "--part" in argv else "model"
+    if "/" not in name:
+        name = "library/" + name
+    root = models_dir()
+    manifest = os.path.join(root, "manifests", "registry.ollama.ai", name, tag or "latest")
+    try:
+        layers = json.load(open(manifest))["layers"]
+    except OSError:
+        print(f"no Ollama manifest at {manifest}", file=sys.stderr)
+        return 1
+    for layer in layers:
+        if layer["mediaType"] == f"application/vnd.ollama.image.{part}":
+            path = os.path.join(root, "blobs", layer["digest"].replace(":", "-"))
+            with open(path, "rb") as f:
+                if f.read(4) != b"GGUF":
+                    print(f"{path} is not a GGUF file", file=sys.stderr)
+                    return 1
+            print(path)
+            return 0
+    print(f"{argv[0]} has no {part} layer", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
