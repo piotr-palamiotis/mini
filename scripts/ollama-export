@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Print the shell commands that move models out of an Ollama store into a llama.cpp models folder.
+
+usage: scripts/ollama-export DEST [--store DIR] [--owner USER]
+
+Nothing is changed: read the commands, then run them (they need root, the store belongs to the ollama user):
+    scripts/ollama-export /mnt/disk_a/models | sudo sh -e
+Each model becomes DEST/NAME.gguf, or DEST/NAME/ with NAME.gguf and mmproj-NAME.gguf when it has a vision
+projector (the layout llama-server --models-dir reads). Draft models (speculative decoding) go to DEST-drafts/.
+Files are moved, not copied: on the same disk this is instant and uses no extra space. The store's other files
+(manifests, templates, licenses) stay where they are; delete the store yourself afterwards.
+The store comes from --store, $OLLAMA_MODELS, the ollama service's OLLAMA_MODELS, or ~/.ollama/models.
+"""
+import getpass
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+
+def store_dir():
+    if os.environ.get("OLLAMA_MODELS"):
+        return os.environ["OLLAMA_MODELS"]
+    try:
+        unit = subprocess.run(["systemctl", "cat", "ollama"], capture_output=True, text=True).stdout
+        m = re.search(r'^Environment="?OLLAMA_MODELS=([^"\n]+)', unit, re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return os.path.expanduser("~/.ollama/models")
+
+
+def main(argv):
+    if not argv or argv[0].startswith("-"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    dest = os.path.abspath(os.path.expanduser(argv[0]))
+    store = argv[argv.index("--store") + 1] if "--store" in argv else store_dir()
+    owner = argv[argv.index("--owner") + 1] if "--owner" in argv else getpass.getuser()
+    drafts = dest.rstrip("/") + "-drafts"
+    base = os.path.join(store, "manifests", "registry.ollama.ai")
+    if not os.path.isdir(base):
+        print(f"no Ollama store at {store}", file=sys.stderr)
+        return 1
+    q = shlex.quote
+    lines = [f"# move models from {store} to {dest}", f"mkdir -p {q(dest)}"]
+    moved = {}                                         # blob -> where it went (a shared blob is linked, not moved twice)
+
+    def put(blob, target):
+        src = os.path.join(store, "blobs", blob.replace(":", "-"))
+        lines.append(f"mkdir -p {q(os.path.dirname(target))}")
+        lines.append(f"ln {q(moved[blob])} {q(target)}" if blob in moved else f"mv {q(src)} {q(target)}")
+        moved.setdefault(blob, target)
+
+    for ns_dir, _, tags in sorted(os.walk(base)):
+        for tag in sorted(tags):
+            ns = os.path.relpath(ns_dir, base)
+            name = ns[len("library/"):] if ns.startswith("library/") else ns.replace("/", "-")
+            nice = f"{name}-{tag}".replace(":", "-").replace("/", "-")
+            with open(os.path.join(ns_dir, tag)) as f:
+                layers = {l["mediaType"].rsplit(".", 1)[-1]: l["digest"] for l in json.load(f)["layers"]}
+            if "model" not in layers:
+                continue
+            lines.append(f"# {name}:{tag}")
+            if "projector" in layers:
+                put(layers["model"], os.path.join(dest, nice, nice + ".gguf"))
+                put(layers["projector"], os.path.join(dest, nice, f"mmproj-{nice}.gguf"))
+            else:
+                put(layers["model"], os.path.join(dest, nice + ".gguf"))
+            if "draft" in layers:
+                put(layers["draft"], os.path.join(drafts, nice + "-draft.gguf"))
+    has_drafts = any(t.startswith(drafts + os.sep) for t in moved.values())
+    lines.append(f"chown -R {q(owner)}: {q(dest)}" + (f" {q(drafts)}" if has_drafts else ""))
+    lines.append(f"echo 'done: models are in {dest}'")
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

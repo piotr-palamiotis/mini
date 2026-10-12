@@ -1,16 +1,23 @@
 # mini configuration. Missing keys fall back to mini/harness/config.py DEFAULTS.
 
 [local]
-# llama.cpp llama-server (systemd user unit llama-server.service, Vulkan, 64k context set there).
-# For Ollama instead: backend = "ollama", url = "http://127.0.0.1:11434".
+# The local tier. `use` lists backends from [backends.*] in order of preference; mini setup writes them.
 backend = "openai"
 url = "http://127.0.0.1:8080/v1"
-model = "gemma4:12b"
-num_ctx = 65536          # used by the ollama backend only
-gpu_env = ""
-launch_cmd = []
+model = "gemma4-12b"
 temperature = 0.6
-use = ["llamacpp", "ollama"]
+use = ["llamacpp"]
+
+[llamacpp]
+# mini setup builds the pinned llama.cpp release in `dir` and runs llama-server in router mode over
+# `models_dir`: every NAME.gguf (or NAME/ folder with the model and its mmproj-*.gguf) is a model mini can use.
+dir = "/mnt/disk_a/llama.cpp"
+models_dir = "/mnt/disk_a/models"
+port = 8080
+device = "Vulkan0"       # llama-server --list-devices
+ctx = 65536              # context per model
+models_max = 1           # models in VRAM at once; others load on demand
+extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1"
 
 [thinking]
 parse = false
@@ -111,10 +118,4 @@ runs = "runs"
 [backends.llamacpp]
 backend = "openai"
 url = "http://127.0.0.1:8080/v1"
-model = "gemma4:12b"
-gguf = "ollama:gemma4:12b"
-
-[backends.ollama]
-backend = "ollama"
-url = "http://127.0.0.1:11434"
-model = "gemma4:12b"
+model = "gemma4-12b"

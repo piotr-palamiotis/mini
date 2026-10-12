@@ -126,8 +126,6 @@ class Agent:
         tc = self.cfg[tier]
         self.tier, self.backend, self.model = tier, self._backend_for(tier), tc["model"]
         self.model_options = {"temperature": tc["temperature"]}
-        if tc["backend"] == "ollama":
-            self.model_options["num_ctx"] = tc["num_ctx"]
         if tc.get("thinking_controls") is False:
             self.model_options["thinking_controls"] = False
         if tier not in self.tiers_used:

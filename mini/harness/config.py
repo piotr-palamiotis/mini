@@ -12,18 +12,24 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 DEFAULTS = {
     "local": {
-        "backend": "ollama",                 # ollama | openai (llama.cpp llama-server, vLLM, LM Studio ...)
-        "url": "http://127.0.0.1:11434",     # for openai: http://127.0.0.1:8080/v1
-        "model": "gemma4:12b",
-        "num_ctx": 65536,                    # changing this needs the owner's approval (VRAM budget)
-        "gpu_env": "",                       # e.g. "GGML_VK_VISIBLE_DEVICES=0"; applied to launch_cmd
-        "launch_cmd": [],                    # optional argv to start a local server (llama-server ...)
+        "backend": "openai",                 # openai = any OpenAI-compatible server (llama.cpp llama-server, ...)
+        "url": "http://127.0.0.1:8080/v1",
+        "model": "gemma4-12b",
         "temperature": 0.6,
         "use": [],                           # local backends in order of preference, from [backends.<name>];
                                              # a task runs on the first that answers and has its model.
                                              # Empty: the backend/url/model above.
     },
-    "backends": {},                          # name -> {backend, url, model, num_ctx?}; written by mini setup
+    "backends": {},                          # name -> {backend, url, model}; written by mini setup
+    "llamacpp": {                            # the llama.cpp install mini setup manages
+        "dir": "/mnt/disk_a/llama.cpp",      # source checkout and build of the pinned release
+        "models_dir": "/mnt/disk_a/models",  # GGUF files: NAME.gguf, or NAME/ with the model and its mmproj-*.gguf
+        "port": 8080,
+        "device": "",                        # e.g. Vulkan0; empty: setup asks (llama-server --list-devices)
+        "ctx": 65536,                        # context per model
+        "models_max": 1,                     # models in memory at once; others load on demand
+        "extra_args": "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1",
+    },
     "thinking": {                            # thinking per step
         "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,
     },

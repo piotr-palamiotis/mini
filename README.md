@@ -30,17 +30,22 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 `mini setup` goes through each piece, says what is missing, and asks before it changes anything:
 
 1. **Sandbox:** podman (prints the `sudo apt` command if missing) and the sandbox image (builds it).
-2. **Local models:** a checklist of local backends: llama.cpp (llama-server with Vulkan), Ollama, and any
-   other OpenAI-compatible server (LM Studio, vLLM, ...). Tick several and pick which comes first: each task
-   runs on the first one that answers with its model, so the others are a fallback (`[local] use` and
-   `[backends.*]` in the config). For llama.cpp, setup builds exactly the release mini is tested with,
-   **`b11567` (commit `972b5fc`)**, and checks that the installed `llama-server` is that build and that it
-   can load the model you picked (the GGUF's architecture is read from the file and looked up in the built
-   library). Tested with gemma4 12B and qwen3.5 9B, Vulkan on an RX 6700 XT, tool calls via `--jinja`,
-   thinking via `--reasoning-format auto`, 64k context with a q8_0 KV cache. The pin lives in
-   `mini/setup.py` (`LLAMA_TAG`, `LLAMA_COMMIT`). Models come from Ollama's store (no second copy on disk)
-   or any GGUF file; setup also picks the GPU and the context size and runs `llama-server` as a systemd
-   user service started at boot. Prints the `sudo apt` line for missing build tools.
+2. **Local models:** a checklist of local backends: llama.cpp, and any other OpenAI-compatible server
+   (LM Studio, vLLM, ...). Tick several and pick which comes first: each task runs on the first one that
+   answers with its model, so the others are a fallback (`[local] use`, `[backends.*]`).
+   - **llama.cpp** is built in `[llamacpp] dir` (setup asks where) from exactly the release mini is tested
+     with, **`b11567` (commit `972b5fc`)**, with Vulkan. The pin lives in `mini/setup.py` (`LLAMA_TAG`,
+     `LLAMA_COMMIT`); `doctor` checks that the built `llama-server` is that commit.
+   - `llama-server` runs in **router mode** over `[llamacpp] models_dir`: every `NAME.gguf`, or `NAME/` folder
+     with the model and its `mmproj-*.gguf` (vision), is a model, loaded on demand (`models_max` at once).
+     Add a GGUF to the folder and it is available; no reconfiguration.
+   - Setup checks each model's architecture (read from the GGUF header, looked up in the built library) and
+     **load-tests** the model mini uses: a known architecture is not enough (Ollama's qwen3.5 9B conversion
+     names a known architecture but this release rejects its rope metadata). Tested: gemma4 12B, Vulkan on
+     an RX 6700 XT, tool calls via `--jinja`, thinking via `--reasoning-format auto`, 64k context, q8_0 KV
+     cache.
+   - Setup picks the GPU and the context size and runs the router as a systemd user service started at boot.
+     It prints the `sudo apt` line for missing build tools.
 3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
 4. **Cloud tiers (optional):** installs OmniRoute with npm if missing, runs it as a user service bound to
    127.0.0.1 with an API key required, walks you through the dashboard (providers, an API key, the combos
@@ -50,31 +55,9 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 It never replaces a systemd unit it did not write without asking (and keeps a `.bak`). The UI shows the state
 of each tier at startup and on `/status`.
 
-```sh
-python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is standard library only
-.venv/bin/python -m mini setup                            # guided first-run setup (also offered on first launch)
-.venv/bin/python -m mini doctor                           # check everything, change nothing
-```
-
-`mini setup` goes through each piece, says what is missing, and asks before it changes anything:
-
-1. **Sandbox:** podman (prints the `sudo apt` command if missing) and the sandbox image (builds it).
-2. **Local model:** builds llama.cpp with Vulkan if needed (pinned release; prints the `sudo apt` line for
-   missing build tools), lets you pick a model from Ollama's store or any GGUF file, picks the GPU and the
-   context size, and runs `llama-server` as a systemd user service started at boot. Or keeps Ollama, if
-   `[local] backend = "ollama"`.
-3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
-4. **Cloud tiers (optional):** installs OmniRoute with npm if missing, runs it as a user service bound to
-   127.0.0.1 with an API key required, walks you through the dashboard (providers, an API key, the combos
-   `mini-free` and `mini-paid`), checks the key and saves it to `~/.config/mini/env` (mode 600). You can
-   also rename the combos or turn a tier off.
-
-It never replaces a systemd unit it did not write without asking (and keeps a `.bak`). The UI shows the state
-of each tier at startup and on `/status`.
-
-Local model (llama.cpp, Vulkan): `llama-server` runs as the systemd user unit `llama-server.service` on
-127.0.0.1:8080 and loads gemma4:12b straight from Ollama's store (`scripts/ollama-gguf gemma4:12b` prints the GGUF
-path), so the weights are not on disk twice. `systemctl --user status llama-server` shows it.
+**Models from Ollama:** `scripts/ollama-export DEST` prints the commands that move an Ollama store's GGUF
+files into the models folder layout (instant on the same disk, no copies); run them with
+`scripts/ollama-export /mnt/disk_a/models | sudo sh -e`. Draft models go to `DEST-drafts/`.
 
 ```sh
 .venv/bin/python -m mini                                  # Textual UI
@@ -191,7 +174,7 @@ one is missing, which **questions** it asks and in what order, what it confirms 
 
 | Tier | What | When |
 |---|---|---|
-| `local` | llama.cpp `llama-server` (or Ollama) on this machine | Every task starts here (`routing.start`) |
+| `local` | llama.cpp `llama-server` (router over your models folder) on this machine | Every task starts here (`routing.start`) |
 | `free` | OmniRoute combo `mini-free`: free cloud models with failover | Automatically, when local has used its 15 min or its attempt budget. Stays for the rest of the task |
 | `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Lasts one task |
 

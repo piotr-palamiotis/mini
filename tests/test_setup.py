@@ -174,32 +174,87 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(metadata(p, ("general.name",)), {"general.name": "N"})
 
     def test_backend_checklist_and_order(self):
-        self.cfg["local"].update(backend="openai", url="http://127.0.0.1:8080/v1", model="m:1", use=[])
+        self.cfg["local"].update(model="m1", use=[])
         self.cfg["backends"] = {}
-        ui = ScriptUI(checklist=[[setup.BACKENDS["llamacpp"], setup.BACKENDS["ollama"]]], choice=[setup.BACKENDS["ollama"]])
+        ui = ScriptUI(checklist=[[setup.BACKENDS["llamacpp"], setup.BACKENDS["custom"]]], choice=[setup.BACKENDS["custom"]])
         setup.choose_backends(self.cfg, ui)
         data = tomllib.load(open(self.cfg.path, "rb"))
-        self.assertEqual(data["local"]["use"], ["ollama", "llamacpp"])
-        self.assertEqual(data["backends"]["llamacpp"], {"backend": "openai", "url": "http://127.0.0.1:8080/v1",
-                                                         "model": "m:1", "gguf": "ollama:m:1"})
-        self.assertEqual(data["backends"]["ollama"]["url"], "http://127.0.0.1:11434")
+        self.assertEqual(data["local"]["use"], ["custom", "llamacpp"])
+        self.assertEqual(data["backends"]["llamacpp"], {"backend": "openai", "url": "http://127.0.0.1:8080/v1", "model": "m1"})
+        self.assertNotIn("ollama", setup.BACKENDS)
 
-    def test_llama_version_and_architecture_checks(self):
-        entry = {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "m", "gguf": "/x.gguf"}
-        with mock.patch.object(setup, "llama_server_bin", return_value="/bin/llama-server"), \
+    def gguf(self, path, arch):
+        import struct
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        k, v = "general.architecture", arch
+        with open(path, "wb") as f:
+            f.write(b"GGUF" + struct.pack("<IQQ", 3, 0, 1) + struct.pack("<Q", len(k)) + k.encode()
+                    + struct.pack("<I", 8) + struct.pack("<Q", len(v)) + v.encode())
+
+    def test_models_folder_layout(self):
+        d = os.path.join(self.tmp, "models")
+        self.gguf(os.path.join(d, "plain.gguf"), "a")
+        self.gguf(os.path.join(d, "vis", "vis.gguf"), "b")
+        self.gguf(os.path.join(d, "vis", "mmproj-vis.gguf"), "clip")
+        self.gguf(os.path.join(d, "mmproj-stray.gguf"), "clip")
+        os.makedirs(os.path.join(d, "empty"))
+        m = setup.models_in(d)
+        self.assertEqual(sorted(m), ["plain", "vis"])
+        self.assertEqual(m["vis"]["mmproj"], os.path.join(d, "vis", "mmproj-vis.gguf"))
+        self.assertIsNone(m["plain"]["mmproj"])
+
+    def test_llama_checks(self):
+        d = os.path.join(self.tmp, "models")
+        self.cfg["llamacpp"].update(dir=os.path.join(self.tmp, "llama.cpp"), models_dir=d)
+        entry = {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "good"}
+        cs = setup.backend_checks(self.cfg, "llamacpp", entry)
+        self.assertEqual([c.key for c in cs], ["llama_install"])
+        self.assertIn(setup.LLAMA_TAG, cs[0].fix_text)
+        with mock.patch.object(setup, "llama_server", return_value="/x/llama-server"), \
                 mock.patch.object(setup, "llama_commit", return_value="0000000"), \
-                mock.patch.object(setup, "llama_supports", return_value=False), \
-                mock.patch("mini.harness.gguf.architecture", return_value="newarch"), \
                 mock.patch.object(setup, "unit_state", return_value=(False, False, False, False)):
             cs = {c.key: c for c in setup.backend_checks(self.cfg, "llamacpp", entry)}
-        self.assertFalse(cs["llama_version"].ok)
-        self.assertIn("0000000", cs["llama_version"].detail)
-        self.assertIn(setup.LLAMA_TAG, cs["llama_version"].fix_text)
-        self.assertFalse(cs["llama_arch"].ok)
-        self.assertIn("newarch", cs["llama_arch"].detail)
-        with mock.patch.object(setup, "llama_server_bin", return_value=None):
-            cs = setup.backend_checks(self.cfg, "llamacpp", entry)
-        self.assertEqual([c.key for c in cs], ["llama_install"])
+            self.assertFalse(cs["llama_version"].ok)
+            self.assertIn("0000000", cs["llama_version"].detail)
+            self.assertFalse(cs["models"].ok)
+            self.assertIn("scripts/ollama-export", cs["models"].manual)
+            self.gguf(os.path.join(d, "good.gguf"), "knownarch")
+            self.gguf(os.path.join(d, "odd.gguf"), "newarch")
+            with mock.patch.object(setup, "llama_supports", side_effect=lambda srv, a: a == "knownarch"):
+                cs = {c.key: c for c in setup.backend_checks(self.cfg, "llamacpp", entry)}
+        self.assertTrue(cs["models"].ok)
+        self.assertEqual(cs["models"].detail, "good, odd")
+        self.assertFalse(cs["model_arch"].ok)
+        self.assertIn("odd (newarch)", cs["model_arch"].detail)
+        self.assertFalse(cs["router"].ok)
+
+    def test_router_command(self):
+        self.cfg["llamacpp"].update(models_dir="/m", device="Vulkan0", port=8080, ctx=4096, models_max=1,
+                                    extra_args="--jinja")
+        self.assertEqual(setup.router_args(self.cfg, "/b/llama-server"),
+                         "/b/llama-server --models-dir /m --models-max 1 --host 127.0.0.1 --port 8080 "
+                         "--device Vulkan0 -ngl 999 -c 4096 --jinja --no-webui")
+
+    def test_ollama_export_prints_moves(self):
+        import subprocess
+        store = os.path.join(self.tmp, "store")
+        man = os.path.join(store, "manifests", "registry.ollama.ai", "library")
+        os.makedirs(os.path.join(man, "vis"))
+        os.makedirs(os.path.join(man, "txt"))
+        os.makedirs(os.path.join(store, "blobs"))
+        L = lambda kind, d: {"mediaType": f"application/vnd.ollama.image.{kind}", "digest": d}
+        json.dump({"layers": [L("model", "sha256:aa"), L("projector", "sha256:pp"), L("draft", "sha256:dd"),
+                              L("license", "sha256:ll")]}, open(os.path.join(man, "vis", "1b"), "w"))
+        json.dump({"layers": [L("model", "sha256:bb"), L("projector", "sha256:pp")]}, open(os.path.join(man, "txt", "2b"), "w"))
+        r = subprocess.run([os.path.join(config_mod.ROOT, "scripts", "ollama-export"), "/m", "--store", store, "--owner", "u"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [l for l in r.stdout.splitlines() if l.startswith(("mv ", "ln ", "chown "))]
+        b = os.path.join(store, "blobs")
+        self.assertEqual(lines, [
+            f"mv {b}/sha256-bb /m/txt-2b/txt-2b.gguf", f"mv {b}/sha256-pp /m/txt-2b/mmproj-txt-2b.gguf",
+            f"mv {b}/sha256-aa /m/vis-1b/vis-1b.gguf", "ln /m/txt-2b/mmproj-txt-2b.gguf /m/vis-1b/mmproj-vis-1b.gguf",
+            f"mv {b}/sha256-dd /m-drafts/vis-1b-draft.gguf", "chown -R u: /m /m-drafts"])
 
     def test_task_falls_back_to_the_next_backend(self):
         from mini.agent.core import Agent

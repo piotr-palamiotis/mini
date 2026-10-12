@@ -1,5 +1,5 @@
 """Model backends. Each turns a chat request into one normalized reply. Stdlib only.
-Reused from the earlier mini (mini/backends.py); changes: caps come from config, Endpoint is local.
+Every real backend speaks the OpenAI-compatible API: llama.cpp's llama-server locally, the gateway for the cloud.
 
 Normalized reply:
   {"content": str, "thinking": str, "tool_calls": [{"name": str, "arguments": dict}],
@@ -43,80 +43,22 @@ class Backend:
         return None
 
 
-class OllamaBackend(Backend):
-    """Ollama native /api/chat with streaming."""
-
-    def load(self, model, options=None):
-        body = {"model": model, "keep_alive": "30m", "options": {"num_gpu": 999, **(options or {})}}
-        req = urllib.request.Request(self.ep.url + "/api/generate", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as r:
-            r.read()
-
-    def list_models(self):
-        with urllib.request.urlopen(self.ep.url + "/api/tags", timeout=10) as r:
-            return [m["name"] for m in json.loads(r.read()).get("models", [])]
-
-    def chat(self, model, messages, tools, think=False, options=None, on_delta=None, stop_event=None):
-        opts = {"num_gpu": 999, "num_predict": self.ep.max_tokens, **self.ep.options, **(options or {})}
-        body = {"model": model, "messages": messages, "tools": tools, "stream": True,
-                "think": think, "keep_alive": "30m", "options": opts}
-        req = urllib.request.Request(self.ep.url + "/api/chat", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
-        out = {"content": "", "thinking": "", "tool_calls": [], "done_reason": None,
-               "prompt_tokens": 0, "output_tokens": 0, "secs": 0.0, "raw_error": None, "stopped": False}
-        t0 = time.time()
-        try:
-            r = urllib.request.urlopen(req, timeout=self.ep.timeout_s)
-        except (socket.timeout, TimeoutError):
-            out.update(done_reason="timeout", secs=round(time.time() - t0, 2))
-            return out
-        try:
-            for line in r:
-                if stop_event is not None and stop_event.is_set():
-                    out["stopped"] = True
-                    break
-                if not line.strip():
-                    continue
-                ev = json.loads(line)
-                if ev.get("error"):
-                    out["raw_error"] = ev["error"]
-                    break
-                msg = ev.get("message") or {}
-                if msg.get("thinking"):
-                    out["thinking"] += msg["thinking"]
-                    on_delta and on_delta("thinking", msg["thinking"])
-                if msg.get("content"):
-                    out["content"] += msg["content"]
-                    on_delta and on_delta("content", msg["content"])
-                for c in msg.get("tool_calls") or []:
-                    fn = c.get("function", {})
-                    args = fn.get("arguments") or {}
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except ValueError:
-                            args = {"_unparsed": args}
-                    out["tool_calls"].append({"name": fn.get("name", ""), "arguments": args})
-                if ev.get("done"):
-                    out["done_reason"] = ev.get("done_reason")
-                    out["prompt_tokens"] = ev.get("prompt_eval_count") or 0
-                    out["output_tokens"] = ev.get("eval_count") or 0
-                if time.time() - t0 > self.ep.timeout_s:
-                    out["done_reason"] = "timeout"
-                    break
-        except (socket.timeout, TimeoutError):
-            out["done_reason"] = "timeout"
-        finally:
-            r.close()      # closing the connection makes Ollama stop generating
-        out["secs"] = round(time.time() - t0, 2)
-        return out
-
-
 class OpenAIBackend(Backend):
     """OpenAI-compatible /v1/chat/completions with streaming: llama.cpp llama-server, vLLM, LM Studio, hosted APIs.
     Thinking arrives as delta.reasoning_content (llama-server --reasoning-format deepseek/auto).
     endpoint.options may hold: chat_template_kwargs (e.g. {"enable_thinking": true}), extra request fields."""
+
+    def load(self, model, options=None):
+        """A one-token request, so a server that loads models on demand (llama-server router mode) has the model
+        in memory before the run's clocks start. Errors show up again on the first real request."""
+        body = {"model": model, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 1, "stream": False}
+        req = urllib.request.Request(self.ep.url + "/chat/completions", data=json.dumps(body).encode(),
+                                     headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                r.read()
+        except urllib.error.HTTPError:
+            pass
 
     def list_models(self):
         req = urllib.request.Request(self.ep.url + "/models", headers=self._headers())
@@ -131,7 +73,7 @@ class OpenAIBackend(Backend):
 
     @staticmethod
     def _convert(messages):
-        """Our messages (Ollama style) -> OpenAI style with tool call ids."""
+        """Our messages (tool calls without ids) -> OpenAI style with tool call ids."""
         out, pending, n = [], [], 0
         for m in messages:
             if m["role"] == "assistant" and m.get("tool_calls"):
@@ -256,7 +198,7 @@ class FakeBackend(Backend):
                 "prompt_tokens": 100, "output_tokens": 20, "secs": 0.1, "raw_error": None, "stopped": False}
 
 
-BACKENDS = {"ollama": OllamaBackend, "openai": OpenAIBackend, "fake": FakeBackend}
+BACKENDS = {"openai": OpenAIBackend, "fake": FakeBackend}
 
 
 def has_model(entry, timeout=3):
@@ -264,16 +206,12 @@ def has_model(entry, timeout=3):
     import urllib.request
     from .config import secret
     try:
-        if entry["backend"] == "ollama":
-            with urllib.request.urlopen(entry["url"].rstrip("/") + "/api/tags", timeout=timeout) as r:
-                names = [m.get("name") for m in json.loads(r.read()).get("models", [])]
-        else:
-            key = secret(entry.get("api_key_env", ""))
-            req = urllib.request.Request(entry["url"].rstrip("/") + "/models",
-                                         headers={"Authorization": "Bearer " + key} if key else {})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = json.loads(r.read())
-            names = [m.get("id") or m.get("name") for m in body.get("data") or body.get("models") or []]
+        key = secret(entry.get("api_key_env", ""))
+        req = urllib.request.Request(entry["url"].rstrip("/") + "/models",
+                                     headers={"Authorization": "Bearer " + key} if key else {})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read())
+        names = [m.get("id") or m.get("name") for m in body.get("data") or body.get("models") or []]
         return entry["model"] in names
     except (OSError, ValueError):
         return False

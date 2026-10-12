@@ -4,8 +4,9 @@
                  Steps that need root print the command to run instead of running it.
   mini doctor    the same checks, read-only.
 
-Checks, in order: sandbox engine, sandbox image, local model server (llama.cpp or Ollama), start at boot,
-cloud gateway (OmniRoute) installed and running, its API key, the free/paid model names. A finished setup is
+Checks, in order: sandbox engine, sandbox image, the local backends ([local] use: llama.cpp built in [llamacpp]
+dir, serving every GGUF in [llamacpp] models_dir in router mode; or another OpenAI-compatible server), start at
+boot, cloud gateway (OmniRoute) installed and running, its API key, the free/paid model names. A finished setup is
 recorded in <state>/setup.json; `mini` / `mini ui` offer the setup when it is missing.
 """
 import getpass
@@ -24,19 +25,19 @@ from .harness.backends import has_model
 from .harness.config import ENV_FILE, ROOT, local_candidates, secret
 
 LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
-# The llama.cpp release mini is tested with. setup builds exactly this one and checks that the installed
-# llama-server is it. Tested: gemma4 (12B) and qwen35 (9B) GGUFs, Vulkan on AMD RDNA2 (RX 6700 XT), tool calls
-# through --jinja, thinking through --reasoning-format auto, -fa on with a q8_0 KV cache at 64k context.
-# To move to a newer release, change both values, run `mini setup` and the test suite.
+# The llama.cpp release mini is tested with. setup builds exactly this one and checks that the built
+# llama-server is it. Tested: gemma4 12B (GGUF from Ollama's store) in router mode, Vulkan on AMD RDNA2
+# (RX 6700 XT), tool calls through --jinja, thinking through --reasoning-format auto, -fa on with a q8_0 KV cache
+# at 64k context. Not every GGUF loads: Ollama's qwen3.5 9B conversion is rejected by this release (rope metadata),
+# which is why setup load-tests the model it picks. To move to a newer release, change both values, run
+# `mini setup` and the test suite.
 LLAMA_TAG = "b11567"
 LLAMA_COMMIT = "972b5fc"
 BACKENDS = {                                # the local backends setup can set up; order = default preference
-    "llamacpp": "llama.cpp (llama-server, Vulkan GPU)",
-    "ollama": "Ollama",
+    "llamacpp": "llama.cpp (llama-server, Vulkan GPU, every model in the models folder)",
     "custom": "another OpenAI-compatible server (LM Studio, vLLM, ...)",
 }
-DEFAULT_URLS = {"llamacpp": "http://127.0.0.1:8080/v1", "ollama": "http://127.0.0.1:11434",
-                "custom": "http://127.0.0.1:1234/v1"}
+DEFAULT_URLS = {"llamacpp": "http://127.0.0.1:8080/v1", "custom": "http://127.0.0.1:1234/v1"}
 UNIT_DIR = os.path.expanduser("~/.config/systemd/user")
 UNIT_MARK = "# written by mini setup"
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
@@ -210,87 +211,6 @@ def checks(cfg, ui):
     return out
 
 
-def llama_commit(server):
-    r = sh([server, "--version"], timeout=30)
-    m = re.search(r"commit ([0-9a-f]{7,})", r.stdout + r.stderr)
-    return m.group(1)[:7] if m else None
-
-
-def llama_server_bin():
-    """The standalone llama-server (Ollama ships a private copy that cannot run on its own)."""
-    p = find_bin("llama-server")
-    return p if p and "ollama" not in os.path.realpath(p) else None
-
-
-def llama_supports(server, arch):
-    """Does this llama.cpp build know the model architecture? Read from the built library, not guessed."""
-    import glob
-    libs = glob.glob(os.path.join(os.path.dirname(os.path.realpath(server)), "libllama.so*"))
-    for lib in libs:
-        with open(lib, "rb") as f:
-            if b"\x00" + arch.encode() + b"\x00" in f.read():
-                return True
-    return False if libs else None
-
-
-def model_file(entry):
-    """The GGUF a llamacpp backend serves: [backends.llamacpp] gguf = "ollama:NAME" or a path."""
-    g = entry.get("gguf") or ""
-    if g.startswith("ollama:"):
-        from .harness.ollama_store import gguf
-        return gguf(g[len("ollama:"):])
-    return g or None
-
-
-def backend_checks(cfg, name, entry):
-    out = []
-    ok = entry.get("backend") == "fake" or has_model(entry)
-    label = BACKENDS.get(name, name)
-    if name == "llamacpp" or (name == "local" and entry["backend"] == "openai" and "8080" in entry["url"]):
-        server = llama_server_bin()
-        if not server:
-            return [Check("llama_install", "llama.cpp installed", False, f"not installed; mini uses release {LLAMA_TAG}",
-                          fix=lambda ui: build_llama(ui), fix_text=f"build llama.cpp {LLAMA_TAG} with Vulkan")]
-        have = llama_commit(server)
-        right = have == LLAMA_COMMIT
-        out.append(Check("llama_version", f"llama.cpp {LLAMA_TAG} ({LLAMA_COMMIT})", right,
-                         "" if right else f"installed: commit {have or 'unknown'}; mini is tested with {LLAMA_TAG}",
-                         fix=None if right else lambda ui: build_llama(ui), fix_text=f"build {LLAMA_TAG}"))
-        try:
-            from .harness.gguf import architecture
-            path = model_file(entry)
-            arch = architecture(path) if path else None
-        except (OSError, ValueError, KeyError):
-            arch = None
-        if arch:
-            sup = llama_supports(server, arch)
-            out.append(Check("llama_arch", f"llama.cpp can load {entry['model']} (architecture {arch})", sup is not False,
-                             "" if sup is not False else f"this build does not know {arch}; build {LLAMA_TAG} or pick another model",
-                             fix=None if sup is not False else lambda ui: build_llama(ui), fix_text=f"build {LLAMA_TAG}"))
-        exists, active, enabled, _ = unit_state("llama-server")
-        out.append(Check("llamacpp", f"llama-server serving {entry['model']}", ok,
-                         "" if ok else f"not answering at {entry['url']}",
-                         fix=None if ok else lambda ui: setup_llama(cfg, ui), fix_text="pick a model and GPU, start llama-server"))
-        if ok and exists:
-            out.append(Check("llamacpp_boot", "llama-server starts at boot", enabled, "" if enabled else "running, but not enabled",
-                             fix=None if enabled else lambda ui: _enable("llama-server", ui),
-                             fix_text="systemctl --user enable llama-server"))
-    elif entry["backend"] == "ollama":
-        if not shutil.which("ollama"):
-            return [Check("ollama_install", "Ollama installed", False, "not installed",
-                          manual="curl -fsSL https://ollama.com/install.sh | sh")]
-        code, body = http_json(entry["url"].rstrip("/") + "/api/tags")
-        if code != 200:
-            return [Check("ollama_run", "Ollama running", False, f"not answering at {entry['url']}",
-                          manual="sudo systemctl enable --now ollama")]
-        out.append(Check("ollama", f"Ollama has {entry['model']}", ok, "" if ok else "model not pulled",
-                         fix=None if ok else lambda ui: setup_ollama(cfg, ui), fix_text="pick or pull a model"))
-    else:
-        out.append(Check(name, f"{label}: {entry['model']} at {entry['url']}", ok, "" if ok else "not answering with that model",
-                         fix=None if ok else lambda ui: setup_custom(cfg, ui), fix_text="set its URL and model name"))
-    return out
-
-
 # ================================================================ fixes
 def _run(cmd, ui, timeout=1800, cwd=None):
     ui.say("$ " + " ".join(cmd))
@@ -307,10 +227,6 @@ def _build_image(cfg, ui):
     from .harness.sandbox import Sandbox
     ui.say("building the sandbox image ...")
     Sandbox(cfg).build_base()
-
-
-def _ollama_pull(model, ui):
-    _run(["ollama", "pull", model], ui)
 
 
 def _enable(name, ui):
@@ -346,9 +262,152 @@ def _wait(url, key="", secs=240, ui=None):
     raise SetupError(f"{url} did not answer within {secs} s (journalctl --user -u <service> shows why)")
 
 
-# ---------------------------------------------------------------- llama.cpp
-def build_llama(ui):
-    """Clone the pinned llama.cpp release and build llama-server with Vulkan. Returns the binary path."""
+# ---------------------------------------------------------------- llama.cpp (router mode over a models folder)
+def llama_dir(cfg):
+    return os.path.expanduser(cfg["llamacpp"]["dir"])
+
+
+def llama_server(cfg):
+    """The llama-server built in [llamacpp] dir, or None."""
+    p = os.path.join(llama_dir(cfg), "build", "bin", "llama-server")
+    return p if os.access(p, os.X_OK) else None
+
+
+def llama_commit(server):
+    r = sh([server, "--version"], timeout=30)
+    m = re.search(r"commit ([0-9a-f]{7,})", r.stdout + r.stderr)
+    return m.group(1)[:7] if m else None
+
+
+def llama_supports(server, arch):
+    """Does this build know the architecture name? (Read from the built library. A known name does not prove the
+    file loads: a converter can write metadata this release rejects, so setup also load-tests the model.)"""
+    import glob
+    libs = glob.glob(os.path.join(os.path.dirname(os.path.realpath(server)), "libllama.so*"))
+    for lib in libs:
+        with open(lib, "rb") as f:
+            if b"\x00" + arch.encode() + b"\x00" in f.read():
+                return True
+    return False if libs else None
+
+
+def models_in(models_dir):
+    """{name: {"file", "mmproj"}} the way llama-server's router sees a models folder: NAME.gguf, or a folder
+    NAME/ holding the model and optionally its mmproj-*.gguf (vision)."""
+    out = {}
+    if not os.path.isdir(models_dir):
+        return out
+    for e in sorted(os.listdir(models_dir)):
+        p = os.path.join(models_dir, e)
+        if os.path.isfile(p) and e.endswith(".gguf") and not e.startswith("mmproj"):
+            out[e[:-5]] = {"file": p, "mmproj": None}
+        elif os.path.isdir(p):
+            files = sorted(f for f in os.listdir(p) if f.endswith(".gguf"))
+            main = [f for f in files if not f.startswith("mmproj")]
+            if main:
+                proj = [f for f in files if f.startswith("mmproj")]
+                out[e] = {"file": os.path.join(p, main[0]), "mmproj": os.path.join(p, proj[0]) if proj else None}
+    return out
+
+
+def served_models(url):
+    """{name: status} from the router's /models (status: loaded, unloaded, loading, failed ...)."""
+    code, body = http_json(url.rstrip("/") + "/models")
+    out = {}
+    for m in (body or {}).get("data") or []:
+        st = m.get("status")
+        out[m.get("id")] = (st.get("value") if isinstance(st, dict) else st) or "available"
+    return out
+
+
+def load_error(unit="llama-server"):
+    """llama.cpp's own reason for the last failed model load, from the service log."""
+    log = sh(["journalctl", "--user", "-u", unit, "-n", "200", "--no-pager", "-o", "cat"]).stdout
+    errs = [ln.split(" E ", 1)[-1].strip() for ln in log.splitlines() if "error loading model" in ln]
+    return errs[-1] if errs else "see journalctl --user -u llama-server"
+
+
+def load_test(url, model, timeout=600):
+    """Ask the model for one token. (True, "") or (False, reason)."""
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 1}).encode()
+    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+        return True, ""
+    except urllib.error.HTTPError:
+        return False, load_error()
+    except OSError as e:
+        return False, str(e)
+
+
+def router_args(cfg, server):
+    lc = cfg["llamacpp"]
+    dev = f" --device {lc['device']} -ngl 999" if lc.get("device") else ""
+    return (f"{server} --models-dir {os.path.expanduser(lc['models_dir'])} --models-max {lc['models_max']} "
+            f"--host 127.0.0.1 --port {lc['port']}{dev} -c {lc['ctx']} {lc['extra_args']} --no-webui")
+
+
+def backend_checks(cfg, name, entry):
+    if name != "llamacpp":
+        ok = entry.get("backend") == "fake" or has_model(entry)
+        return [Check(name, f"{BACKENDS.get(name, name)}: {entry['model']} at {entry['url']}", ok,
+                      "" if ok else "not answering with that model",
+                      fix=None if ok else lambda ui: setup_custom(cfg, ui), fix_text="set its URL and model name")]
+    out, lc = [], cfg["llamacpp"]
+    server = llama_server(cfg)
+    if not server:
+        return [Check("llama_install", f"llama.cpp {LLAMA_TAG} in {llama_dir(cfg)}", False, "not built there yet",
+                      fix=lambda ui: build_llama(cfg, ui), fix_text=f"build llama.cpp {LLAMA_TAG} with Vulkan (asks where)")]
+    have = llama_commit(server)
+    right = have == LLAMA_COMMIT
+    out.append(Check("llama_version", f"llama.cpp {LLAMA_TAG} ({LLAMA_COMMIT}) in {llama_dir(cfg)}", right,
+                     "" if right else f"built: commit {have or 'unknown'}; mini is tested with {LLAMA_TAG}",
+                     fix=None if right else lambda ui: build_llama(cfg, ui), fix_text=f"build {LLAMA_TAG}"))
+    mdir = os.path.expanduser(lc["models_dir"])
+    models = models_in(mdir)
+    out.append(Check("models", f"models in {mdir}", bool(models),
+                     ", ".join(models) if models else "no GGUF files there yet",
+                     manual="" if models else f"put GGUF files in {mdir} (NAME.gguf, or NAME/ with its mmproj-*.gguf); "
+                                              f"models from Ollama: scripts/ollama-export {mdir}"))
+    if not models:
+        return out
+    from .harness.gguf import architecture
+    unknown = []
+    for n, m in models.items():
+        try:
+            arch = architecture(m["file"])
+        except (OSError, ValueError, KeyError):
+            arch = "unreadable"
+        if arch == "unreadable" or llama_supports(server, arch) is False:
+            unknown.append(f"{n} ({arch})")
+    out.append(Check("model_arch", "every model's architecture is known to this build", not unknown,
+                     "" if not unknown else "cannot load: " + ", ".join(unknown) + "; remove them or get other GGUFs"))
+    exists, active, enabled, ours = unit_state("llama-server")
+    current = open(unit_path("llama-server")).read() if exists else ""
+    unit_ok = active and router_args(cfg, server) in current
+    out.append(Check("router", f"llama-server serving {mdir} on port {lc['port']}", unit_ok,
+                     "" if unit_ok else ("running with other settings" if active else "not running"),
+                     fix=None if unit_ok else lambda ui: setup_router(cfg, ui),
+                     fix_text="pick the GPU and run llama-server over the models folder as a user service"))
+    if unit_ok:
+        out.append(Check("llamacpp_boot", "llama-server starts at boot", enabled, "" if enabled else "running, but not enabled",
+                         fix=None if enabled else lambda ui: _enable("llama-server", ui),
+                         fix_text="systemctl --user enable llama-server"))
+        served = served_models(entry["url"])
+        st, why = served.get(entry["model"]), "not in the models folder"
+        ok = st == "loaded"
+        if st is not None and not ok:                  # the router does not remember failures: load it to know
+            ok, why = load_test(entry["url"], entry["model"])
+            why = "does not load: " + why
+        out.append(Check("local_model", f"local model {entry['model']} loads", ok, "" if ok else why,
+                         fix=None if ok else lambda ui: choose_model(cfg, ui), fix_text="pick the model mini uses (load-tested)"))
+    return out
+
+
+def build_llama(cfg, ui):
+    """Check out the pinned llama.cpp release in [llamacpp] dir and build llama-server with Vulkan."""
     missing = [b for b in ("git", "cmake", "g++", "glslc") if not shutil.which(b)]
     if not os.path.exists("/usr/include/vulkan/vulkan.h"):
         missing.append("libvulkan-dev")
@@ -356,11 +415,13 @@ def build_llama(ui):
         pk = {"g++": "build-essential", "glslc": "glslc"}
         raise SetupError("missing build tools; run: sudo apt install " +
                          " ".join(sorted({pk.get(m, m) for m in missing})) + " and then mini setup again")
-    server = llama_server_bin()
-    default = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(server)))) if server else \
-        os.path.join(os.path.dirname(ROOT), "llama.cpp")
-    src = os.path.expanduser(ui.text("Where should llama.cpp be built?", default))
+    src = os.path.abspath(os.path.expanduser(ui.text("Where should llama.cpp live?", llama_dir(cfg))))
+    if src != llama_dir(cfg):
+        config_mod.set_values(cfg.path, {"llamacpp": {"dir": src}})
+        cfg["llamacpp"]["dir"] = src
     if not os.path.isdir(os.path.join(src, ".git")):
+        if os.path.exists(src) and os.listdir(src):
+            raise SetupError(f"{src} exists and is not a llama.cpp checkout; pick an empty or new folder")
         _run(["git", "clone", "-q", "--depth", "1", "--branch", LLAMA_TAG, LLAMA_REPO, src], ui)
     elif sh(["git", "-C", src, "rev-parse", "--short=7", "HEAD"]).stdout.strip() != LLAMA_COMMIT:
         _run(["git", "-C", src, "fetch", "-q", "--depth", "1", "origin", "tag", LLAMA_TAG], ui)
@@ -375,12 +436,12 @@ def build_llama(ui):
          timeout=7200, cwd=src)
     os.makedirs(LOCAL_BIN, exist_ok=True)
     link = os.path.join(LOCAL_BIN, "llama-server")
-    if os.path.lexists(link):
+    if os.path.lexists(link) and os.path.islink(link):
         os.remove(link)
-    os.symlink(os.path.join(src, "build", "bin", "llama-server"), link)
+    if not os.path.exists(link):
+        os.symlink(os.path.join(src, "build", "bin", "llama-server"), link)
     if sh(["systemctl", "--user", "is-active", "llama-server"]).stdout.strip() == "active":
         _run(["systemctl", "--user", "restart", "llama-server"], ui)         # serve with the new build
-    return link
 
 
 def gpu_devices(server):
@@ -393,57 +454,48 @@ def gpu_devices(server):
     return out
 
 
-def setup_llama(cfg, ui):
-    server = llama_server_bin()
-    if not server:
-        if not ui.yes(f"llama.cpp (llama-server) is not installed. Build {LLAMA_TAG} now with Vulkan GPU support?", True):
-            raise SetupError("skipped")
-        server = build_llama(ui)
-    from .harness.gguf import architecture
-    from .harness.ollama_store import gguf, list_models
-    models = list_models()
-    def label(n, size):
-        try:
-            arch = architecture(gguf(n))
-            sup = llama_supports(server, arch)
-        except (OSError, ValueError, KeyError):
-            arch, sup = "?", None
-        return f"{n}  ({size / 1e9:.1f} GB, {arch}" + (", not supported by this build" if sup is False else "") + ")"
-    choices = [label(n, size) for n, size in models] + ["a GGUF file on disk"]
-    current = cfg.get("backends", {}).get("llamacpp", {}).get("model") or cfg["local"]["model"]
-    pick = ui.choice("Which model should llama.cpp run?", choices,
-                     next((c for c in choices if c.startswith(current + " ") and "not supported" not in c), choices[0]))
-    if pick == "a GGUF file on disk":
-        path = os.path.abspath(os.path.expanduser(ui.text("Path to the .gguf file")))
-        if not os.path.isfile(path):
-            raise SetupError(f"no such file: {path}")
-        alias = ui.text("Name for it in mini", os.path.splitext(os.path.basename(path))[0])
-        model_arg, source = f'"{path}"', path
-    else:
-        alias = pick.split()[0]
-        path, source = gguf(alias), "ollama:" + alias
-        model_arg = f'"$({os.path.join(ROOT, "scripts", "ollama-gguf")} {alias})"'
-    arch = architecture(path)
-    if llama_supports(server, arch) is False:
-        raise SetupError(f"{alias} is a {arch} model; this llama.cpp build cannot load it (build {LLAMA_TAG})")
+def setup_router(cfg, ui):
+    server = llama_server(cfg)
+    lc = cfg["llamacpp"]
     devs = gpu_devices(server)
-    dev_args = ""
     if devs:
         best = max(devs, key=lambda d: d[2])
+        cur = next((d for d in devs if d[0] == lc.get("device")), best)
         dev = ui.choice("Which GPU?", [f"{d[0]}: {d[1]} ({d[2]} MiB)" for d in devs],
-                        f"{best[0]}: {best[1]} ({best[2]} MiB)").split(":")[0]
-        dev_args = f" --device {dev} -ngl 999"
+                        f"{cur[0]}: {cur[1]} ({cur[2]} MiB)").split(":")[0]
     else:
-        ui.say("no GPU found by llama.cpp: the model runs on the CPU (slow).")
-    ctx = int(ui.text("Context size (tokens)", str(cfg["local"].get("num_ctx") or 65536)))
-    port = 8080
-    cmd = (f"exec {server} -m {model_arg} --alias {alias} --host 127.0.0.1 --port {port}{dev_args} -c {ctx} "
-           "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --no-webui")
-    write_unit("llama-server", f"llama.cpp server (mini local tier): {alias}", f"/bin/sh -c '{cmd}'", {}, ui)
-    ui.say("waiting for the model to load ...")
-    _wait(f"http://127.0.0.1:{port}/health", ui=ui)
-    save_backend(cfg, "llamacpp", {"backend": "openai", "url": f"http://127.0.0.1:{port}/v1", "model": alias,
-                                   "num_ctx": ctx, "gguf": source})
+        dev = ""
+        ui.say("llama.cpp finds no GPU: models run on the CPU (slow).")
+    ctx = int(ui.text("Context size per model (tokens)", str(lc["ctx"])))
+    config_mod.set_values(cfg.path, {"llamacpp": {"device": dev, "ctx": ctx}})
+    lc.update(device=dev, ctx=ctx)
+    write_unit("llama-server", f"llama.cpp router over {os.path.expanduser(lc['models_dir'])} (mini local tier)",
+               router_args(cfg, server), {}, ui)
+    _wait(f"http://127.0.0.1:{lc['port']}/health", ui=ui)
+    url = f"http://127.0.0.1:{lc['port']}/v1"
+    if cfg.get("backends", {}).get("llamacpp", {}).get("url") != url:
+        save_backend(cfg, "llamacpp", {"backend": "openai", "url": url,
+                                       "model": cfg.get("backends", {}).get("llamacpp", {}).get("model") or cfg["local"]["model"]})
+
+
+def choose_model(cfg, ui):
+    """Pick the model mini's local tier uses, from the models folder; it is load-tested before it is saved."""
+    lc, url = cfg["llamacpp"], cfg["backends"]["llamacpp"]["url"]
+    names = list(models_in(os.path.expanduser(lc["models_dir"])))
+    if not names:
+        raise SetupError("no models in the models folder")
+    current = cfg["backends"]["llamacpp"].get("model")
+    while names:
+        pick = ui.choice("Which model should mini use locally?", names, current if current in names else names[0])
+        ui.say(f"loading {pick} to test it (up to a minute) ...")
+        ok, why = load_test(url, pick)
+        if ok:
+            save_backend(cfg, "llamacpp", {"backend": "openai", "url": url, "model": pick})
+            ui.say(f"{pick} loads and answers.")
+            return
+        ui.say(f"{pick} does not load in llama.cpp {LLAMA_TAG}: {why}")
+        names.remove(pick)
+    raise SetupError("none of the models loads")
 
 
 def save_backend(cfg, name, entry):
@@ -457,17 +509,6 @@ def save_backend(cfg, name, entry):
         cfg["local"]["use"] = use
 
 
-def setup_ollama(cfg, ui):
-    entry = cfg["backends"]["ollama"]
-    code, body = http_json(entry["url"].rstrip("/") + "/api/tags")
-    have = [m.get("name") for m in (body or {}).get("models") or []]
-    pick = ui.choice("Which Ollama model?", have + ["pull another model"], entry["model"] if entry["model"] in have else None)
-    if pick == "pull another model":
-        pick = ui.text("Model to pull (name:tag)", entry["model"])
-        _ollama_pull(pick, ui)
-    save_backend(cfg, "ollama", {"backend": "ollama", "url": entry["url"], "model": pick})
-
-
 def setup_custom(cfg, ui):
     entry = cfg["backends"].get("custom") or {}
     url = ui.text("Base URL of its OpenAI-compatible API", entry.get("url") or DEFAULT_URLS["custom"])
@@ -479,9 +520,7 @@ def setup_custom(cfg, ui):
 
 def choose_backends(cfg, ui):
     """Checklist of local backends, then their order of preference. Written to [local] use and [backends.*]."""
-    current = [n for n in cfg["local"].get("use") or [] if n in BACKENDS]
-    if not current:                                    # an older config: derive from [local]
-        current = ["ollama"] if cfg["local"]["backend"] == "ollama" else ["llamacpp"]
+    current = [n for n in cfg["local"].get("use") or [] if n in BACKENDS] or ["llamacpp"]
     picked = ui.checklist("Which local model backends should mini use? (several = a fallback when one is down)",
                           list(BACKENDS.values()), [BACKENDS[n] for n in current])
     names = [n for n, lbl in BACKENDS.items() if lbl in picked]
@@ -494,12 +533,9 @@ def choose_backends(cfg, ui):
         names.sort(key=lambda n: BACKENDS[n] != first)
     for n in names:
         if n not in cfg.get("backends", {}):
-            base = {"backend": "ollama" if n == "ollama" else "openai", "url": DEFAULT_URLS[n],
-                    "model": cfg["local"]["model"]}
-            if cfg["local"]["backend"] == base["backend"] and n != "custom":
-                base.update(url=cfg["local"]["url"])
+            base = {"backend": "openai", "url": DEFAULT_URLS[n], "model": cfg["local"]["model"]}
             if n == "llamacpp":
-                base["gguf"] = "ollama:" + base["model"]
+                base["url"] = f"http://127.0.0.1:{cfg['llamacpp']['port']}/v1"
             config_mod.set_values(cfg.path, {f"backends.{n}": base})
             cfg.setdefault("backends", {})[n] = base
     config_mod.set_values(cfg.path, {"local": {"use": names}})
