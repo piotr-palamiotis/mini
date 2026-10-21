@@ -1,5 +1,6 @@
 """Textual UI: one scrolling stream (answers as markdown, thinking, tool and command blocks, inline question cards)
-with the prompt fixed below it, plus the attempt counter, cap indicator, registry browser and config screen.
+with the prompt fixed below it, plus the attempt counter, cap indicator and the full-screen views (/registry,
+/config, /tools). A view replaces the stream on screen and Esc returns to it; the task keeps running underneath.
 
 The agent runs in a worker thread. The UI consumes the event stream (start / chunk / end, see harness/eventlog.py)
 directly: each block event drives one widget in the stream. A question block becomes a card at the bottom of the
@@ -27,12 +28,18 @@ from ..harness import workspace as ws
 from . import settingsform
 from ..harness.approvals import Decision
 from ..harness.config import TIERS
-from ..harness.registry import Registry
+from ..harness.registry import Registry, is_bundled
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 TAIL = 8                                            # live lines shown while a block runs
 KEEP = 2000                                         # lines kept per block
 NEGATIVE = ("refuse", "stop", "cancel")
+
+
+def schema_summary(schema):
+    """`path, offset?` for an input schema: its properties, optional ones marked."""
+    props, req = (schema or {}).get("properties") or {}, set((schema or {}).get("required") or [])
+    return ", ".join(k + ("" if k in req else "?") for k in props) or "(none)"
 
 
 def clip(text, n):
@@ -355,7 +362,10 @@ class MiniApp(App):
     #views { height: 1fr; }
     #stream { height: 1fr; }
     #prompt { height: 3; }
+    #views > ContentTabs { display: none; }
     #reg-table { height: 12; }
+    #tools-table { height: 14; }
+    #tools-detail { height: 1fr; }
     #reg-detail { height: 1fr; }
     #reg-buttons { height: auto; }
     #cfg-text { height: 1fr; }
@@ -368,11 +378,14 @@ class MiniApp(App):
     #cfg-form Input { border: none; height: 1; padding: 0 1; width: 22; background: $boost; }
     #cfg-form Select { width: 22; height: 1; }
     #cfg-form SelectCurrent { border: none; height: 1; padding: 0 1; background: $boost; }
+    #cfg-form Collapsible { height: auto; padding: 0; border: none; }
     #cfg-form .note { color: $text-muted; margin-top: 1; }
     #cfg-buttons { height: auto; }
     #cfg-buttons Button { margin-right: 1; }
     """
-    BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit")]
+    BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit"),
+                Binding("escape", "back", "Back to the stream")]
+    VIEWS = {"/registry": "tab-reg", "/config": "tab-cfg", "/tools": "tab-tools"}
 
     def __init__(self, cfg, backend_factory=None):
         super().__init__()
@@ -406,6 +419,9 @@ class MiniApp(App):
                         yield Button("Accept staged", id="accept", variant="success")
                         yield Button("Discard staged", id="discard", variant="error")
                     yield RichLog(id="reg-detail", wrap=True, min_width=1)
+                with TabPane("Tools", id="tab-tools"):
+                    yield DataTable(id="tools-table", cursor_type="row")
+                    yield RichLog(id="tools-detail", wrap=True, min_width=1)
                 with TabPane("Config", id="tab-cfg"):
                     with TabbedContent(id="cfg-tabs"):
                         with TabPane("Settings", id="cfg-tab-form"):
@@ -417,12 +433,13 @@ class MiniApp(App):
                             yield TextArea(self.config_file_text(), language="toml", id="cfg-text")
                             yield Button("Save config", id="cfg-save", variant="primary")
                     yield Static(id="cfg-msg")
-            yield Input(placeholder="Give mini a task.  /attach PATH  /registry  /help", id="prompt")
+            yield Input(placeholder="Give mini a task.  /attach PATH  /registry  /config  /tools  /help", id="prompt")
         yield Footer()
 
     def on_mount(self):
         self.update_status()
         self.refresh_registry()
+        self.refresh_tools()
         self.stream.anchor()                        # follow the newest block until the user scrolls up
         self.set_interval(0.1, self.tick)
         budget = self.cfg["routing"]["local_budget_s"]
@@ -537,7 +554,7 @@ class MiniApp(App):
                 self.last_text = ""
             if block == "question":
                 self.card = w
-                self.query_one("#views", TabbedContent).active = "tab-stream"
+                self.show_view("tab-stream")
             self.stream.mount(w)
         elif w is None:
             return
@@ -584,8 +601,8 @@ class MiniApp(App):
         ev.input.value = ""
         if not text:
             return
-        if text != "/registry":
-            self.query_one("#views", TabbedContent).active = "tab-stream"
+        if text not in self.VIEWS:
+            self.show_view("tab-stream")
         if text.startswith("/attach "):
             p = os.path.expanduser(text[8:].strip())
             if os.path.isfile(p):
@@ -601,16 +618,18 @@ class MiniApp(App):
             self.history = []
             self.chat("new conversation: earlier tasks are forgotten")
             return
-        if text == "/registry":
-            self.query_one("#views", TabbedContent).active = "tab-reg"
+        if text in self.VIEWS:
+            self.show_view(self.VIEWS[text])
             return
         if text == "/help":
             self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"
+                      "/tools         list core capabilities and registry tools\n/config        open the settings\n"
                       "/undo [RUN] [FILE...]   put back what the last task (or RUN) changed, or only those files\n"
                       "/new           forget the conversation so far (each task is told about the earlier ones)\n"
                       "/status        check the local model and the cloud tiers\n"
                       "/model [local|free|paid]   model for the next task (paid lasts one task)\n"
-                      "Config tab: switches and fields for the settings (saved in place), or the raw TOML.")
+                      "Esc leaves /registry, /config and /tools; a running task keeps going.\n"
+                      "/config: switches and fields for the settings (saved in place), or the raw TOML.")
             return
         if text == "/status":
             self.check_tiers()
@@ -688,6 +707,56 @@ class MiniApp(App):
             return
         self.chat(f"[b]undo {escape(run)}[/b]: " + (escape(", ".join(f"{rel} {how}" for rel, how in done)) or "nothing to undo"))
 
+    # ------------------------------------------------------------ full-screen views
+    def show_view(self, pane):
+        """Show one view full screen (the stream, or /registry, /config, /tools). Only the display changes: the
+        running task, its blocks and its question card stay where they are."""
+        self.query_one("#views", TabbedContent).active = pane
+        self.query_one("#prompt", Input).display = pane == "tab-stream"
+        if pane == "tab-stream":
+            self.query_one("#prompt", Input).focus()
+        elif pane == "tab-tools":
+            self.refresh_tools()
+
+    def check_action(self, action, parameters):
+        if action == "back":
+            return self.query_one("#views", TabbedContent).active != "tab-stream"    # on the stream Esc is left to the card
+        return True
+
+    def action_back(self):
+        self.show_view("tab-stream")
+
+    # ------------------------------------------------------------ tools view
+    def tool_rows(self):
+        """[(name, description, source, schema summary, input schema)] of the core capabilities, then the registry's."""
+        from .. import core
+        rows = [(c.name, c.description, "core", schema_summary(c.schema), c.schema) for c in core.load().caps.values()]
+        reg = Registry(self.cfg.abspath("state"))
+        for m in reg.list_tools():
+            src = "bundled" if is_bundled(m["name"]) else "registry"
+            rows.append((m["name"], m.get("description", ""), f"{src} v{m['version']}",
+                         schema_summary(m.get("input_schema")), m.get("input_schema") or {}))
+        return rows
+
+    def refresh_tools(self):
+        t = self.query_one("#tools-table", DataTable)
+        t.clear(columns=True)
+        t.add_columns("name", "source", "inputs", "description")
+        self.tool_schemas = {}
+        for name, desc, src, summ, schema in self.tool_rows():
+            t.add_row(name, src, summ, clip(desc, 80), key=name)
+            self.tool_schemas[name] = (desc, src, schema)
+
+    @on(DataTable.RowHighlighted, "#tools-table")
+    def show_tool_spec(self, ev):
+        if ev.row_key is None or ev.row_key.value not in getattr(self, "tool_schemas", {}):
+            return
+        desc, src, schema = self.tool_schemas[ev.row_key.value]
+        d = self.query_one("#tools-detail", RichLog)
+        d.clear()
+        d.write(f"{ev.row_key.value} ({src})\n{desc}\n")
+        d.write(json.dumps(schema, indent=1))
+
     # ------------------------------------------------------------ registry browser
     def action_refresh_registry(self):
         self.refresh_registry()
@@ -711,6 +780,8 @@ class MiniApp(App):
                       tr.get("summary", "")[:30], "", key=f"staged:{st['name']}:{st['run_id']}")
         if not reg.names() and not reg.staged():
             self.query_one("#reg-detail", RichLog).clear().write("(registry is empty)")
+        if self.query_one("#views", TabbedContent).active == "tab-tools":
+            self.refresh_tools()
 
     @on(DataTable.RowHighlighted, "#reg-table")
     def show_tool(self, ev):

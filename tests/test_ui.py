@@ -84,6 +84,83 @@ class UITest(unittest.TestCase):
         self.assertEqual(used, ["paid", "local"])
 
 
+class ViewsTest(unittest.TestCase):
+    def app(self, backend):
+        cfg = temp_config(**{"approvals.confirm_first": False})
+        cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")
+        return MiniApp(cfg, backend_factory=backend)
+
+    def test_views_open_full_screen_and_escape_returns(self):
+        app = self.app(lambda: fake_backend([]))
+
+        async def go():
+            async with app.run_test(size=(180, 50)) as pilot:
+                prompt = app.query_one("#prompt")
+                for cmd, pane in (("/registry", "tab-reg"), ("/config", "tab-cfg"), ("/tools", "tab-tools")):
+                    await pilot.press(*cmd)
+                    await pilot.press("enter")
+                    self.assertEqual(app.query_one("#views").active, pane)
+                    self.assertFalse(prompt.display)
+                    await pilot.press("escape")
+                    self.assertEqual(app.query_one("#views").active, "tab-stream")
+                    self.assertTrue(prompt.display)
+                    self.assertTrue(prompt.has_focus)
+                await pilot.press(*"/tools")
+                await pilot.press("enter")
+                table = app.query_one("#tools-table")
+                names = [k.value for k in table.rows]
+                self.assertIn("read_file", names)
+                row = table.get_row("read_file")
+                self.assertEqual(row[1], "core")
+                self.assertIn("path", row[2])
+                adv = app.query_one("#cfg-advanced")
+                self.assertTrue(adv.collapsed)
+                self.assertIsNotNone(adv.query_one("#f-watchdogs-swap_watch"))
+        asyncio.run(go())
+
+    def test_task_keeps_running_under_a_view(self):
+        import threading
+        gate = threading.Event()
+
+        class Slow:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def chat(self, *a, **kw):
+                gate.wait(30)
+                return self.inner.chat(*a, **kw)
+
+        quick = [step(call("understand", goal="g", inputs=[], outputs=["n"], plan="1")),
+                 step(call("decide_coverage", reasoning="none needed", use=[], missing=[])),
+                 step(call("finish", answer="done"))]
+        app = self.app(lambda: Slow(fake_backend(quick)))
+
+        async def go():
+            async with app.run_test(size=(180, 50)) as pilot:
+                await pilot.press(*"say done")
+                await pilot.press("enter")
+                await pilot.pause(0.3)
+                self.assertTrue(app.busy)
+                await pilot.press(*"/config")
+                await pilot.press("enter")
+                await pilot.press("escape")
+                await pilot.press(*"/tools")
+                await pilot.press("enter")
+                self.assertTrue(app.busy)                              # opening a view cancels nothing
+                gate.set()
+                await pilot.press("escape")
+                for _ in range(150):
+                    await pilot.pause(0.1)
+                    if not app.busy:
+                        break
+                self.assertFalse(app.busy)
+                self.assertEqual(app.query_one("#views").active, "tab-stream")
+        asyncio.run(go())
+
+
 def start(block, **kw):
     return {"kind": "start", "id": "b1", "block": block, "parent": None, **kw}
 

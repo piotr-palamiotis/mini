@@ -1,11 +1,11 @@
-"""The Config tab as a form: switches, dropdowns and fields instead of a TOML text box.
+"""The Config view as a form: switches, dropdowns and fields instead of a TOML text box.
 
 FIELDS says what is shown. Saving writes only the keys that changed, in place (comments and layout of the TOML
 file stay), through config.set_values. Backends and presets are not here: `mini preset` and `mini setup` own them.
 """
 from rich.markup import escape
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Input, Label, Select, Static, Switch
+from textual.widgets import Collapsible, Input, Label, Select, Static, Switch
 
 # (section, key, label, kind[, options]); kind: switch | select | int | float | text
 FIELDS = [
@@ -62,15 +62,20 @@ FIELDS = [
 ]
 
 
+# groups behind the "advanced" fold: the defaults are sane, most people never open them
+ADVANCED = ("Thinking (the model reasons before it answers, per step)", "Limits", "Watchdogs")
+
+
 def wid(section, key):
     return f"f-{section}-{key}"
 
 
 def widgets(cfg):
     """The form, as one scrollable column of widgets."""
-    rows = []
+    rows, advanced = [], []
     for title, fields in FIELDS:
-        rows.append(Label(title, classes="grp"))
+        group = advanced if title in ADVANCED else rows
+        group.append(Label(title, classes="grp"))
         for section, key, label, kind, *opt in fields:
             value = cfg[section][key]
             if kind == "switch":
@@ -82,7 +87,9 @@ def widgets(cfg):
                 control = Select([(o, o) for o in options], value=value, allow_blank=False, id=wid(section, key))
             else:
                 control = Input(str(value), id=wid(section, key), classes="num" if kind in ("int", "float") else "")
-            rows.append(Horizontal(Label(label, classes="lbl"), control, classes="row"))
+            group.append(Horizontal(Label(label, classes="lbl"), control, classes="row"))
+    rows.append(Collapsible(*advanced, title="Advanced: thinking, limits, watchdogs", collapsed=True,
+                            id="cfg-advanced"))
     rows.append(Static("Backends and presets: `mini preset list|use`, `mini setup`. Anything else: the Raw TOML tab.",
                        classes="note"))
     return VerticalScroll(*rows, id="cfg-form")
