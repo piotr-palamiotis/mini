@@ -38,18 +38,19 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_agent_lists_and_reads_the_folder(self):
         a = self.agent()
-        top = a._list({"path": "."})
+        top = a.act("list_files", {"path": "."})[0]
         self.assertIn(".: 3 folders, 1 files", top, "src/, .git/ and .mini/")
         self.assertIn("src/ (1 items)", top)
         self.assertIn("notes.txt (6 B)", top)
         self.assertNotIn("a.py", top, "depth 1 does not open subfolders")
-        deep = a._list({"path": ".", "depth": 2})
+        deep = a.act("list_files", {"path": ".", "depth": 2})[0]
         self.assertIn("  a.py (9 B)", deep)
-        self.assertIn("a.py", a._list({"path": ".", "recursive": True}), "recursive still means a little deeper")
-        self.assertEqual(a._read({"path": "notes.txt"}), "hello\n")
-        self.assertIn("use list_files", a._read({"path": "src"}))
-        self.assertIn("Cannot read", a._read({"path": "../etc/passwd"}))
-        self.assertIn("Cannot read", a._read({"path": ".git/config"}))
+        self.assertIn("unknown argument recursive", a.act("list_files", {"path": ".", "recursive": True})[0],
+                      "arguments are checked against the schema")
+        self.assertEqual(a.act("read_file", {"path": "notes.txt"})[0], "hello\n")
+        self.assertIn("use list_files", a.act("read_file", {"path": "src"})[0])
+        self.assertIn("Cannot read", a.act("read_file", {"path": "../etc/passwd"})[0])
+        self.assertIn("Cannot read", a.act("read_file", {"path": ".git/config"})[0])
         self.assertIn(f"You work in the user's folder {self.root}", a.context())
         self.assertNotIn("user's folder", Agent(self.cfg, label="none").context(), "no folder, no mention")
 
@@ -60,38 +61,38 @@ class WorkspaceTest(unittest.TestCase):
             open(os.path.join(big, f"file{i:03d}.txt"), "w").write("x" * i)
         a = self.agent()
         for depth in (1, 2, 3):
-            out = a._list({"path": "big", "depth": depth})
+            out = a.act("list_files", {"path": "big", "depth": depth})[0]
             self.assertLessEqual(len(out), ws.MAX_CHARS + 300, depth)
             self.assertLessEqual(len(out.splitlines()), ws.MAX_LINES + 3, depth)
-        out = a._list({"path": "big"})
+        out = a.act("list_files", {"path": "big"})[0]
         self.assertIn("400 folders, 400 files", out)
         self.assertIn("more lines hidden. List a subfolder", out)
         self.assertIn("dir000/ (1 items)", out)
         os.makedirs(os.path.join(self.root, "pkg", ".git"))
-        self.assertIn(".git/ (0 items, not expanded)", a._list({"path": "pkg", "depth": 2}))
+        self.assertIn(".git/ (0 items, not expanded)", a.act("list_files", {"path": "pkg", "depth": 2})[0])
 
     def test_long_files_are_read_in_parts(self):
         open(os.path.join(self.root, "long.txt"), "w").write("a" * 8000 + "b" * 100)
         a = self.agent()
-        first = a._read({"path": "long.txt"})
+        first = a.act("read_file", {"path": "long.txt"})[0]
         self.assertTrue(first.startswith("a" * 8000))
         self.assertIn("read_file with offset=8000", first)
-        rest = a._read({"path": "long.txt", "offset": 8000})
+        rest = a.act("read_file", {"path": "long.txt", "offset": 8000})[0]
         self.assertTrue(rest.startswith("b" * 100))
         self.assertIn("the end", rest)
 
     def test_writes_happen_in_place_after_a_checkpoint(self):
         open(os.path.join(self.root, "notes.txt"), "w").write("dirty, not committed\n")
         a = self.agent()
-        self.assertIn("Wrote src/a.py", a._write({"path": "src/a.py", "content": "print(2)\n"}, ""))
-        a._write({"path": "new/b.txt", "content": "b\n"}, "")
+        self.assertIn("Wrote src/a.py", a.act("write_file", {"path": "src/a.py", "content": "print(2)\n"})[0])
+        a.act("write_file", {"path": "new/b.txt", "content": "b\n"})
         self.assertEqual(open(os.path.join(self.root, "src", "a.py")).read(), "print(2)\n")
         self.assertEqual(open(os.path.join(self.root, "new", "b.txt")).read(), "b\n")
         self.assertEqual(a.produced_files(), ["new/b.txt", "src/a.py"])
         self.assertEqual(a.checkpoint.ref, f"refs/mini/{a.log.run_id}")
         self.assertEqual(sorted(ckpt.task_files(self.root, a.log.run_id)), ["new/b.txt", "src/a.py"])
-        self.assertIn("inside .git", a._write({"path": ".git/hooks/x", "content": "x"}, ""))
-        self.assertIn("outside the folder", a._write({"path": "../x.txt", "content": "x"}, ""))
+        self.assertIn("inside .git", a.act("write_file", {"path": ".git/hooks/x", "content": "x"})[0])
+        self.assertIn("outside the folder", a.act("write_file", {"path": "../x.txt", "content": "x"})[0])
         ckpt.undo(self.root, a.log.run_id)
         self.assertEqual(open(os.path.join(self.root, "src", "a.py")).read(), "print(1)\n")
         self.assertFalse(os.path.exists(os.path.join(self.root, "new", "b.txt")))
@@ -100,7 +101,7 @@ class WorkspaceTest(unittest.TestCase):
     def test_no_repository_no_change(self):
         plain = os.path.realpath(tempfile.mkdtemp(prefix="mini-plain-"))
         a = Agent(self.cfg, label="plain", workspace=plain)
-        out = a._write({"path": "a.txt", "content": "x"}, "")
+        out = a.act("write_file", {"path": "a.txt", "content": "x"})[0]
         self.assertIn("not a git repository", out)
         self.assertEqual(os.listdir(plain), [])
         self.assertFalse(os.path.exists(os.path.join(plain, ".git")))
@@ -187,7 +188,7 @@ class CopyInExportTest(unittest.TestCase):
             return {"file": inputs["file"]}, {"exit_code": 0, "output": ""}
         a = Agent(cfg, label="call", workspace=self.root)
         with mock.patch.object(Sandbox, "invoke_tool", side_effect=fake_tool):
-            text = a._invoke({"name": "upper", "inputs": {"file": "src/a.py"}}, {})
+            text = a.act("invoke_tool", {"name": "upper", "inputs": {"file": "src/a.py"}})[0]
         self.assertEqual(seen["inputs"], {"file": "src/a.py"})
         self.assertEqual(seen["listing"], ["src"], "only the named file is in the sandbox, never .git")
         self.assertFalse(os.path.exists(seen["box"]), "the call's folder is removed afterwards")

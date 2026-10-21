@@ -101,6 +101,9 @@ enabled = true
 extra_attempts = 3
 max_rounds = 1
 
+[web]
+hosts = []               # hosts web_fetch may read without asking ("example.org"); others need your approval per task
+
 [tools]
 auto_accept = false      # tools built in a task stay staged until you accept them (mini tools accept NAME)
 bin_dir = "~/.local/bin" # accepted tools get a command here

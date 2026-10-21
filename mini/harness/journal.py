@@ -1,5 +1,5 @@
 """Project memory: <folder>/.mini/ holds a journal of the tasks done in the folder (journal.jsonl, one line per
-task) and the run logs (runs/<run id>/). The folder is excluded from git through .git/info/exclude, so it is never
+task), the agent's notes (notes.md) and the run logs (runs/<run id>/). The folder is excluded from git through .git/info/exclude, so it is never
 committed or checkpointed, but it stays visible in a file explorer. Stdlib only (plus the git command).
 """
 import json
@@ -10,6 +10,8 @@ import time
 from .workspace import META
 
 FILE = "journal.jsonl"
+NOTES = "notes.md"                              # the agent's own notes about the folder (write_notes)
+MAX_NOTES = 1500                                # characters of the notes shown in the context
 MAX_ENTRIES = 8                                 # entries shown to the agent, most recent first
 MAX_CHARS = 2500                                # and characters of the whole section (about 600 tokens)
 MAX_FILES = 8                                   # files named per entry
@@ -78,9 +80,27 @@ def entries(folder):
     return out
 
 
+def notes(folder):
+    try:
+        return open(os.path.join(meta_dir(folder), NOTES)).read()
+    except OSError:
+        return ""
+
+
+def write_notes(folder, text, mode="append"):
+    """Append to (or with mode "replace", replace) the notes. Returns the notes afterwards."""
+    os.makedirs(meta_dir(folder), exist_ok=True)
+    ensure_excluded(folder)
+    old = notes(folder) if mode == "append" else ""
+    new = old + ("\n" if old and not old.endswith("\n") else "") + text.rstrip("\n") + "\n"
+    with open(os.path.join(meta_dir(folder), NOTES), "w") as f:
+        f.write(new)
+    return new
+
+
 def summary_text(folder):
     """What happened in this folder before, for Agent.context(): the latest entries, most recent first, within
-    MAX_ENTRIES and MAX_CHARS. "" when the folder has no journal."""
+    MAX_ENTRIES and MAX_CHARS, then the agent's notes (up to MAX_NOTES). "" when the folder has neither."""
     cut = lambda v, n: " ".join(str(v or "").split())[:n]
     head = "Earlier tasks in this folder (most recent first; the journal is in .mini/journal.jsonl):"
     lines, used = [], len(head)
@@ -95,4 +115,9 @@ def summary_text(folder):
             break
         lines.append(line)
         used += len(line) + 1
-    return head + "\n" + "\n".join(lines) if lines else ""
+    out = head + "\n" + "\n".join(lines) if lines else ""
+    text = notes(folder).strip()
+    if text:
+        cut = f"\n[... {len(text) - MAX_NOTES} more characters: read_notes]" if len(text) > MAX_NOTES else ""
+        out += ("\n\n" if out else "") + f"Your notes about this folder (.mini/{NOTES}):\n" + text[:MAX_NOTES] + cut
+    return out

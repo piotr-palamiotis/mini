@@ -6,6 +6,7 @@ Enforced in code:
   - restarts after a fail streak happen inside the budget and do not reset it
   - after the budget: local moves to the free tier by itself; then the user can advise, pick paid, or stop
   - a permission or package increase always goes through the approval gate
+  - a spec that does what a core capability (mini/core) does is rejected
 """
 import hashlib
 import json
@@ -225,6 +226,9 @@ class Creator:
             return "name must be snake_case, 3-48 characters, starting with a letter."
         if new and s["name"] in self.a.registry.names():
             return f"the name {s['name']} is already used in the registry."
+        core = self.a.core.covering(s["name"]) or self.a.core.covering(s["description"])
+        if core:                                    # never shadow a core capability with a tool
+            return f"this tool would do what the core capability {core} already does; build only what core cannot."
         for k in ("input_schema", "output_schema"):
             if not isinstance(s[k], dict):
                 return f"{k} must be a JSON Schema object."

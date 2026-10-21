@@ -110,6 +110,9 @@ DEFAULTS = {
         "extra_attempts": 3,                 # attempts granted after the user gives advice
         "max_rounds": 1,                     # advice rounds per tool
     },
+    "web": {
+        "hosts": [],                         # hosts web_fetch may read without asking; others need the user's approval per task
+    },
     "tools": {
         "auto_accept": False,                # true: a tool a task builds goes straight to main (no review step)
         "bin_dir": "~/.local/bin",           # accepted tools get a command here

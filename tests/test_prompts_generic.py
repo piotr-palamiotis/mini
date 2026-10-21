@@ -7,7 +7,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOMAIN_WORDS = ["email", "e-mail", "smtp", "mailpit", "anna", "meeting", "friday", "weather", "prague", "forecast",
               "meteo", "pdf", "ocr", "tesseract", "markdown", "poppler", "scan", "garden", "water"]
-CHECKED = ["mini/agent", "mini/harness", "sandbox"]
+CHECKED = ["mini/agent", "mini/core", "mini/harness", "sandbox"]
 
 
 class GenericPromptsTest(unittest.TestCase):

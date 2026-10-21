@@ -34,14 +34,18 @@ GAP = """The task, as understood:
 Tools installed in the registry ({count}):
 {registry}
 
-Built-in actions you always have (they are not tools and never need to be built): listing (list_files), reading
-(read_file) and writing (write_file) text files in the user's folder, and pure text reasoning (reading, summarizing, writing or rephrasing text you
-have seen). Anything else that touches files, the network or other systems, or that needs exact repeatable
-processing, needs a tool.
+Core capabilities you always have (they are not tools and never need to be built), besides pure text reasoning
+(reading, summarizing, writing or rephrasing text you have seen):
+{core}
 
-Decide whether the installed tools plus the built-in actions cover every step. A step a built-in action does is
-covered: never put it in `missing` and never build a tool for it. If every step is a built-in action or an installed
-tool, `missing` is an empty list.
+Core capabilities that match this task best: {matches}
+
+Exact processing this task needs once is done with run_code (a script run in the sandbox); a missing capability
+is one worth keeping as a tool for later tasks. Anything else that touches other systems needs a tool.
+
+Decide whether the installed tools plus the core capabilities cover every step. A step a core capability does is
+covered: never put it in `missing` and never build a tool for it. If every step is a core capability or an
+installed tool, `missing` is an empty list.
 
 Call `decide_coverage` with:
 - reasoning: how each step is covered, or why it is not
@@ -184,13 +188,16 @@ Tools you can invoke (inputs must follow the input schema):
 The user's folder:
 {files}
 
+Core capabilities (call them yourself, never through `invoke_tool`):
+{core}
+
 Complete the task now. Call `invoke_tool` to run a tool. Pass every input you already know from the task;
 the tool asks the user only for what is missing, and saved settings are filled in by the harness. Tool outputs
-come back as JSON. `invoke_tool` runs only the installed tools listed above. Use `list_files`, `read_file` and
-`write_file` yourself, as actions of their own (never through `invoke_tool`): they work on the user's folder, with
-paths relative to it, and write_file changes the file in place (it takes the content as a fenced block in the same
-reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that
-no tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked
+come back as JSON. `invoke_tool` runs only installed tools. The core capabilities work on the user's folder, with
+paths relative to it, and change files in place; write_file and run_code take their content as a fenced block in
+the same reply. For exact processing this task needs once, use run_code before thinking of a new tool. If a tool
+fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that neither core nor
+a tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked
 (the requested item, not a different or nearby one). If it does not, that is a tool bug: call `report_tool_bug`.
 When the task is done, call `finish` with the answer for the user and the list of files you produced.
 Keep what you read small: your context is limited. For "what is in this folder", list it (depth 1), then go
