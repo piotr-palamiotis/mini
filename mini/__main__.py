@@ -164,6 +164,7 @@ def undo_cmd(cfg, items, list_only):
 def tools_cmd(cfg, a):
     from .harness.registry import RegistryError
     reg = Registry(cfg.abspath("state"))
+    reg.seed_bundled()
     need = {"show", "review", "accept", "discard", "rollback"}
     if a.action in need and not a.name:
         print(f"usage: mini tools {a.action} NAME", file=sys.stderr)

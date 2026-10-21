@@ -59,6 +59,7 @@ def _show(out, written):
 
 def run_tool(cfg, name, argv):
     reg = Registry(cfg.abspath("state"))
+    reg.seed_bundled()
     m = reg.get(name)
     if not m:
         staged = [s["run_id"] for s in reg.staged() if s["name"] == name]
@@ -166,7 +167,9 @@ def write_shim(cfg, name):
 
 def sync_shims(cfg):
     """A shim for every accepted tool; shims of tools that are gone are removed. Returns (written, removed)."""
-    names = Registry(cfg.abspath("state")).names()
+    reg = Registry(cfg.abspath("state"))
+    reg.seed_bundled()
+    names = reg.names()
     written = [write_shim(cfg, n) for n in names]
     removed = []
     d = bin_dir(cfg)

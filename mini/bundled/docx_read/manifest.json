@@ -1,0 +1,15 @@
+{
+  "name": "docx_read",
+  "description": "Read a Word .docx file and return its paragraphs (with style names) and tables in document order, plus the plain text. Headers, footers, comments and images are not read.",
+  "kind": "code",
+  "input_schema": {"type": "object", "required": ["path"], "properties": {
+    "path": {"type": "string", "description": ".docx file in the working folder"}}},
+  "output_schema": {"type": "object", "properties": {
+    "blocks": {"type": "array", "description": "[{type: paragraph, style, text} | {type: table, rows}] in order"},
+    "text": {"type": "string", "description": "the document as plain text, table rows joined with ' | '"},
+    "paragraphs": {"type": "integer"}, "tables": {"type": "integer"}}},
+  "permissions": {"network": [], "packages": {}},
+  "edge_cases": ["not a docx or corrupt zip", "empty document", "table cells with several paragraphs", "tabs and line breaks"],
+  "created_by": {"provider": "bundled", "model": "none"},
+  "test_file": "test_tool.py"
+}

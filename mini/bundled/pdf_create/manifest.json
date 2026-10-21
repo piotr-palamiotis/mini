@@ -1,0 +1,16 @@
+{
+  "name": "pdf_create",
+  "description": "Create a simple text-only PDF (A4, wrapped lines, several pages if needed) from a string. No images, tables or styling.",
+  "kind": "code",
+  "input_schema": {"type": "object", "required": ["path", "text"], "properties": {
+    "path": {"type": "string", "description": "PDF file to write, relative to the working folder"},
+    "text": {"type": "string", "description": "the body; a newline starts a new line"},
+    "title": {"type": "string", "description": "optional bold heading above the text"},
+    "overwrite": {"type": "boolean", "description": "replace the file when it exists (default false)"}}},
+  "output_schema": {"type": "object", "properties": {
+    "path": {"type": "string"}, "pages": {"type": "integer"}, "bytes": {"type": "integer"}}},
+  "permissions": {"network": [], "packages": {}},
+  "edge_cases": ["file exists without overwrite", "path outside the folder", "characters outside Latin-1", "text longer than a page"],
+  "created_by": {"provider": "bundled", "model": "none"},
+  "test_file": "test_tool.py"
+}

@@ -17,7 +17,7 @@ import time
 
 from . import codeblocks, prompts
 from .turns import AgentStop, RestartRequested, Turns, fn
-from ..harness.registry import NAME_RE
+from ..harness.registry import NAME_RE, is_bundled
 from ..harness.sandbox import PolicyError, validate_packages, validate_targets
 from ..harness.settings import KEY_RE, validate_declarations
 from ..harness.lessons import format_lessons
@@ -224,6 +224,8 @@ class Creator:
             return "missing fields: " + ", ".join(missing) + "."
         if not isinstance(s["name"], str) or not NAME_RE.match(s["name"]):
             return "name must be snake_case, 3-48 characters, starting with a letter."
+        if is_bundled(s["name"]):
+            return f"{s['name']} is a bundled tool and cannot be replaced; invoke it, or choose a different name."
         if new and s["name"] in self.a.registry.names():
             return f"the name {s['name']} is already used in the registry."
         core = self.a.core.covering(s["name"]) or self.a.core.covering(s["description"])

@@ -1,0 +1,16 @@
+{
+  "name": "xlsx_read",
+  "description": "Read an Excel .xlsx workbook and return each sheet as rows of values (numbers, text, booleans; formulas as their last calculated value). Charts, images and styles are ignored.",
+  "kind": "code",
+  "input_schema": {"type": "object", "required": ["path"], "properties": {
+    "path": {"type": "string", "description": ".xlsx file in the working folder"},
+    "sheet": {"type": "string", "description": "read only this sheet (default: all sheets)"},
+    "max_rows": {"type": "integer", "description": "rows to return per sheet (default 200); row_count tells the real size"}}},
+  "output_schema": {"type": "object", "properties": {
+    "sheets": {"type": "array", "description": "[{name, rows: [[value]] from column A, row_count, truncated}]"},
+    "sheet_names": {"type": "array"}}},
+  "permissions": {"network": [], "packages": {}},
+  "edge_cases": ["not an xlsx", "unknown sheet name", "shared strings and inline strings", "sparse rows and empty cells", "more rows than max_rows", "formula never calculated"],
+  "created_by": {"provider": "bundled", "model": "none"},
+  "test_file": "test_tool.py"
+}

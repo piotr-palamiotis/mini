@@ -1,0 +1,16 @@
+{
+  "name": "xlsx_edit",
+  "description": "Set cell values in an existing Excel .xlsx workbook, keeping the other cells, styles and sheets. Strings starting with '=' become formulas; null clears a cell.",
+  "kind": "code",
+  "input_schema": {"type": "object", "required": ["path", "cells"], "properties": {
+    "path": {"type": "string", "description": ".xlsx file in the working folder"},
+    "cells": {"type": "object", "description": "{cell reference: value}, e.g. {\"B2\": 5, \"C2\": \"=B2*2\", \"A9\": \"note\"}; a value is a string, number, boolean or null"},
+    "sheet": {"type": "string", "description": "sheet name (default: the first sheet)"},
+    "output": {"type": "string", "description": "write the result here instead of changing the file; must not exist"}}},
+  "output_schema": {"type": "object", "properties": {
+    "path": {"type": "string"}, "sheet": {"type": "string"}, "cells_set": {"type": "integer"}}},
+  "permissions": {"network": [], "packages": {}},
+  "edge_cases": ["invalid cell reference", "unknown sheet", "new row or column beyond the used range", "cell with a style keeps it", "empty sheetData", "not an xlsx", "output already exists"],
+  "created_by": {"provider": "bundled", "model": "none"},
+  "test_file": "test_tool.py"
+}

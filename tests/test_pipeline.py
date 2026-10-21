@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 
+from mini import bundled
 from mini.agent.core import Agent
 from mini.harness.registry import Registry
 from tests.helpers import call, fake_backend, fence, step, temp_config
@@ -130,10 +131,10 @@ class PipelineTest(unittest.TestCase):
         inv = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
         self.assertIn({"lines": 2}, [e.get("output") for e in inv if e["kind"] == "invoke"])
         other = Registry(cfg.abspath("state"))
-        self.assertEqual(other.names(), [])
+        self.assertEqual(set(other.names()), set(bundled.names()))   # only the seeded tools
         self.assertEqual([x["run_id"] for x in other.staged()], [s["run_id"]])
         self.assertEqual(other.accept("count_text_lines", s["run_id"]), 1)
-        self.assertEqual(Registry(cfg.abspath("state")).names(), ["count_text_lines"])
+        self.assertEqual(set(Registry(cfg.abspath("state")).names()), {"count_text_lines", *bundled.names()})
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ made it can use it right away, other runs cannot. accept() makes the staged tree
 main; discard() deletes the branch. Tools are generated whole, so accepting a branch whose base is no longer
 the newest version replaces that version (force=True) rather than merging the two.
 
+Bundled tools (mini/bundled, the document tools) are seeded into the same layout by seed_bundled(). Their names are
+reserved: install() refuses a manifest that does not carry the digest of the bundled files, so a task can neither
+shadow nor overwrite them.
+
 Manifest: name, version, kind, description, input_schema, output_schema, permissions, edge_cases, files,
 test_file, test_results, created_by {provider, model}, attempts_used, created_at, image, parent_version, approvals.
 
@@ -24,6 +28,8 @@ import shutil
 import subprocess
 import tarfile
 import time
+
+from .. import bundled
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,47}$")
 STOP = set("a an the to of and or for in on at by with from into is are be this that it as".split())
@@ -48,6 +54,10 @@ def schema_fields(schema):
 
 class RegistryError(Exception):
     pass
+
+
+def is_bundled(name):
+    return name in bundled.names()
 
 
 class Registry:
@@ -186,6 +196,8 @@ class Registry:
         name = manifest["name"]
         if not NAME_RE.match(name):
             raise ValueError(f"invalid tool name {name!r}")
+        if is_bundled(name) and manifest.get("bundled") != bundled.digest(name):
+            raise RegistryError(f"{name} is a bundled tool; it cannot be replaced or shadowed")
         if not self.run_id:
             raise RegistryError("install needs a run id (the staging branch is named after the run)")
         repo = os.path.join(self.root, name)
@@ -219,6 +231,27 @@ class Registry:
         if self.auto_accept:
             return self.accept(name, self.run_id, force=True)
         return version
+
+    def seed_bundled(self):
+        """Install the bundled tools that are missing, and new versions of those whose files changed. Returns the
+        names installed. Cheap when nothing changed (one manifest read per tool)."""
+        done = []
+        saved = self.run_id, self.auto_accept
+        self.run_id, self.auto_accept = "bundled", False
+        try:
+            for name in bundled.names():
+                m = bundled.manifest(name)
+                have = self.versions(name)
+                if have and json.loads(self._git(name, "show", f"v{have[-1]}:manifest.json")).get("bundled") == m["bundled"]:
+                    continue
+                m.update(created_by={"provider": "bundled", "model": "none"}, attempts_used={}, approvals={"install": "bundled"},
+                         test_results={"passed": True, "summary": "tests ship with the tool (test_tool.py)"})
+                self.install(m, bundled.directory(name))
+                self.accept(name, force=True)
+                done.append(name)
+        finally:
+            self.run_id, self.auto_accept = saved
+        return done
 
     def accept(self, name, run_id=None, force=False):
         """The staged tree becomes the next tagged version on main. Returns the version number."""

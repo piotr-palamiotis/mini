@@ -1,0 +1,17 @@
+{
+  "name": "docx_replace",
+  "description": "Find and replace text in a Word .docx file, keeping its formatting. Matches text even when it is split over formatting runs. Body text only (not headers or footers).",
+  "kind": "code",
+  "input_schema": {"type": "object", "required": ["path", "find", "replace"], "properties": {
+    "path": {"type": "string", "description": ".docx file in the working folder"},
+    "find": {"type": "string", "description": "text to find (one line, case sensitive)"},
+    "replace": {"type": "string", "description": "replacement text (may be empty)"},
+    "first_only": {"type": "boolean", "description": "replace only the first match (default: all)"},
+    "output": {"type": "string", "description": "write the result here instead of changing the file; must not exist"}}},
+  "output_schema": {"type": "object", "properties": {
+    "path": {"type": "string"}, "replacements": {"type": "integer"}, "changed": {"type": "boolean"}}},
+  "permissions": {"network": [], "packages": {}},
+  "edge_cases": ["no match leaves the file untouched", "match split over runs", "XML special characters", "not a docx", "output already exists"],
+  "created_by": {"provider": "bundled", "model": "none"},
+  "test_file": "test_tool.py"
+}

@@ -26,7 +26,7 @@ from ..harness.backends import Endpoint, has_model, make_backend
 from ..harness.config import llama_settings, local_candidates
 from ..harness.eventlog import RunLog
 from ..harness.lessons import LessonStore
-from ..harness.registry import Registry
+from ..harness.registry import Registry, is_bundled
 from ..harness.sandbox import PolicyError, Sandbox
 from ..harness.settings import SettingsStore
 from ..harness.watchdogs import Watchdogs
@@ -76,6 +76,7 @@ class Agent:
         self._use_tier(self.start_tier)
         self.local_t0 = time.time()
         self.registry = Registry(cfg.abspath("state"), run_id=self.log.run_id, auto_accept=cfg["tools"]["auto_accept"])
+        self.registry.seed_bundled()                       # bundled document tools: installed on first run
         self.settings = SettingsStore(cfg.abspath("state"))
         self.lessons = LessonStore(cfg.abspath("state"))
         self.sandbox = Sandbox(cfg, self.log)
@@ -516,6 +517,9 @@ class Agent:
         m = self.registry.get(name)
         if not m:
             return f"No installed tool named {name!r}."
+        if is_bundled(name):
+            return (f"{name} is a bundled tool and cannot be repaired here. Tell the user in your answer what failed "
+                    "so it can be fixed in mini itself, and do the step another way (run_code) if you can.")
         if self.repaired >= self.cfg["caps"]["max_repairs_per_task"]:
             self.log.emit("cap", cap="max_repairs_per_task", limit=self.cfg["caps"]["max_repairs_per_task"])
             raise AgentStop(f"repair limit reached ({self.repaired}); {name} still fails on the real task")

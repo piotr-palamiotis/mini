@@ -1,6 +1,6 @@
 # mini redesign
 
-Notes from the design discussion of 2026-10-21. Steps 1 to 3 of the build order (sections 1 to 3, without the bundled document tools, and items 1 and 3 of section 5) are implemented; the rest is not yet.
+Notes from the design discussion of 2026-10-21. Steps 1 to 5 of the build order (sections 1 to 3 and items 1, 3 and 7 of section 5) are implemented; the rest is not yet.
 Status of each part: **decided** (the user chose it), **proposed** (suggested, not yet confirmed).
 
 ## Problems this answers
@@ -113,7 +113,7 @@ Rootless sandbox with an egress allowlist; git-backed tools with staging, accept
 2. **Project memory:** `.mini/` journal and run logs, fed into `Agent.context()`.
 3. **Core catalog** with the capabilities above, a generated prompt section, the creator guard, and the run-code path (items 1 and 3 of section 5).
 4. **Replay tests** (item 7), added alongside step 3 so later changes are checked.
-5. **Bundled document tools** (PDF, docx, xlsx).
+5. **Bundled document tools** (PDF, docx, xlsx). Done: `mini/bundled/`, standard library only (PDF text extraction handles plain and Flate content streams, not scans, object streams or custom font encodings).
 6. **Event model:** start/chunk/end events, live sandbox output, `multi` in `io.ask`.
 7. **Stream UI:** markdown, thinking, tool and question blocks.
 8. **Full-screen views:** `/registry`, `/config`, `/tools`.

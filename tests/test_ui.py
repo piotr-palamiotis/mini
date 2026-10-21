@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 
+from mini import bundled
 from mini.harness.registry import Registry
 from mini.ui.app import ApprovalScreen, MiniApp
 from tests.helpers import call, fake_backend, step, temp_config
@@ -42,8 +43,8 @@ class UITest(unittest.TestCase):
                 app.save_screenshot(os.path.join(SHOTS, "mini-ui-done.svg"))
                 self.assertIn("attempt 2/10", str(app.query_one("#status").render()))
                 reg = Registry(cfg.abspath("state"))
-                self.assertEqual(reg.names(), ["count_text_lines"])
-                self.assertEqual(app.query_one("#reg-table").row_count, 1)
+                self.assertEqual(set(reg.names()), {"count_text_lines", *bundled.names()})
+                self.assertEqual(app.query_one("#reg-table").row_count, 1 + len(bundled.names()))
         asyncio.run(go())
         self.assertEqual(seen, ["confirm", "plan", "install"])
 

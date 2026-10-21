@@ -1,0 +1,15 @@
+{
+  "name": "xlsx_write",
+  "description": "Create an Excel .xlsx workbook from rows of values, one or more sheets. Strings starting with '=' become formulas. No styles, charts or dates.",
+  "kind": "code",
+  "input_schema": {"type": "object", "required": ["path", "sheets"], "properties": {
+    "path": {"type": "string", "description": ".xlsx file to write, relative to the working folder"},
+    "sheets": {"type": "object", "description": "{sheet name: [[value, ...], ...]}: rows from cell A1; a value is a string, number, boolean or null (empty); a string starting with '=' is a formula"},
+    "overwrite": {"type": "boolean", "description": "replace the file when it exists (default false)"}}},
+  "output_schema": {"type": "object", "properties": {
+    "path": {"type": "string"}, "sheets": {"type": "array"}, "rows": {"type": "object", "description": "row count per sheet"}}},
+  "permissions": {"network": [], "packages": {}},
+  "edge_cases": ["file exists without overwrite", "sheet name too long or with forbidden characters", "more than 26 columns", "XML special characters", "unsupported cell value type", "empty rows"],
+  "created_by": {"provider": "bundled", "model": "none"},
+  "test_file": "test_tool.py"
+}
