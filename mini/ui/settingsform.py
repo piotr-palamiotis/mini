@@ -50,7 +50,6 @@ FIELDS = [
         ("watchdogs", "parse_error_retries", "Unparseable replies tolerated in a row", "int"),
     ]),
     ("Your folder and the sandbox", [
-        ("workspace", "enabled", "Share the folder mini is started in, read-only (/host)", "switch"),
         ("sandbox", "engine", "Container engine", "select", ("podman", "docker")),
         ("sandbox", "memory", "Memory per tool run (e.g. 1g)", "text"),
         ("sandbox", "cpus", "CPUs per tool run", "text"),

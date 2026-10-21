@@ -138,7 +138,7 @@ model = "gemma4-12b-it-qat"
 ctx = 40960
 extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024 --no-mmproj-offload"
 
-# The folder mini is started in is shared read-only as /host; changes wait in out/ until `mini apply`.
+# The folder mini is started in is where it works. It must be a git repository: every task is checkpointed in a
+# hidden ref (refs/mini/<run>) and `mini undo` restores it.
 [workspace]
-enabled = true
 refuse = ["~", "/"]

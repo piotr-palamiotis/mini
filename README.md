@@ -130,13 +130,19 @@ place, so the file's comments stay; a second sub-tab edits the raw TOML. Backend
 `tests/test_watchdogs.py` checks that each one fires exactly at its threshold. It also checks that the attempt
 budget stops at 10 and that restarts do not reset it.
 
-## Your folder: read-only in, reviewed changes out
+## Your folder: changes in place, checkpointed in git
 
-The folder you start `mini` in is shared with the agent **read-only** as `/host` (`[workspace]`; your home folder
-and `/` are never shared, and `enabled = false` turns it off). The plan-confirm dialog shows the shared folder.
+The folder you start `mini` in is the workspace (your home folder and `/` are refused, `[workspace] refuse`). It
+must be a git repository: if it is not, mini says so and offers `git init`, and does nothing else until you agree.
+The plan-confirm dialog shows the folder.
 
-- The agent lists and reads `/host` itself (`list_files`, `read_file`), and tools get `/host` paths in their
-  inputs. "The current folder" means `/host`. No tool has to be built to list or read your files.
+- The agent lists, reads and writes files itself (`list_files`, `read_file`, `write_file`), with paths relative to
+  the folder. Edits happen in place, new files go where the task says. "The current folder" means this folder.
+  No tool has to be built to list, read or write your files.
+- Tools never see the folder. For each tool call the harness copies the files the call names into a fresh
+  sandbox folder (same relative paths) and exports whatever the tool wrote back to the same relative path.
+  Every path is confined to the folder, symlinks included; a symlink the tool creates is never followed, and
+  nothing under `.git` is ever copied in or written.
 - Listings are compact so a big folder cannot fill the model's context: names without their path, folders with
   their item count, files with their size, `depth` 1 to 3, at most 60 lines / 4,000 characters (about 1,000
   tokens), `.git`, `node_modules` and similar shown but not opened. The agent lists a subfolder to see inside it.
@@ -145,11 +151,14 @@ and `/` are never shared, and `enabled = false` turns it off). The plan-confirm 
   of the local model's context; if the server still refuses a request as too long, they are shortened further and
   the call is retried. When nothing is left to shorten the run stops with a clear message (it used to be reported
   as unparseable tool calls).
-- Nothing is ever written to `/host` by a run. To change or add a file the agent writes the whole new file to
-  `out/<same relative path>` in the run's scratch folder (`out/src/a.py` for `/host/src/a.py`).
-- `mini apply [RUN]` (or `/apply` in the UI) shows one diff per file and copies them into the folder only
-  after you say yes (`--yes` skips the question). Paths are resolved first, so a symlink in the folder cannot
-  lead a copy outside it. `tests/test_workspace.py` checks this.
+- **Checkpoints.** Before a task changes anything, mini snapshots the folder's tree (uncommitted and untracked
+  files included) into the hidden ref `refs/mini/<run>` with git plumbing (a temporary index, `write-tree`,
+  `commit-tree`, `update-ref`). Your index, branch and history are not touched. The ref also records which files
+  the task wrote.
+- `mini undo` (or `/undo` in the UI) puts back what the newest task changed; `mini undo RUN` a given task,
+  `mini undo [RUN] FILE...` only those files, `mini undo --list` lists the checkpoints. Files a task created are
+  deleted. An undo is checkpointed itself (`undo-<run>-<time>`), so it can be undone too.
+  `tests/test_workspace.py` and `tests/test_checkpoint.py` check this.
 - The llama-server prompt cache is capped (`--cache-ram 1024` in the default arguments). Without it the
   server's RAM grew by about 560 MB per long prompt on a 7.7 GB machine until it swapped.
 
@@ -158,9 +167,9 @@ and `/` are never shared, and `enabled = false` turns it off). The plan-confirm 
 - Rootless Podman 4.9 (`[sandbox] engine`). Each run gets a fresh container: read-only root filesystem,
   `/tmp` as tmpfs, `--cap-drop ALL`, `no-new-privileges`, 1 GiB memory with no extra swap, 2 CPUs,
   256 PIDs and a timeout.
-- Mounts: the tool files (read-only) at `/tool` and the per-run scratch directory at `/work`. When a folder is
-  shared (next section), that folder read-only at `/host` for tool *runs*, never for the tests that build a tool.
-  Nothing else. No host environment variables (`HOME=/tmp`), no credentials, no home directory.
+- Mounts: the tool files (read-only) at `/tool` and the call's own folder at `/work`, holding copies of the files
+  the call names (previous section). Never your folder itself or its `.git`. Nothing else. No host environment
+  variables (`HOME=/tmp`), no credentials, no home directory.
 - Network: none by default. Declared and approved `host:port` targets put the container on a fresh
   `--internal` network with no route out. Each declared host resolves to an egress forwarder container
   (`sandbox/egress.py`), which forwards only to the allowlist and picks the destination by TLS SNI or HTTP
@@ -202,7 +211,8 @@ one is missing, which **questions** it asks and in what order, what it confirms 
 - `mini tools accept NAME` also writes a command into `[tools] bin_dir` (`~/.local/bin`): run `NAME` with no
   arguments and it asks, or give everything in one line (`NAME --title x --body y --go`). If the name is
   taken by another command, it becomes `mini-NAME`. It runs in the same sandbox with the same permissions;
-  files it writes under `out/` land in your current directory.
+  the current directory is its folder (a git repository) and the files it writes land there, checkpointed like
+  a task's.
 
 ## Model tiers
 

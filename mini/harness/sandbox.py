@@ -3,7 +3,8 @@
 Rootless Podman (or rootless Docker). Per run:
   - read-only root filesystem, /tmp as tmpfs, all capabilities dropped, no-new-privileges
   - memory, CPU and PID limits; wall-clock timeout
-  - tool files mounted read-only at /tool, the per-run scratch directory read-write at /work, nothing else
+  - tool files mounted read-only at /tool, the call's own folder read-write at /work (copies of the files the call
+    names, never the user's folder or its .git), nothing else
   - no host environment variables, no credentials, no home directory (HOME=/tmp inside)
   - network: none, unless the manifest declares host:port targets that were approved. Then the container joins
     a fresh --internal network (no route out) and each declared host resolves to an egress forwarder container
@@ -211,8 +212,7 @@ class Sandbox:
         if argv[0] == "pip" and (len(argv) < 2 or argv[1] not in ("list", "show", "freeze")):
             raise PolicyError("pip may only list packages here; request packages through the spec instead")
 
-    def run(self, argv, work_dir, tool_dir=None, network=(), image=None, timeout=None, purpose="", on_message=None,
-            workspace=None):
+    def run(self, argv, work_dir, tool_dir=None, network=(), image=None, timeout=None, purpose="", on_message=None):
         """Run argv in a fresh container. Returns dict(exit_code, output, secs, timed_out, egress).
         on_message(msg) -> reply dict or None: the container's stdout carries JSON-line messages (a tool asking a
         question); each reply goes back on its stdin. Time spent in on_message does not count against the timeout."""
@@ -233,8 +233,6 @@ class Sandbox:
             args += ["--userns", "keep-id:uid=1000,gid=1000"]
         if tool_dir:
             args += ["-v", f"{os.path.realpath(tool_dir)}:/tool:ro"]
-        if workspace:                                  # the user's folder, read-only
-            args += ["-v", f"{os.path.realpath(workspace)}:/host:ro"]
         egress = None
         if targets:
             net, ename, ip = self._start_egress(targets, rid)
@@ -310,7 +308,7 @@ class Sandbox:
         return (-1 if timed_out else code), "".join(plain) + ("\n" + "".join(err) if err else ""), timed_out
 
     def invoke_tool(self, manifest, tool_dir, work_dir, inputs, timeout=None, on_message=None, settings=None,
-                    network=None, workspace=None):
+                    network=None):
         """Run a registered code tool on inputs. Returns (output dict, sandbox result)."""
         meta = os.path.join(work_dir, ".mini")
         os.makedirs(meta, exist_ok=True)
@@ -330,7 +328,7 @@ class Sandbox:
         try:
             res = self.run(["python", "/mini/runner.py"], work_dir, tool_dir=tool_dir, network=network, image=image,
                            timeout=timeout, purpose=f"invoke {manifest['name']} v{manifest.get('version', '?')}",
-                           workspace=workspace, on_message=on_message or (lambda msg: {"error": "no one to ask: pass this value in the inputs"}
+                           on_message=on_message or (lambda msg: {"error": "no one to ask: pass this value in the inputs"}
                                                      if msg.get("op") == "ask" else None))
         finally:
             if os.path.exists(setp):

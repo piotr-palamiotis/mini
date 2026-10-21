@@ -1,51 +1,53 @@
-"""The user's folder as the agent sees it. Stdlib only.
+"""The user's folder: the folder mini is launched in is the workspace. Stdlib only.
 
-mini shares the folder it was launched in, read-only, as /host (to the agent and to tools in the sandbox). Nothing
-is ever written there by a run: changes are written to out/<same relative path> in the run's scratch folder, and
-`mini apply` (or /apply in the UI) shows them as diffs and copies them into the folder after the user says yes.
+The agent's own file actions work on the folder directly, with paths relative to it. A tool never sees the folder:
+for each call the harness copies the files the call names into a fresh sandbox folder (same relative paths), and
+afterwards exports whatever the tool wrote back to the same relative path in the folder. Every path is confined to
+the folder, symlinks included, and nothing under .git is ever copied in or written. Changes are checkpointed in git
+first (checkpoint.py), so a task can be undone.
 """
-import difflib
-import json
+import hashlib
 import os
 import shutil
 
 from .sandbox import PolicyError
 
-MOUNT = "/host"
 MAX_LINES = 60                                  # lines of one listing
 MAX_CHARS = 4000                                # and characters (about 1,000 tokens)
 PER_DIR = 12                                    # entries shown per subfolder in a deeper listing
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mini"}
+META = ".mini"                                  # the runner's files in the sandbox folder; never exported
+STAGED = META + "/in"                           # files from outside the folder (attachments) as the tool sees them
+MAX_COPY_FILES = 5000                           # one call copies at most this many files
+MAX_COPY_BYTES = 500 * 1024 * 1024              # and this many bytes into the sandbox
 
 
 def resolve(cfg, cwd=None):
-    """(folder, note): the folder to share, or (None, why not). The launch folder is the consent, so folders that
-    are too broad to share ([workspace] refuse: the home folder, /) are not."""
-    ws = cfg["workspace"]
-    if not ws["enabled"]:
-        return None, ""
+    """(folder, note): the folder mini works in, or (None, why not). The launch folder is the consent, so folders
+    that are too broad ([workspace] refuse: the home folder, /) are not."""
     d = os.path.realpath(cwd or os.getcwd())
-    if d in {os.path.realpath(os.path.expanduser(p)) for p in ws["refuse"]}:
-        return None, f"{d} is too broad to share with the agent; start mini inside a project folder to give it that folder"
+    if d in {os.path.realpath(os.path.expanduser(p)) for p in cfg["workspace"]["refuse"]}:
+        return None, f"{d} is too broad to work in; start mini inside a project folder"
     return d, ""
 
 
-def host_path(workspace, p):
-    """A /host/... path (or /host) as a real path inside the shared folder. PolicyError for anything outside it,
-    symlinks that lead out included."""
-    p = str(p or "")
-    if workspace is None or not (p == MOUNT or p.startswith(MOUNT + "/")):
-        raise PolicyError(f"not a shared path: {p!r}" if workspace else "no folder is shared in this run")
-    root = os.path.realpath(workspace)
-    full = os.path.realpath(os.path.join(root, p[len(MOUNT):].lstrip("/")))
+def confine(folder, p):
+    """(real path, path relative to the folder) for a path in the folder (relative, or absolute inside it).
+    PolicyError for anything outside it, symlinks that lead out included, and for anything inside a .git folder."""
+    root = os.path.realpath(folder)
+    p = os.path.expanduser(str(p or "."))
+    full = os.path.realpath(p if os.path.isabs(p) else os.path.join(root, p))
     if full != root and not full.startswith(root + os.sep):
-        raise PolicyError(f"path outside the shared folder: {p}")
-    return full
+        raise PolicyError(f"path outside the folder: {p}")
+    rel = os.path.relpath(full, root)
+    if ".git" in rel.split(os.sep):
+        raise PolicyError(f"{p} is inside .git; mini never touches it")
+    return full, rel
 
 
-def list_dir(workspace, p, depth=1):
-    """Compact listing of a shared folder (see tree)."""
-    full = host_path(workspace, p)
+def list_dir(folder, p, depth=1):
+    """Compact listing of a folder in the workspace (see tree)."""
+    full, _ = confine(folder, p)
     if not os.path.isdir(full):
         raise PolicyError(f"{p} is not a folder")
     return tree(full, p, depth)
@@ -108,85 +110,101 @@ def _size(n):
     return f"{n:.1f} GB"
 
 
-# ---------------------------------------------------------------- applying a run's changes
-def run_workspace(run_dir):
-    """The folder a run shared, from its log, or None."""
-    try:
-        with open(os.path.join(run_dir, "log.jsonl")) as f:
-            for line in f:
-                ev = json.loads(line)
-                if ev.get("kind") == "run_start":
-                    return ev.get("workspace")
-    except (OSError, ValueError):
-        pass
-    return None
+# ---------------------------------------------------------------- copy in, export out
+def copy_in(folder, box, value, outside=()):
+    """Copy the files a call names into the sandbox folder box. value is the call's inputs (any JSON); every string
+    that names a file or folder in the workspace is copied to the same relative path and becomes that relative path.
+    Files outside the workspace are copied only when listed in outside (real paths; True: any file), to .mini/in/.
+    Returns the inputs as the tool sees them."""
+    budget = [MAX_COPY_FILES, MAX_COPY_BYTES]
+
+    def one(v):
+        if isinstance(v, dict):
+            return {k: one(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [one(x) for x in v]
+        if not isinstance(v, str) or not v.strip() or "\n" in v or len(v) > 1024:
+            return v
+        p = os.path.expanduser(v)
+        try:
+            full, rel = confine(folder, p)
+        except PolicyError:
+            if os.path.isabs(p) and os.path.isfile(p) and (outside is True or os.path.realpath(p) in outside):
+                return stage(box, p)
+            if os.path.lexists(p if os.path.isabs(p) else os.path.join(folder, p)):
+                raise
+            return v                                # not a path: a value like any other
+        if not os.path.exists(full):                # an output path: an absolute one becomes relative
+            return rel if os.path.isabs(p) else v
+        _copy(full, os.path.normpath(os.path.join(box, rel)), budget)       # "." copies the whole folder
+        return rel
+    return one(value)
 
 
-def pending(run_dir):
-    """[(relative path, status, diff)] for the files a run put in out/ that differ from the shared folder.
-    status: new | changed. Files identical to the folder's are left out."""
-    ws, out_dir = run_workspace(run_dir), os.path.join(run_dir, "work", "out")
-    if not ws or not os.path.isdir(out_dir):
-        return []
-    items = []
-    for d, dirs, files in os.walk(out_dir):
-        for name in sorted(files):
-            src = os.path.join(d, name)
-            rel = os.path.relpath(src, out_dir)
-            try:
-                dest = target(ws, rel)
-            except PolicyError as e:
-                items.append((rel, "refused", str(e)))
+def _copy(src, dest, budget):
+    if os.path.isdir(src):
+        for d, dirs, files in os.walk(src):
+            dirs[:] = [x for x in dirs if x not in (".git", META) and not os.path.islink(os.path.join(d, x))]
+            for f in files:
+                s = os.path.join(d, f)
+                if not os.path.islink(s):           # links inside a copied folder are left out
+                    _copy(s, os.path.join(dest, os.path.relpath(s, src)), budget)
+        return
+    budget[0] -= 1
+    budget[1] -= os.path.getsize(src)
+    if budget[0] < 0 or budget[1] < 0:
+        raise PolicyError(f"the call names too much to copy into the sandbox (more than {MAX_COPY_FILES} files or "
+                          f"{MAX_COPY_BYTES // 2**20} MB); name the files it needs")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copyfile(src, dest)
+
+
+def stage(box, src):
+    """Copy a file from outside the workspace into box/.mini/in/ and return the path the tool sees."""
+    os.makedirs(os.path.join(box, STAGED), exist_ok=True)
+    shutil.copyfile(src, os.path.join(box, STAGED, os.path.basename(src)))
+    return STAGED + "/" + os.path.basename(src)
+
+
+def changes(folder, box):
+    """([(relative path, sandbox file)] the tool wrote that differ from the workspace, [(path, why)] refused).
+    .mini/ is the runner's and never exported; a symlink the tool made is never followed."""
+    out, refused = [], []
+    for d, dirs, files in os.walk(box):
+        if os.path.relpath(d, box) == ".":
+            dirs[:] = [x for x in dirs if x != META]
+        for f in sorted(files):
+            src = os.path.join(d, f)
+            rel = os.path.relpath(src, box)
+            if os.path.islink(src):
+                refused.append((rel, "a symlink; not exported"))
                 continue
-            new = _text(src)
-            if not os.path.exists(dest):
-                items.append((rel, "new", f"new file, {os.path.getsize(src)} bytes"))
-            elif _bytes(src) != _bytes(dest):
-                old = _text(dest)
-                diff = ("binary file differs" if new is None or old is None else "".join(
-                    difflib.unified_diff(old.splitlines(True), new.splitlines(True), f"{rel} (now)", f"{rel} (after)")))
-                items.append((rel, "changed", diff))
-    return items
+            try:
+                full, rel = confine(folder, rel)
+            except PolicyError as e:
+                refused.append((rel, str(e)))
+                continue
+            if os.path.isdir(full):
+                refused.append((rel, "a folder of that name exists"))
+            elif not os.path.isfile(full) or _digest(full) != _digest(src):
+                out.append((rel, src))
+    return sorted(out), refused
 
 
-def target(ws, rel):
-    root = os.path.realpath(ws)
-    full = os.path.realpath(os.path.join(root, rel))
-    if full != root and not full.startswith(root + os.sep):
-        raise PolicyError(f"{rel} leads outside {ws}")
-    return full
-
-
-def apply(run_dir):
-    """Copy the pending files into the shared folder. Returns the relative paths written."""
-    ws, done = run_workspace(run_dir), []
-    for rel, status, _ in pending(run_dir):
-        if status == "refused":
-            continue
-        dest = target(ws, rel)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copyfile(os.path.join(run_dir, "work", "out", rel), dest)
+def export(folder, items):
+    """Copy (relative path, sandbox file) items into the workspace. Returns the relative paths written."""
+    done = []
+    for rel, src in items:
+        full, rel = confine(folder, rel)            # again: the folder may have changed while the tool ran
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        shutil.copyfile(src, full)
         done.append(rel)
     return done
 
 
-def _bytes(path):
+def _digest(path):
+    h = hashlib.sha256()
     with open(path, "rb") as f:
-        return f.read()
-
-
-def _text(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except (UnicodeDecodeError, OSError):
-        return None
-
-
-def latest_run_with_changes(runs_dir):
-    """Newest run folder that shared a folder and left something to apply, or None."""
-    for name in sorted(os.listdir(runs_dir), reverse=True) if os.path.isdir(runs_dir) else []:
-        rd = os.path.join(runs_dir, name)
-        if pending(rd):
-            return rd
-    return None
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.digest()

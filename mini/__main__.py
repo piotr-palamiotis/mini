@@ -9,9 +9,13 @@
   python -m mini settings list|show KEY|set KEY|delete KEY
   python -m mini preset list|add NAME [--gpu vulkan|cuda|cpu --device D --model M --ctx N --args A]|use NAME|show [NAME]
                                                       llama-server presets (GPU, model, context) in [presets.*]
-  python -m mini apply [RUN] [--yes]                  copy a run's changes (out/) into the folder it was started in
+  python -m mini undo [RUN] [FILE ...] [--list]       put back what a task changed (default: the newest task), or
+                                                      only the files named, from its checkpoint (refs/mini/<run>)
   python -m mini setup                                guided setup: sandbox, local model, cloud gateway
   python -m mini doctor                               check the setup, change nothing
+
+mini works in the folder it is started in, which must be a git repository (it offers `git init`). Before a task
+changes a file, the folder is checkpointed in a hidden ref; the branch history is never touched.
 
 --auto is for unattended test runs: every approval request is decided by the auto policy from config
 ([approvals] auto_approve / auto_choice) and logged as decided_by=auto-policy.
@@ -65,9 +69,9 @@ def main(argv=None):
     pr.add_argument("--model")
     pr.add_argument("--ctx", type=int)
     pr.add_argument("--args", help="llama-server arguments (default: [llamacpp] extra_args)")
-    ap_ = sub.add_parser("apply")
-    ap_.add_argument("run", nargs="?", help="run id (default: the newest run with changes)")
-    ap_.add_argument("--yes", action="store_true", help="do not ask")
+    un = sub.add_parser("undo")
+    un.add_argument("items", nargs="*", metavar="RUN|FILE", help="a run id (default: the newest task), then files")
+    un.add_argument("--list", action="store_true", help="list the checkpoints in this folder")
     sub.add_parser("setup")
     sub.add_parser("doctor")
     le = sub.add_parser("lessons")
@@ -88,17 +92,20 @@ def main(argv=None):
             cfg["approvals"]["confirm_first"] = False
         if a.no_escalate:
             cfg["routing"]["auto_escalate"] = False
-        from .harness import workspace as ws
+        from .harness import checkpoint, workspace as ws
         folder, why = ws.resolve(cfg)
         if why:
-            print("note: " + why, file=sys.stderr)
+            print(why, file=sys.stderr)
+            return 2
+        if not checkpoint.offer_init(folder, checkpoint.terminal_ask):
+            return 2
         agent = Agent(cfg, label=a.label, start_tier=a.model, workspace=folder)
         if not a.quiet:
             from .harness.eventlog import RunLog
             agent.log.subscribe(lambda ev: ev["kind"] != "delta" and print(RunLog.format(ev)[:1500], flush=True))
         s = agent.run_task(a.task, a.attach)
         print(json.dumps({k: s[k] for k in ("run_id", "status", "answer", "error", "secs", "created", "escalations",
-                                            "tiers", "watchdogs", "outputs")}, indent=1))
+                                            "tiers", "watchdogs", "outputs", "checkpoint")}, indent=1))
         return 0 if s["status"] == "success" else 1
     if a.cmd in ("tools", "registry"):
         return tools_cmd(cfg, a)
@@ -114,8 +121,8 @@ def main(argv=None):
         else:
             print(format_lessons(store.all()) or "(no lessons yet)")
         return 0
-    if a.cmd == "apply":
-        return apply_cmd(cfg, a.run, a.yes)
+    if a.cmd == "undo":
+        return undo_cmd(cfg, a.items, a.list)
     if a.cmd == "preset":
         from .setup import preset_cmd
         return preset_cmd(cfg, a.action, a.name, {k: getattr(a, k) for k in ("gpu", "device", "model", "ctx", "args")})
@@ -131,22 +138,26 @@ def main(argv=None):
     return run_ui(cfg)
 
 
-def apply_cmd(cfg, run, yes):
-    import os
-    from .harness import workspace as ws
-    runs = cfg.abspath("runs")
-    run_dir = os.path.join(runs, run) if run else ws.latest_run_with_changes(runs)
-    items = ws.pending(run_dir) if run_dir else []
-    if not items:
-        print("nothing to apply: no run left changes for the folder it was started in")
-        return 0
-    print(f"run {os.path.basename(run_dir)} -> {ws.run_workspace(run_dir)}")
-    for rel, status, diff in items:
-        print(f"\n--- {rel} ({status})\n{diff[:3000]}")
-    if not yes and input(f"\nCopy {len(items)} file(s) into {ws.run_workspace(run_dir)}? [y/N] ").strip().lower() != "y":
-        print("not applied")
+def undo_cmd(cfg, items, list_only):
+    from .harness import checkpoint, workspace as ws
+    folder, why = ws.resolve(cfg)
+    if why or not checkpoint.is_repo(folder):
+        print(why or checkpoint.guard_note(folder), file=sys.stderr)
+        return 2
+    try:
+        if list_only:
+            for run, when, subject in checkpoint.checkpoints(folder):
+                print(f"{run:<36} {when}  {subject[:80]}")
+            return 0
+        run, files = checkpoint.undo_args(folder, items)
+        run, done = checkpoint.undo(folder, run, files)
+    except checkpoint.GitError as e:
+        print(e, file=sys.stderr)
         return 1
-    print("applied: " + ", ".join(ws.apply(run_dir)))
+    if not done:
+        print(f"{run}: nothing to undo")
+    for rel, how in done:
+        print(f"{how}: {rel}")
     return 0
 
 

@@ -34,8 +34,8 @@ GAP = """The task, as understood:
 Tools installed in the registry ({count}):
 {registry}
 
-Built-in actions you always have (they are not tools and never need to be built): reading and writing text
-files in the working directory, {shared}and pure text reasoning (reading, summarizing, writing or rephrasing text you
+Built-in actions you always have (they are not tools and never need to be built): listing (list_files), reading
+(read_file) and writing (write_file) text files in the user's folder, and pure text reasoning (reading, summarizing, writing or rephrasing text you
 have seen). Anything else that touches files, the network or other systems, or that needs exact repeatable
 processing, needs a tool.
 
@@ -66,8 +66,9 @@ command: with all values as arguments in one line, or with none and the tool ask
 - `io.say(text)` shows a line to the user while the tool works. Do not use print() or input().
 - Before an action with an effect outside the working directory (sending, deleting, changing something),
   ask for confirmation with io.ask(..., kind="confirm") unless the caller already passed it.
-- The working directory is a scratch directory. File paths in inputs and outputs are relative to it.
-  Write output files under out/ and return their relative paths.
+- The working directory holds copies of the files named in the inputs, at their relative paths. Every file the
+  tool writes there lands at the same relative path in the user's folder: change an input file in place, write
+  a new file at the path the inputs or the task give, and return the relative paths. Put scratch files in /tmp.
 - Use the Python standard library unless the spec declares packages. System packages (apt) and Python packages
   (pip) must be listed in the spec; the user approves them and the harness installs them in the sandbox.
 - Network access works only to the hosts declared in the spec as "host:port", or "setting:<key>" when the
@@ -180,15 +181,15 @@ Understanding:
 Tools you can invoke (inputs must follow the input schema):
 {tools}
 
-Files in the working directory:
+The user's folder:
 {files}
 
 Complete the task now. Call `invoke_tool` to run a tool. Pass every input you already know from the task;
 the tool asks the user only for what is missing, and saved settings are filled in by the harness. Tool outputs
 come back as JSON. `invoke_tool` runs only the installed tools listed above. Use `list_files`, `read_file` and
-`write_file` yourself, as actions of their own (never through `invoke_tool`): they work on the working directory
-and, read-only, on the user's /host folder when there is one (write_file takes the content as a fenced block in
-the same reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that
+`write_file` yourself, as actions of their own (never through `invoke_tool`): they work on the user's folder, with
+paths relative to it, and write_file changes the file in place (it takes the content as a fenced block in the same
+reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that
 no tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked
 (the requested item, not a different or nearby one). If it does not, that is a tool bug: call `report_tool_bug`.
 When the task is done, call `finish` with the answer for the user and the list of files you produced.

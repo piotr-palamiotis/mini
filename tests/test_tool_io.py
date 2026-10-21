@@ -14,12 +14,13 @@ import time
 import unittest
 
 from mini.agent.core import Agent
+from mini.harness import checkpoint as ckpt
 from mini.harness.approvals import Decision
 from mini.harness.config import ROOT
 from mini.harness.registry import Registry
 from mini.harness.settings import SettingsStore
 from mini.toolcli import write_shim
-from tests.helpers import call, fake_backend, step, temp_config
+from tests.helpers import call, fake_backend, git_folder, step, temp_config
 
 sys.path.insert(0, os.path.join(ROOT, "sandbox"))
 from mini_io import MissingInput, ScriptedIO  # noqa: E402
@@ -114,7 +115,7 @@ class ToolIOTest(unittest.TestCase):
     def setUp(self):
         self.cfg = write_cfg(temp_config())
         install(self.cfg)
-        self.cwd = tempfile.mkdtemp(prefix="mini-cwd-")
+        self.cwd = git_folder()                       # the folder a tool runs in must be a git repository
         self.py = [sys.executable, "-m", "mini", "--config", self.cfg.path, "tool", "note_writer"]
 
     def test_terminal_asks_then_remembers_the_setting(self):
@@ -124,7 +125,7 @@ class ToolIOTest(unittest.TestCase):
         self.assertEqual(left, [], out)
         self.assertIn("written out/first.txt", out)
         self.assertNotIn(SECRET, out, "a secret is not echoed")
-        self.assertEqual(open(os.path.join(self.cwd, "first.txt")).read(), "hello\n-- best regards")
+        self.assertEqual(open(os.path.join(self.cwd, "out", "first.txt")).read(), "hello\n-- best regards")
         rec = SettingsStore(self.cfg.abspath("state")).get("writer_profile")
         self.assertEqual(rec["value"], {"footer": "best regards", "token": SECRET})
         p = os.path.join(self.cfg.abspath("state"), "settings", "writer_profile.json")
@@ -138,7 +139,7 @@ class ToolIOTest(unittest.TestCase):
         self.assertEqual(left2, [], out2)
         self.assertNotIn("Footer line", out2, "the saved setting is not asked again")
         self.assertNotIn("Title", out2, "a value given as an argument is not asked")
-        self.assertEqual(open(os.path.join(self.cwd, "second.txt")).read(), "again")
+        self.assertEqual(open(os.path.join(self.cwd, "out", "second.txt")).read(), "again")
 
     def test_one_line_asks_nothing(self):
         SettingsStore(self.cfg.abspath("state")).save("writer_profile", {"footer": "f", "token": "t"},
@@ -148,7 +149,8 @@ class ToolIOTest(unittest.TestCase):
                            env={**os.environ, "PYTHONPATH": ROOT}, timeout=180)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), {"file": "out/x.txt", "chars": 1, "token_len": 1})
-        self.assertTrue(os.path.exists(os.path.join(self.cwd, "x.txt")))
+        self.assertTrue(os.path.exists(os.path.join(self.cwd, "out", "x.txt")))
+        self.assertTrue(ckpt.task_files(self.cwd, ckpt.checkpoints(self.cwd)[0][0]), "checkpointed like a task")
         r = subprocess.run(self.py + ["--title", "y", "--body", "b"], cwd=self.cwd, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, env={**os.environ, "PYTHONPATH": ROOT}, timeout=180)
         self.assertEqual(r.returncode, 1)
@@ -164,7 +166,7 @@ class ToolIOTest(unittest.TestCase):
                            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=180)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("chars: 6", r.stdout)
-        self.assertEqual(open(os.path.join(self.cwd, "z.txt")).read(), "b\n-- f")
+        self.assertEqual(open(os.path.join(self.cwd, "out", "z.txt")).read(), "b\n-- f")
 
 
 class AnswerStagingTest(unittest.TestCase):
@@ -174,8 +176,16 @@ class AnswerStagingTest(unittest.TestCase):
         open(src, "w").write("x")
         gate = type("G", (), {"request": lambda self, *a, **k: Decision(True, "answer", src, "user")})()
         r = GateAsker(gate, None, work, "t")({"op": "ask", "key": "p", "prompt": "Path", "kind": "text"})
-        self.assertEqual(r, {"answer": "in/data.txt"})
-        self.assertTrue(os.path.isfile(os.path.join(work, "in", "data.txt")))
+        self.assertEqual(r, {"answer": ".mini/in/data.txt"})
+        self.assertTrue(os.path.isfile(os.path.join(work, ".mini", "in", "data.txt")))
+
+    def test_a_file_of_the_folder_keeps_its_relative_path(self):
+        from mini.harness.ask import GateAsker
+        folder, work = git_folder({"docs/a.txt": "a"}), tempfile.mkdtemp()
+        gate = type("G", (), {"request": lambda self, *a, **k: Decision(True, "answer", "docs/a.txt", "user")})()
+        r = GateAsker(gate, None, work, "t", folder)({"op": "ask", "key": "p", "prompt": "Path", "kind": "file"})
+        self.assertEqual(r, {"answer": "docs/a.txt"})
+        self.assertTrue(os.path.isfile(os.path.join(work, "docs", "a.txt")))
 
 
 class InTaskTest(unittest.TestCase):
@@ -199,15 +209,20 @@ class InTaskTest(unittest.TestCase):
                 if k in title:
                     return Decision(True, "answer", v, "user")
             return Decision(True, "yes", "", "user")
-        agent = Agent(cfg, backend=fake_backend(self.script()), approval_handler=handler, label="ask")
+        folder = git_folder({"README": "x\n"})
+        agent = Agent(cfg, backend=fake_backend(self.script()), approval_handler=handler, label="ask", workspace=folder)
         s = agent.run_task("write a note")
         self.assertEqual(s["status"], "success", s["error"])
         self.assertEqual([t for k, t, o in seen if k == "question"],
                          ["Writer profile: Footer line", "Writer profile: Access token", "Add the footer?", "Write t?"])
-        self.assertEqual(open(os.path.join(agent.work, "out", "t.txt")).read(), "b\n-- ft")
+        self.assertEqual(open(os.path.join(folder, "out", "t.txt")).read(), "b\n-- ft")
+        self.assertEqual(s["outputs"], ["out/t.txt"])
+        self.assertEqual(s["checkpoint"], f"refs/mini/{s['run_id']}")
         log = open(os.path.join(agent.run_dir, "log.jsonl")).read()
         self.assertNotIn(SECRET, log)
-        self.assertFalse(os.path.exists(os.path.join(agent.work, ".mini", "settings.json")), "settings removed after the run")
+        self.assertFalse(os.path.exists(os.path.join(agent.run_dir, "calls")) and os.listdir(os.path.join(agent.run_dir, "calls")),
+                         "the call's folder (with the settings) is removed after the run")
+        self.assertFalse(os.path.exists(os.path.join(folder, ".mini")), "the runner's files never reach the folder")
 
     def test_unattended_question_is_an_error_for_the_agent(self):
         cfg = temp_config(**{"approvals.confirm_first": False})

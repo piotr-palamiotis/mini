@@ -1,30 +1,40 @@
 """Who answers a tool's questions. Each asker takes the question message from mini_io
 ({"op": "ask", key, prompt, kind, choices, default}) and returns {"answer": value} or {"error": why}.
-"say" messages are shown and get no reply. File answers are host paths: they are copied into the run's work
-directory under in/ and the tool gets the relative path. That holds for any answer naming an existing host file,
-whatever kind the tool asked for, the same as for values given as command-line arguments.
+"say" messages are shown and get no reply. File answers are host paths: a file in the user's folder is copied into
+the call's sandbox folder at its relative path, any other file under .mini/in/, and the tool gets the relative path.
+That holds for any answer naming an existing host file, whatever kind the tool asked for, the same as for values
+given as command-line arguments.
 """
 import getpass
 import os
-import shutil
 import sys
 
+from . import workspace as ws
+from .sandbox import PolicyError
 
-def stage_file(work_dir, path):
-    """Copy a host file into <work>/in/ and return the path the tool sees, or None if it is not a file."""
-    src = os.path.abspath(os.path.expanduser(str(path)))
-    if not os.path.isfile(src):
+
+def stage_file(work_dir, path, folder=None):
+    """Copy a host file into the call's sandbox folder and return the path the tool sees, or None if it is not a
+    file. Relative paths are relative to the user's folder."""
+    p = os.path.expanduser(str(path))
+    if folder:
+        try:
+            full, rel = ws.confine(folder, p)
+            if os.path.isfile(full):
+                return ws.copy_in(folder, work_dir, rel)
+        except PolicyError:
+            pass
+    src = os.path.abspath(p)
+    if not os.path.isfile(src) or (folder and not os.path.isabs(p)):
         return None
-    os.makedirs(os.path.join(work_dir, "in"), exist_ok=True)
-    shutil.copy(src, os.path.join(work_dir, "in", os.path.basename(src)))
-    return "in/" + os.path.basename(src)
+    return ws.stage(work_dir, src)
 
 
 class TerminalAsker:
     """Questions on the terminal (mini tool NAME, and the tool commands on PATH)."""
 
-    def __init__(self, work_dir, out=sys.stderr):
-        self.work, self.out = work_dir, out
+    def __init__(self, work_dir, out=sys.stderr, folder=None):
+        self.work, self.out, self.folder = work_dir, out, folder
 
     def __call__(self, msg):
         if msg.get("op") == "say":
@@ -76,13 +86,13 @@ class TerminalAsker:
                         print("  a number, please", file=self.out)
                         continue
                 if kind == "file" and a:
-                    staged = stage_file(self.work, a)
+                    staged = stage_file(self.work, a, self.folder)
                     if staged:
                         return staged
                     print(f"  no such file: {a}", file=self.out)
                     continue
                 if a:
-                    return stage_file(self.work, a) or a      # a host file named in any answer is copied in
+                    return stage_file(self.work, a, self.folder) or a      # a host file named in any answer is copied in
             print("  (answer needed; Ctrl-D cancels)", file=self.out)
 
 
@@ -90,8 +100,8 @@ class GateAsker:
     """Questions during a task: through the approval gate (a dialog in the UI, the terminal headless, and in
     auto mode a clear error that tells the agent to pass the value as an input)."""
 
-    def __init__(self, gate, log, work_dir, tool):
-        self.gate, self.log, self.work, self.tool = gate, log, work_dir, tool
+    def __init__(self, gate, log, work_dir, tool, folder=None):
+        self.gate, self.log, self.work, self.tool, self.folder = gate, log, work_dir, tool, folder
 
     def __call__(self, msg):
         if msg.get("op") == "say":
@@ -124,8 +134,7 @@ class GateAsker:
             except ValueError:
                 return {"error": f"{msg['key']}: {a!r} is not a number"}
         if kind == "file":
-            staged = stage_file(self.work, a)
+            staged = stage_file(self.work, a, self.folder)
             return {"answer": staged} if staged else {"error": f"no such file: {a}"}
-        if os.path.isabs(os.path.expanduser(a)) and os.path.isfile(os.path.expanduser(a)):
-            return {"answer": stage_file(self.work, a)}        # a host file named in any answer is copied in
-        return {"answer": a}
+        staged = stage_file(self.work, a, self.folder)                    # a host file named in any answer is copied in
+        return {"answer": staged if staged and (self.folder or os.path.isabs(os.path.expanduser(a))) else a}

@@ -1,6 +1,6 @@
 # mini redesign
 
-Notes from the design discussion of 2026-10-21. Nothing here is implemented yet.
+Notes from the design discussion of 2026-10-21. Step 1 of the build order (section 1) is implemented; the rest is not yet.
 Status of each part: **decided** (the user chose it), **proposed** (suggested, not yet confirmed).
 
 ## Problems this answers

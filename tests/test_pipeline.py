@@ -2,6 +2,7 @@
 The tool here is a throwaway fixture for testing the harness; it is never installed in the real registry."""
 import json
 import os
+import tempfile
 import unittest
 
 from mini.agent.core import Agent
@@ -41,9 +42,10 @@ SPEC = dict(name="count_text_lines", description="Count the lines of a text file
             permissions={"network": [], "packages": {}}, edge_cases=["normal file", "empty file", "missing file"])
 
 
-def script():
+def script(path="a.txt"):
+    """path: the attached file, as the agent is told it (its absolute path)."""
     return [
-        step(call("understand", goal="count lines", inputs=["in/a.txt"], outputs=["line count"], side_effects=[],
+        step(call("understand", goal="count lines", inputs=[path], outputs=["line count"], side_effects=[],
                   ambiguities=[], plan="1. count")),
         step(call("decide_coverage", reasoning="registry empty", use=[], missing=["count the lines of a text file"])),
         step(call("write_spec", **SPEC)),
@@ -52,17 +54,22 @@ def script():
         step(call("replace", path="tool.py", old=TOOL_FIX_OLD, new=TOOL_FIX_NEW), call("run_tests")),
         step(call("record_lesson", problem="line count off by one", cause="split on newline counts the empty tail",
                   avoid="str.split('\\n') for counting lines", try_instead="str.splitlines()")),
-        step(call("invoke_tool", name="count_text_lines", inputs={"path": "in/a.txt"})),
+        step(call("invoke_tool", name="count_text_lines", inputs={"path": path})),
         step(call("finish", answer="The file has 2 lines.")),
     ]
+
+
+def attachment(text):
+    src = os.path.join(tempfile.mkdtemp(prefix="mini-attach-"), "a.txt")
+    open(src, "w").write(text)
+    return src
 
 
 class PipelineTest(unittest.TestCase):
     def test_create_fix_install_invoke(self):
         cfg = temp_config()
-        agent = Agent(cfg, backend=fake_backend(script()), label="pipeline")
-        src = os.path.join(agent.run_dir, "a.txt")
-        open(src, "w").write("x\ny\n")
+        src = attachment("x\ny\n")
+        agent = Agent(cfg, backend=fake_backend(script(src)), label="pipeline")
         s = agent.run_task("How many lines does a.txt have?", [src])
         self.assertEqual(s["status"], "success", s["error"])
         self.assertEqual(s["created"][0]["attempts"], {"local": 2})
@@ -83,9 +90,8 @@ class PipelineTest(unittest.TestCase):
 
     def test_lessons_persist_into_next_run(self):
         cfg = temp_config()
-        a1 = Agent(cfg, backend=fake_backend(script()), label="lesson1")
-        src = os.path.join(a1.run_dir, "a.txt")
-        open(src, "w").write("x\n")
+        src = attachment("x\n")
+        a1 = Agent(cfg, backend=fake_backend(script(src)), label="lesson1")
         a1.run_task("count lines", [src])
         stored = a1.lessons.all()
         self.assertEqual(len(stored), 1)
@@ -94,7 +100,7 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(any("AssertionError" in sig for sig, n in stored[0]["errors"]))
         # a fresh session (new Agent, empty registry) building a similar tool sees the lesson in its spec prompt
         a1.registry.wipe()
-        backend = fake_backend(script())
+        backend = fake_backend(script(src))
         a2 = Agent(cfg, backend=backend, label="lesson2")
         seen = []
         orig = backend.chat
@@ -104,9 +110,8 @@ class PipelineTest(unittest.TestCase):
 
     def test_rollback(self):
         cfg = temp_config()
-        agent = Agent(cfg, backend=fake_backend(script()), label="rollback")
-        src = os.path.join(agent.run_dir, "a.txt")
-        open(src, "w").write("x\n")
+        src = attachment("x\n")
+        agent = Agent(cfg, backend=fake_backend(script(src)), label="rollback")
         agent.run_task("count", [src])
         reg = agent.registry
         m1 = reg.get("count_text_lines")
@@ -118,9 +123,8 @@ class PipelineTest(unittest.TestCase):
 
     def test_staged_tool_is_used_by_its_own_task_only(self):
         cfg = temp_config(**{"tools.auto_accept": False})
-        agent = Agent(cfg, backend=fake_backend(script()), label="staged")
-        src = os.path.join(agent.run_dir, "a.txt")
-        open(src, "w").write("x\ny\n")
+        src = attachment("x\ny\n")
+        agent = Agent(cfg, backend=fake_backend(script(src)), label="staged")
         s = agent.run_task("How many lines does a.txt have?", [src])
         self.assertEqual(s["status"], "success", s["error"])
         inv = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]

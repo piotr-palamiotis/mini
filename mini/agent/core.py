@@ -18,7 +18,7 @@ import time
 from . import codeblocks, prompts
 from .creator import Creator, ToolFailed, trim
 from .turns import AgentStop, RestartRequested, Turns, fn
-from ..harness import hwmon, workspace as ws
+from ..harness import checkpoint as ckpt, hwmon, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.ask import GateAsker
 from ..harness.backends import Endpoint, has_model, make_backend
@@ -39,19 +39,19 @@ T_COVERAGE = fn("decide_coverage", "Decide which installed tools cover the task 
     "reasoning": S, "use": ARR, "missing": ARR}, ["reasoning", "use", "missing"])
 T_INVOKE = fn("invoke_tool", "Run an installed tool in the sandbox.", {"name": S, "inputs": {"type": "object"}},
               ["name", "inputs"])
-T_READ = fn("read_file", "Read a text file in the working directory or, read-only, in the user's /host folder. Long "
+T_READ = fn("read_file", "Read a text file in the user's folder (path relative to it) or an attached file. Long "
             "files come in parts: offset is the character to start at.", {"path": S, "offset": {"type": "integer"}}, ["path"])
-T_WRITE = fn("write_file", "Write a text file in the working directory. The content is the fenced block in this "
-             "reply. mode: write (default), prepend or append.", {"path": S, "mode": S}, ["path"])
+T_WRITE = fn("write_file", "Write a text file in the user's folder (path relative to it), in place. The content is "
+             "the fenced block in this reply. mode: write (default), prepend or append.", {"path": S, "mode": S}, ["path"])
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
            {"name": S, "problem": S}, ["name", "problem"])
 T_NEED = fn("need_tool", "A capability is missing; build a new tool for it.", {"need": S}, ["need"])
 T_FINISH = fn("finish", "The task is done. answer: the reply to the user, with any list or result written out in it. "
-              "files: only deliverable files you wrote into the working directory; leave it out when the answer is text "
+              "files: only deliverable files you wrote or changed in the folder; leave it out when the answer is text "
               "(names a tool returned are not files).", {"answer": S, "files": ARR}, ["answer"])
-T_LIST = fn("list_files", "List a folder: the working directory (path '.') or the user's shared folder (/host, "
-            "read-only). The listing is compact: folders show their item count. depth 1 (default) is the folder "
-            "itself, 2 or 3 add subfolders. To see inside one folder, list that folder.",
+T_LIST = fn("list_files", "List a folder in the user's folder (path '.' for the folder itself). The listing is "
+            "compact: folders show their item count. depth 1 (default) is the folder itself, 2 or 3 add subfolders. "
+            "To see inside one folder, list that folder.",
             {"path": S, "depth": {"type": "integer"}}, ["path"])
 EXEC_TOOLS = [T_INVOKE, T_READ, T_LIST, T_WRITE, T_BUG, T_NEED, T_FINISH]
 MAX_READ = 8000                                   # characters of a file per read (about 2,000 tokens)
@@ -75,13 +75,14 @@ class Agent:
     def __init__(self, cfg, approval_handler=None, backend=None, tier_backends=None, start_tier=None, label="", log=None,
                  history=(), workspace=None):
         self.cfg = cfg
-        self.workspace = os.path.realpath(workspace) if workspace else None   # the user's folder, shared read-only
+        self.workspace = os.path.realpath(workspace) if workspace else None   # the user's folder: a git repository
         self.history = list(history)                       # finished earlier tasks of this conversation (run_end events)
         self.log = log or RunLog(cfg.abspath("runs"), label=label)
         self.run_dir = self.log.dir
-        self.work = os.path.join(self.run_dir, "work")
-        os.makedirs(os.path.join(self.work, "in"), exist_ok=True)
-        os.makedirs(os.path.join(self.work, "out"), exist_ok=True)
+        # without a folder (tests, internal runs) the agent works in an empty folder of the run, with no checkpoint
+        self.folder = self.workspace or os.path.join(self.run_dir, "files")
+        os.makedirs(self.folder, exist_ok=True)
+        self.attachments, self.changed, self.checkpoint, self.calls = [], [], None, 0
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
             self.tier_backends["local"] = backend
@@ -200,12 +201,15 @@ class Agent:
         facts += list(self.cfg["environment"]["facts"])
         out = "Facts about the user's environment:\n" + "\n".join(f"- {f}" for f in facts)
         if self.workspace:
-            out += (f"\n\nThe user's folder {self.workspace} is shared read-only as /host, with you and with tools: "
-                    f"list_files and read_file work on /host paths, and a tool gets /host paths in its inputs. Never "
-                    f"change it. To change or add a file there, write the complete new file under out/ with the same "
-                    f"relative path (out/src/a.py for /host/src/a.py); the user reviews it and applies it with "
-                    f"`mini apply`. Nothing you write reaches /host by itself. \"The current folder\", \"this directory\" "
-                    f"or \"here\" in a task means /host.")
+            out += (f"\n\nYou work in the user's folder {self.workspace}. Every path is relative to it. list_files, "
+                    f"read_file and write_file work on it directly, and write_file changes files in place. A tool gets "
+                    f"relative paths in its inputs: the files a call names are copied into the tool's sandbox, and "
+                    f"every file the tool writes lands at the same relative path in the folder. Put new files where "
+                    f"the task says. mini checkpoints the folder in git before the first change, so the user can undo "
+                    f"the task. \"The current folder\", \"this directory\" or \"here\" in a task means this folder (path '.').")
+        if self.attachments:
+            out += ("\n\nFiles attached to the task (read_file and tool inputs accept these paths):\n"
+                    + "\n".join(f"- {a}" for a in self.attachments))
         if self.history:
             out += ("\n\nEarlier in this conversation (oldest first). The new task may refer to it: \"retry\", "
                     "\"again\", \"that file\", \"why did it fail\".\n" + "\n".join(self._past(h) for h in self.history[-6:]))
@@ -226,20 +230,14 @@ class Agent:
         return line
 
     def list_work(self):
-        out = []
-        for d, dirs, files in os.walk(self.work):
-            dirs[:] = [x for x in dirs if not x.startswith(".")]
-            for f in sorted(files):
-                p = os.path.join(d, f)
-                out.append(f"{os.path.relpath(p, self.work)} ({os.path.getsize(p)} bytes)")
-        return "\n".join(out) or "(empty)"
+        return ws.tree(self.folder, ".", 1)
 
     # ------------------------------------------------------------ run
     def run_task(self, task, attachments=()):
         t0 = self.run_t0 = time.time()
         status, answer, error = "failed", "", ""
-        for a in attachments:
-            shutil.copy(a, os.path.join(self.work, "in", os.path.basename(a)))
+        self.task = task
+        self.attachments = [os.path.realpath(a) for a in attachments]
         self.log.emit("run_start", task=task, attachments=[os.path.basename(a) for a in attachments],
                       model=self.model, tier=self.tier, backend=self.cfg[self.tier]["backend"], local=self.local_backend,
                       workspace=self.workspace, caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
@@ -258,7 +256,6 @@ class Agent:
             self.log.emit("info", text="swap watchdog is off ([watchdogs] swap_watch); swap growth is only recorded")
         self.wd.reset_task()
         try:
-            self.task = task
             understanding = self.parse(task)
             covered = self.gap(understanding)
             answer = self.execute(task, understanding, covered)
@@ -279,7 +276,7 @@ class Agent:
                    "repairs": self.repaired, "escalations": self.escalations,
                    "tiers": {"start": self.start_tier, "used": self.tiers_used, "tokens": self.tier_tokens},
                    "watchdogs": self._watchdog_counts(), "outputs": self.produced_files(),
-                   "workspace": self.workspace, "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
+                   "workspace": self.workspace, "checkpoint": self.checkpoint.ref if self.checkpoint else None, "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
         self.log.emit("run_end", **{k: v for k, v in summary.items() if k != "registry_after"})
         return summary
@@ -306,8 +303,7 @@ class Agent:
         ctx = self.context()
         files = self.list_work()
         msgs = [{"role": "system", "content": prompts.SYSTEM},
-                {"role": "user", "content": prompts.PARSE.format(task=task, context=ctx + "\n\nFiles given with the task "
-                                                                 "(working directory):\n" + files)}]
+                {"role": "user", "content": prompts.PARSE.format(task=task, context=ctx + "\n\nThe folder:\n" + files)}]
         t = Turns(self, "parse", msgs, [T_UNDERSTAND])
         for _ in range(4):
             reply = t.ask()
@@ -323,7 +319,7 @@ class Agent:
                 t.result("understand", "ok")
                 return u
             d = self.gate.request("confirm", "Confirm the plan", {
-                **({"shared folder (read-only)": self.workspace} if self.workspace else {}),
+                **({"folder": self.workspace} if self.workspace else {}),
                 "goal": u.get("goal"), "inputs": u.get("inputs"), "outputs": u.get("outputs"),
                 "side effects": u.get("side_effects") or "-", "ambiguities": u.get("ambiguities") or "-",
                 "plan": u.get("plan")}, options=("proceed", "clarify", "cancel"))
@@ -348,9 +344,7 @@ class Agent:
         listing = "\n".join(describe_tool(m) for m in tools) or "(the registry is empty)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
                 {"role": "user", "content": prompts.GAP.format(
-                    understanding=json.dumps(understanding, indent=1), count=len(snap), registry=listing,
-                    shared="listing (list_files) and reading (read_file) any file in the user's folder, shared read-only "
-                           "as /host, " if self.workspace else "")}]
+                    understanding=json.dumps(understanding, indent=1), count=len(snap), registry=listing)}]
         t = Turns(self, "gap", msgs, [T_COVERAGE])
         for _ in range(4):
             reply = t.ask()
@@ -451,7 +445,21 @@ class Agent:
         req = [k for k in ((m.get("input_schema") or {}).get("required") or []) if k not in inputs]
         if req:
             return f"Missing required inputs for {name}: {', '.join(req)}.\n" + describe_tool(m)
-        asker = GateAsker(self.gate, self.log, self.work, name)
+        self.calls += 1
+        box = os.path.join(self.run_dir, "calls", f"{self.calls:03d}-{name}")      # the tool's /work for this call
+        os.makedirs(box)
+        try:
+            inputs = ws.copy_in(self.folder, box, inputs, outside=self.attachments)
+        except (OSError, PolicyError) as e:
+            shutil.rmtree(box, ignore_errors=True)
+            return f"{name} was not run: {e}"
+        try:
+            return self._invoke_in(m, name, inputs, box, last_invoke)
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+
+    def _invoke_in(self, m, name, inputs, box, last_invoke):
+        asker = GateAsker(self.gate, self.log, box, name, self.folder)
         try:
             settings = self.settings.resolve(m, asker)
             network = self.settings.network(m, settings)
@@ -460,16 +468,28 @@ class Agent:
                     f"(mini settings, or run the tool once from the terminal).")
         self.log.emit("invoke", tool=name, version=m["version"], inputs=inputs,
                       settings=sorted(settings) or None, network=network or None)
-        out, res = self.sandbox.invoke_tool(m, m["_dir"], self.work, inputs, on_message=asker, settings=settings,
-                                            network=network, workspace=self.workspace)
+        out, res = self.sandbox.invoke_tool(m, m["_dir"], box, inputs, on_message=asker, settings=settings,
+                                            network=network)
+        items, refused = ws.changes(self.folder, box)
+        written = []
+        if items:
+            try:
+                written = self._change([rel for rel, _ in items], lambda: ws.export(self.folder, items))
+            except (OSError, PolicyError) as e:
+                refused.append(("(all files)", str(e)))
         last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:],
                              "network": res.get("network_note") or None}
         self.log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
         text = json.dumps(out, indent=1, default=str)
         if len(text) > 6000:
-            p = os.path.join(".mini", f"result-{name}-{int(time.time())}.json")
-            open(os.path.join(self.work, p), "w").write(text)
-            text = text[:5000] + f"\n[... output is {len(text)} characters; full JSON saved to {p}]"
+            p = os.path.join(self.run_dir, f"result-{name}-{int(time.time())}.json")
+            open(p, "w").write(text)
+            text = text[:5000] + f"\n[... output is {len(text)} characters; full JSON saved to {p} (read_file takes that path)]"
+        if written:
+            text += "\nFiles written to the folder: " + ", ".join(written)
+        if refused:
+            text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
+            self.log.emit("watchdog", name="export_refused", tool=name, refused=refused)
         note = res.get("network_note") or ((self._net_note(out, m)) if "error" in out else "")
         if note:
             text += "\n" + note
@@ -488,10 +508,37 @@ class Agent:
         return network_diagnosis(json.dumps(out), [], (manifest.get("permissions") or {}).get("network"))
 
     def _path(self, p):
-        full = os.path.realpath(os.path.join(self.work, str(p or "")))
-        if not (full == os.path.realpath(self.work) or full.startswith(os.path.realpath(self.work) + os.sep)):
-            raise PolicyError(f"path outside the working directory: {p}")
-        return full
+        return ws.confine(self.folder, p)[0]
+
+    def _readable(self, p):
+        """A path read_file may read: in the folder, an attachment, or a file this run saved (a long tool result)."""
+        full = os.path.realpath(os.path.expanduser(str(p or "")))
+        if os.path.isabs(str(p)) and (full in self.attachments or full.startswith(os.path.realpath(self.run_dir) + os.sep)):
+            return full
+        return self._path(p)
+
+    def _change(self, rels, write):
+        """Checkpoint the folder (once per task, and any file not yet in the checkpoint), then write(), which returns
+        the relative paths written, then record them in the checkpoint. PolicyError, before anything is written, when
+        the folder is not a git repository or the checkpoint fails."""
+        if self.workspace:
+            try:
+                if self.checkpoint is None:
+                    if not ckpt.is_repo(self.workspace):
+                        raise PolicyError(ckpt.guard_note(self.workspace))
+                    self.checkpoint = ckpt.Checkpoint(self.workspace, self.log.run_id, getattr(self, "task", ""))
+                    self.checkpoint.before_change(rels)
+                    self.log.emit("checkpoint", ref=self.checkpoint.ref, commit=self.checkpoint.before)
+                else:
+                    self.checkpoint.before_change(rels)
+            except ckpt.GitError as e:
+                raise PolicyError(f"no checkpoint, so nothing was changed: {e}")
+        done = write()
+        if self.checkpoint:
+            self.checkpoint.after_change(done)
+        self.changed += [r for r in done if r not in self.changed]
+        self.log.emit("files_changed", paths=done)
+        return done
 
     def _list(self, args):
         p = str(args.get("path") or ".")
@@ -500,12 +547,9 @@ class Agent:
         except (TypeError, ValueError):
             depth = 1
         try:
-            if p.startswith(ws.MOUNT):
-                return ws.list_dir(self.workspace, p, depth)
-            full = self._path(p)
-            if not os.path.isdir(full):
+            if not os.path.isdir(self._path(p)):
                 return f"{p} is not a folder.\nFiles:\n{self.list_work()}"
-            return ws.tree(full, p, depth)
+            return ws.list_dir(self.folder, p, depth)
         except (OSError, PolicyError) as e:
             return f"Cannot list: {e}"
 
@@ -518,7 +562,7 @@ class Agent:
     def _read(self, args):
         try:
             p = str(args.get("path") or "")
-            full = ws.host_path(self.workspace, p) if p.startswith(ws.MOUNT) else self._path(p)
+            full = self._readable(p)
             if os.path.isdir(full):
                 return f"{p} is a folder; use list_files.\nFiles:\n{self.list_work()}"
             data = open(full, errors="replace").read()
@@ -536,14 +580,8 @@ class Agent:
         return data
 
     def produced_files(self):
-        out = []
-        for d, dirs, files in os.walk(self.work):
-            rel = os.path.relpath(d, self.work)
-            if rel == "in" or rel.startswith(("in" + os.sep, ".mini")):
-                continue
-            dirs[:] = [x for x in dirs if not x.startswith(".")]
-            out += [os.path.normpath(os.path.join(rel, f)) for f in files]
-        return sorted(out)
+        """The files this task wrote or changed in the folder, relative to it."""
+        return sorted(self.changed)
 
     def _check_finish(self, args, understanding, rejections):
         """Harness-side check of a finish call. Returns a problem or "" (after 2 rejections the agent may finish)."""
@@ -559,16 +597,16 @@ class Agent:
                 return f"{f} does not exist or is empty. Write it first. Files present: {', '.join(produced) or '(none)'}"
         promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
         # a promised deliverable: "save/write/create ... file", or a file name with an extension. "A list of files in
-        # /host" is an answer, not a file.
+        # this folder" is an answer, not a file.
         if re.search(r"\b(save|write|written|create|produce|export|generate)\w*\b.*\bfiles?\b|\b\w+\.[a-z]{2,4}\b",
                      promised.lower()) and not produced:
-            return ("your plan produces a file, but no file was written in the working directory. Use write_file "
+            return ("your plan produces a file, but no file was written in the folder. Use write_file "
                     "(or a tool) to create it, then finish with its path in files.")
         return ""
 
     def _write(self, args, content, msgs=None):
         try:
-            full = self._path(args.get("path"))
+            full, rel = ws.confine(self.folder, args.get("path"))
         except PolicyError as e:
             return str(e)
         if os.path.isdir(full):
@@ -606,14 +644,18 @@ class Agent:
             return "No content received; the file was not written."
         mode = args.get("mode", "write")
         try:
-            os.makedirs(os.path.dirname(full), exist_ok=True)
             old = open(full).read() if os.path.exists(full) else ""
             new = body + old if mode == "prepend" else old + body if mode == "append" else body
-            open(full, "w").write(new)
-        except (OSError, UnicodeError) as e:
+
+            def write():
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                open(full, "w").write(new)
+                return [rel]
+            self._change([rel], write)
+        except (OSError, UnicodeError, PolicyError) as e:
             return f"Cannot write {args.get('path')}: {e}"
         shown = new if len(new) <= 4000 else new[:2000] + f"\n[... {len(new) - 4000} characters ...]\n" + new[-2000:]
-        return (f"Wrote {os.path.relpath(full, self.work)} ({len(new)} characters, mode {mode}). The file now "
+        return (f"Wrote {rel} ({len(new)} characters, mode {mode}). The file now "
                 f"contains:\n{shown}\nDo not write it again unless something in it is wrong.")
 
     def _repair(self, creator, args, last_invoke, task, ctx):

@@ -5,8 +5,9 @@
   NAME [--field VALUE ...]                         the same, through a shim in [tools] bin_dir
 
 The tool runs in the sandbox exactly as it does inside a task: same permissions, same network allowlist, same
-saved settings. Host files given as values are copied in; files the tool writes under out/ are copied to the
-current directory.
+saved settings, same folder rules: the current directory is the folder (a git repository), files given as values
+are copied in, and every file the tool writes lands at the same relative path in it, after a checkpoint
+(`mini undo` puts it back).
 """
 import argparse
 import json
@@ -14,7 +15,8 @@ import os
 import shutil
 import sys
 
-from .harness.ask import TerminalAsker, stage_file
+from .harness import checkpoint, workspace as ws
+from .harness.ask import TerminalAsker
 from .harness.config import ROOT
 from .harness.eventlog import RunLog
 from .harness.registry import Registry
@@ -46,40 +48,11 @@ def _parser(m):
     return ap
 
 
-def _stage_values(work, value):
-    """Host files named in values are copied into the sandbox's working directory."""
-    if isinstance(value, str) and os.path.isfile(os.path.expanduser(value)):
-        return stage_file(work, value)
-    if isinstance(value, list):
-        return [_stage_values(work, v) for v in value]
-    return value
-
-
-def _collect_outputs(work, out):
-    """Copy what the tool wrote under out/ to the current directory. Returns {tool path: local path}."""
-    moved = {}
-    src = os.path.join(work, "out")
-    for base, _, files in os.walk(src):
-        for f in files:
-            p = os.path.join(base, f)
-            dest = os.path.join(os.getcwd(), os.path.relpath(p, src))
-            stem, ext = os.path.splitext(dest)
-            n = 1
-            while os.path.exists(dest):
-                dest, n = f"{stem}-{n}{ext}", n + 1
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy(p, dest)
-            moved[os.path.relpath(p, work)] = dest
-    return moved
-
-
-def _show(out, moved):
+def _show(out, written):
     for k, v in out.items():
-        if isinstance(v, str) and v in moved:
-            v = moved[v]
         text = v if isinstance(v, str) else json.dumps(v, indent=1, default=str)
         print(f"{k}:" + ("\n" + text if "\n" in text else " " + text))
-    extra = [d for p, d in moved.items() if p not in {x for x in out.values() if isinstance(x, str)}]
+    extra = [p for p in written if p not in {x for x in out.values() if isinstance(x, str)}]
     if extra:
         print("files: " + ", ".join(extra))
 
@@ -93,13 +66,30 @@ def run_tool(cfg, name, argv):
                                                   if staged else ""), file=sys.stderr)
         return 2
     a = _parser(m).parse_args(argv)
+    folder, why = ws.resolve(cfg)
+    if why:
+        print(f"{name}: {why}", file=sys.stderr)
+        return 2
+    if not checkpoint.offer_init(folder, checkpoint.terminal_ask):
+        return 2
     log = RunLog(cfg.abspath("runs"), label=f"tool-{name}")
-    work = os.path.join(log.dir, "work")
-    os.makedirs(os.path.join(work, "in"), exist_ok=True)
+    work = os.path.join(log.dir, "work")                # the tool's /work: copies of the files it is given
+    os.makedirs(work, exist_ok=True)
+    try:
+        return _run(cfg, m, name, a, folder, log, work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _run(cfg, m, name, a, folder, log, work):
     inputs = dict(a._inputs or {})
     inputs.update({k: v for k, v in vars(a).items() if not k.startswith("_") and v is not None})
-    inputs = {k: _stage_values(work, v) for k, v in inputs.items()}
-    asker = TerminalAsker(work)
+    try:
+        inputs = ws.copy_in(folder, work, inputs, outside=True)    # the user named them: any file may come in
+    except PolicyError as e:
+        print(f"{name}: {e}", file=sys.stderr)
+        return 2
+    asker = TerminalAsker(work, folder=folder)
     store = SettingsStore(cfg.abspath("state"))
     try:
         settings = store.resolve(m, asker)
@@ -109,21 +99,32 @@ def run_tool(cfg, name, argv):
         return 2
     log.emit("invoke", tool=name, version=m["version"], inputs=inputs, settings=sorted(settings) or None, via="terminal")
     try:
-        from .harness import workspace as ws
         out, res = Sandbox(cfg, log).invoke_tool(m, m["_dir"], work, inputs, on_message=asker, settings=settings,
-                                                 network=network, workspace=ws.resolve(cfg)[0])
+                                                 network=network)
     except PolicyError as e:
         print(f"{name}: {e}", file=sys.stderr)
         return 1
+    items, refused = ws.changes(folder, work)
+    written = []
+    if items:
+        try:
+            cp = checkpoint.Checkpoint(folder, log.run_id, f"mini tool {name}")
+            cp.before_change([rel for rel, _ in items])
+            written = ws.export(folder, items)
+            cp.after_change(written)
+        except (checkpoint.GitError, PolicyError, OSError) as e:
+            print(f"{name}: files not written: {e}", file=sys.stderr)
+    for rel, why in refused:
+        print(f"not written: {rel} ({why})", file=sys.stderr)
+    log.emit("files_changed", paths=written, refused=refused or None)
     log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
     if "error" in out:
         print(f"{name} failed: {out.get('message') or out['error']}", file=sys.stderr)
         return 1
-    moved = _collect_outputs(work, out)
     if a._json:
         print(json.dumps(out, indent=1, default=str))
     else:
-        _show(out, moved)
+        _show(out, written)
     return 0
 
 

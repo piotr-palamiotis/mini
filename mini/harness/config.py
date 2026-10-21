@@ -35,9 +35,8 @@ DEFAULTS = {
     # Named ways to run llama-server, e.g. [presets.rtx3070]: gpu, device, model, ctx, models_max, extra_args.
     # The preset named in [llamacpp] preset is laid over [llamacpp]; `mini preset use NAME` switches.
     "presets": {},
-    "workspace": {                           # the folder mini is launched in, shared read-only as /host
-        "enabled": True,                     # edits go to out/ in the run's scratch folder; `mini apply` copies them over
-        "refuse": ["~", "/"],                # too broad to share: starting mini there shares nothing
+    "workspace": {                           # the folder mini is launched in is where it works (a git repository)
+        "refuse": ["~", "/"],                # too broad to work in: mini does not start a task there
     },
     "thinking": {                            # thinking per step
         "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,

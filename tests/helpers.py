@@ -39,3 +39,28 @@ def fake_backend(script):
 
 def fence(name, body):
     return f"```python {name}\n{body.strip()}\n```\n"
+
+
+def git_folder(files=None, commit=True):
+    """A throwaway git repository in a temp dir with the given {relative path: text} files, committed. Returns its
+    real path."""
+    import subprocess
+    d = os.path.realpath(tempfile.mkdtemp(prefix="mini-repo-"))
+    run = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True).stdout
+    run("init", "-q")
+    run("config", "user.name", "test")
+    run("config", "user.email", "test@example.com")
+    run("config", "commit.gpgsign", "false")
+    for rel, text in (files or {}).items():
+        os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True)
+        with open(os.path.join(d, rel), "w") as f:
+            f.write(text)
+    if commit and files:
+        run("add", "-A")
+        run("commit", "-q", "-m", "start")
+    return d
+
+
+def git(folder, *args):
+    import subprocess
+    return subprocess.run(["git", "-C", folder, *args], check=True, capture_output=True, text=True).stdout

@@ -17,6 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent,
                              TabPane, TextArea)
 
+from ..harness import checkpoint
 from ..harness import config as config_mod
 from ..harness import workspace as ws
 from . import settingsform
@@ -105,6 +106,7 @@ class MiniApp(App):
         self.backend_factory = backend_factory      # tests inject a scripted model
         self.agent = None
         self.workspace, self.workspace_note = (None, "") if backend_factory else ws.resolve(cfg)   # the launch folder
+        self.git_ok = self.workspace is None or checkpoint.is_repo(self.workspace)     # tasks wait for a repository
         self.history = []                           # finished tasks of this conversation; every new task is told about them
         self.attachments = []
         self.next_tier = cfg["routing"]["start"]
@@ -154,10 +156,12 @@ class MiniApp(App):
             f"\nTasks start on {self.cfg['routing']['start']}"
             + (f"; local moves to free after {budget // 60} min" if budget and self.cfg["free"].get("enabled", True) else "")
             + ". /model to choose the next task's model.")
-        self.chat(f"shared with the agent, read-only: [b]{escape(self.workspace)}[/b] (as /host). Its changes wait in "
-                  f"out/ until you /apply them." if self.workspace else escape(self.workspace_note) if self.workspace_note else
-                  "no folder is shared with the agent (workspace is off).")
+        self.chat(f"working in [b]{escape(self.workspace)}[/b]: files change in place; every task is checkpointed in "
+                  f"git, /undo puts it back." if self.workspace else escape(self.workspace_note) if self.workspace_note else
+                  "no folder: tasks work in an empty folder of their run.")
         self.check_tiers()
+        if not self.git_ok:
+            self.offer_git_init()
         self.query_one("#prompt", Input).focus()
 
     @work(thread=True)
@@ -229,7 +233,8 @@ class MiniApp(App):
             else:
                 self.chat(f"[b red]{ev['status']}[/b red]: {escape(ev.get('error') or '')}")
             if ev.get("outputs"):
-                self.chat("output files: " + ", ".join(ev["outputs"]) + f"  (in runs/{ev['run_id']}/work/out/)")
+                self.chat("files changed: " + escape(", ".join(ev["outputs"]))
+                          + ("  [dim](/undo puts them back)[/dim]" if ev.get("checkpoint") else ""))
             self.refresh_registry()
         self.update_status()
 
@@ -261,8 +266,8 @@ class MiniApp(App):
             else:
                 self.chat(f"[red]no such file:[/red] {escape(p)}")
             return
-        if text == "/apply":
-            self.apply_changes()
+        if text == "/undo" or text.startswith("/undo "):
+            self.undo(text[5:].split())
             return
         if text == "/new":
             self.history = []
@@ -273,7 +278,7 @@ class MiniApp(App):
             return
         if text == "/help":
             self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"
-                      "/apply         review and copy the last task's changes (out/) into the shared folder\n"
+                      "/undo [RUN] [FILE...]   put back what the last task (or RUN) changed, or only those files\n"
                       "/new           forget the conversation so far (each task is told about the earlier ones)\n"
                       "/status        check the local model and the cloud tiers\n"
                       "/model [local|free|paid]   model for the next task (paid lasts one task)\n"
@@ -297,6 +302,12 @@ class MiniApp(App):
         if self.busy:
             self.chat("[yellow]a task is running[/yellow]")
             return
+        if self.workspace_note and not self.workspace:
+            self.chat(f"[yellow]{escape(self.workspace_note)}[/yellow]")
+            return
+        if not self.git_ok:
+            self.offer_git_init()
+            return
         self.chat(f"[b cyan]you:[/b cyan] {escape(text)}" + (f"  [dim](attached: {', '.join(os.path.basename(a) for a in self.attachments)})[/dim]" if self.attachments else ""))
         self.busy, self.cap_hit = True, ""
         tier = self.next_tier
@@ -316,25 +327,38 @@ class MiniApp(App):
         self.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, ev))
         self.agent.run_task(text, attachments)
 
-    def apply_changes(self):
-        """Show what the last task left for the shared folder as diffs; copy it over only after a yes."""
+    def offer_git_init(self):
+        """The git-required guard: say so and offer `git init`; no task runs until the user agrees."""
+        def got(d):
+            if d.approved and d.choice == "git init":
+                try:
+                    checkpoint.init(self.workspace)
+                    self.git_ok = True
+                    self.chat(f"[b green]git init[/b green] done in {escape(self.workspace)}")
+                except checkpoint.GitError as e:
+                    self.chat(f"[red]git init failed:[/red] {escape(str(e))}")
+            else:
+                self.chat("[yellow]no repository, so mini does not work in this folder. Give a task to be asked again.[/yellow]")
+        self.push_screen(ApprovalScreen("git", "This folder is not a git repository",
+                                        {"why": checkpoint.guard_note(self.workspace)}, ("git init", "not now")), got)
+
+    def undo(self, args):
+        """Put back what a task changed, from its checkpoint."""
         if self.busy:
             self.chat("[yellow]a task is running[/yellow]")
             return
-        run_dir = self.agent.run_dir if self.agent else None
-        items = [i for i in ws.pending(run_dir)] if run_dir else []
-        if not items:
-            self.chat("nothing to apply: the last task left no changes for the shared folder")
+        if not self.workspace or not self.git_ok:
+            self.chat("nothing to undo: no checkpoints without a git repository")
             return
-        details = {f"{rel} ({status})": diff[:3000] for rel, status, diff in items}
-
-        def got(d):
-            if d.approved:
-                done = ws.apply(run_dir)
-                self.chat(f"[b green]applied[/b green] to {escape(ws.run_workspace(run_dir))}: {escape(', '.join(done))}")
-            else:
-                self.chat("not applied; the changes stay in out/ of the run")
-        self.push_screen(ApprovalScreen("apply", f"Copy into {ws.run_workspace(run_dir)}", details, ("apply", "cancel")), got)
+        try:
+            run, files = checkpoint.undo_args(self.workspace, args)
+            if run is None and not args and self.agent and self.agent.checkpoint:
+                run = self.agent.checkpoint.run_id           # default: this session's last task
+            run, done = checkpoint.undo(self.workspace, run, files)
+        except checkpoint.GitError as e:
+            self.chat(f"[red]undo:[/red] {escape(str(e))}")
+            return
+        self.chat(f"[b]undo {escape(run)}[/b]: " + (escape(", ".join(f"{rel} {how}" for rel, how in done)) or "nothing to undo"))
 
     # ------------------------------------------------------------ registry browser
     def action_refresh_registry(self):
