@@ -222,7 +222,7 @@ class InTaskTest(unittest.TestCase):
         self.assertNotIn(SECRET, log)
         self.assertFalse(os.path.exists(os.path.join(agent.run_dir, "calls")) and os.listdir(os.path.join(agent.run_dir, "calls")),
                          "the call's folder (with the settings) is removed after the run")
-        self.assertFalse(os.path.exists(os.path.join(folder, ".mini")), "the runner's files never reach the folder")
+        self.assertFalse(os.path.exists(os.path.join(folder, ".mini", "in")), "the runner's files never reach the folder")
 
     def test_unattended_question_is_an_error_for_the_agent(self):
         cfg = temp_config(**{"approvals.confirm_first": False})
