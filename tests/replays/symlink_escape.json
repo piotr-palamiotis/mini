@@ -1,0 +1,13 @@
+{"task": "write notes",
+ "files": {"a.txt": "a\n"},
+ "outside": {"secret.txt": "keep\n"},
+ "symlinks": {"out": "<outside>", "leak.txt": "<outside>/secret.txt"},
+ "script": [
+  {"calls":[{"name":"understand","args":{"goal":"g","inputs":[],"outputs":[],"plan":"1. do"}}]},
+  {"calls": [{"name": "decide_coverage", "args": {"reasoning": "core", "use": ["write_file"], "missing": []}}]},
+  {"calls": [{"name": "write_file", "args": {"path": "out/new.txt", "content": "pwn\n"}}]},
+  {"calls": [{"name": "write_file", "args": {"path": "leak.txt", "content": "pwn\n"}}]},
+  {"calls": [{"name": "write_file", "args": {"path": "../escaped.txt", "content": "pwn\n"}}]},
+  {"calls": [{"name": "edit_file", "args": {"path": "leak.txt", "old": "keep", "new": "pwn"}}]},
+  {"calls": [{"name": "finish", "args": {"answer": "Tried."}}]}],
+ "expect": {"outside_unchanged": true, "no_files_beside_folder": true, "files": {"a.txt": "a\n"}}}

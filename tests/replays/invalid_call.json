@@ -1,0 +1,10 @@
+{"task": "write a file",
+ "files": {"a.txt": "a\n"},
+ "script": [
+  {"calls":[{"name":"understand","args":{"goal":"g","inputs":[],"outputs":[],"plan":"1. do"}}]},
+  {"calls": [{"name": "decide_coverage", "args": {"reasoning": "core", "use": ["write_file"], "missing": []}}]},
+  {"calls": [{"name": "write_file", "args": {"mode": "sideways", "content": "bad\n"}}]},
+  {"calls": [{"name": "write_file", "args": {"path": "n.txt", "mode": "write", "extra": 1, "content": "bad\n"}}]},
+  {"calls": [{"name": "finish", "args": {"answer": "Gave up."}}]}],
+ "expect": {"rejected": ["write_file was not run: path is required", "unknown argument extra"],
+            "files": {"a.txt": "a\n"}, "absent": ["n.txt"], "no_checkpoint": true}}

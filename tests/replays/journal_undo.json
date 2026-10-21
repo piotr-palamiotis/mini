@@ -1,0 +1,12 @@
+{"task": "add a note file and edit a.txt",
+ "files": {"a.txt": "one\ntwo\n"},
+ "dirty": {"a.txt": "one\ntwo\nuncommitted\n"},
+ "script": [
+  {"calls":[{"name":"understand","args":{"goal":"g","inputs":[],"outputs":[],"plan":"1. do"}}]},
+  {"calls": [{"name": "decide_coverage", "args": {"reasoning": "core", "use": ["edit_file", "write_file"], "missing": []}}]},
+  {"calls": [{"name": "edit_file", "args": {"path": "a.txt", "old": "two", "new": "2"}}]},
+  {"calls": [{"name": "write_file", "args": {"path": "note.txt", "content": "hello\n"}}]},
+  {"calls": [{"name": "finish", "args": {"answer": "Done.", "files": ["a.txt", "note.txt"]}}]}],
+ "expect": {"status": "success", "files": {"a.txt": "one\n2\nuncommitted\n", "note.txt": "hello\n"},
+            "journal": true, "checkpoint": true,
+            "undone": {"a.txt": "one\ntwo\nuncommitted\n"}, "undone_absent": ["note.txt"]}}

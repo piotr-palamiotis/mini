@@ -1,0 +1,8 @@
+{"task": "copy a.txt to b.txt",
+ "files": {"a.txt": "a\n"},
+ "script": [
+  {"calls":[{"name":"understand","args":{"goal":"g","inputs":[],"outputs":[],"plan":"1. do"}}]},
+  {"calls": [{"name": "decide_coverage", "args": {"reasoning": "core", "use": ["copy_file"], "missing": ["copy a file to another path"]}}]},
+  {"calls": [{"name": "copy_file", "args": {"source": "a.txt", "destination": "b.txt"}}]},
+  {"calls": [{"name": "finish", "args": {"answer": "Copied.", "files": ["b.txt"]}}]}],
+ "expect": {"status": "success", "no_tool_created": true, "files": {"b.txt": "a\n"}, "changed": ["b.txt"]}}
