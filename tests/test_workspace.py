@@ -39,7 +39,7 @@ class WorkspaceTest(unittest.TestCase):
     def test_agent_lists_and_reads_the_folder(self):
         a = self.agent()
         top = a._list({"path": "."})
-        self.assertIn(".: 2 folders, 1 files", top, "src/ and .git/")
+        self.assertIn(".: 3 folders, 1 files", top, "src/, .git/ and .mini/")
         self.assertIn("src/ (1 items)", top)
         self.assertIn("notes.txt (6 B)", top)
         self.assertNotIn("a.py", top, "depth 1 does not open subfolders")

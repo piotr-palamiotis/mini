@@ -18,7 +18,7 @@ import time
 from . import codeblocks, prompts
 from .creator import Creator, ToolFailed, trim
 from .turns import AgentStop, RestartRequested, Turns, fn
-from ..harness import checkpoint as ckpt, hwmon, workspace as ws
+from ..harness import checkpoint as ckpt, hwmon, journal, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.ask import GateAsker
 from ..harness.backends import Endpoint, has_model, make_backend
@@ -77,7 +77,11 @@ class Agent:
         self.cfg = cfg
         self.workspace = os.path.realpath(workspace) if workspace else None   # the user's folder: a git repository
         self.history = list(history)                       # finished earlier tasks of this conversation (run_end events)
-        self.log = log or RunLog(cfg.abspath("runs"), label=label)
+        # in a git folder the run logs live with its journal in .mini/; otherwise in the global runs dir
+        self.memory = bool(self.workspace) and ckpt.is_repo(self.workspace)
+        self.log = log or RunLog(journal.runs_dir(self.workspace) if self.memory else cfg.abspath("runs"), label=label)
+        if self.memory:
+            journal.ensure_excluded(self.workspace)
         self.run_dir = self.log.dir
         # without a folder (tests, internal runs) the agent works in an empty folder of the run, with no checkpoint
         self.folder = self.workspace or os.path.join(self.run_dir, "files")
@@ -207,6 +211,9 @@ class Agent:
                     f"every file the tool writes lands at the same relative path in the folder. Put new files where "
                     f"the task says. mini checkpoints the folder in git before the first change, so the user can undo "
                     f"the task. \"The current folder\", \"this directory\" or \"here\" in a task means this folder (path '.').")
+        past = journal.summary_text(self.workspace) if self.memory else ""
+        if past:
+            out += "\n\n" + past
         if self.attachments:
             out += ("\n\nFiles attached to the task (read_file and tool inputs accept these paths):\n"
                     + "\n".join(f"- {a}" for a in self.attachments))
@@ -279,6 +286,11 @@ class Agent:
                    "workspace": self.workspace, "checkpoint": self.checkpoint.ref if self.checkpoint else None, "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
         self.log.emit("run_end", **{k: v for k, v in summary.items() if k != "registry_after"})
+        if self.memory:
+            try:
+                journal.record(self.workspace, summary)
+            except OSError as e:
+                self.log.emit("error", text=f"journal not written: {e}")
         return summary
 
     def _swap_trip(self, growth):
