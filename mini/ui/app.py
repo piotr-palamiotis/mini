@@ -28,7 +28,7 @@ from ..harness.registry import Registry
 
 KIND_STYLE = {"watchdog": "bold yellow", "cap": "bold red", "error": "bold red", "test_run": "cyan",
               "install": "bold green", "approval": "magenta", "tier": "bold blue", "gap": "bold",
-              "registry_state": "dim", "sandbox": "dim", "phase": "bold white", "attempt": "cyan"}
+              "registry_state": "dim", "sandbox": "dim", "start": "dim", "end": "dim", "phase": "bold white", "attempt": "cyan"}
 
 
 class ApprovalScreen(ModalScreen):
@@ -193,9 +193,11 @@ class MiniApp(App):
 
     # ------------------------------------------------------------ events from the agent thread
     def on_agent_event(self, ev):
+        """Adapter from the event stream to the current panes: chunks (thinking, answer text, command output) feed
+        the live line, every other event a line in the live log."""
         k = ev["kind"]
-        if k == "delta":
-            self.live_text = (self.live_text + ev["text"])[-400:]
+        if k == "chunk":
+            self.live_text = (self.live_text + ev["text"] + ("\n" if ev["block"] == "command" else ""))[-400:]
             self.query_one("#live", Static).update(Text(self.live_text.replace("\n", " ")[-300:], style="dim italic"))
             return
         self.live_text = ""

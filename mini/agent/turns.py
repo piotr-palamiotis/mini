@@ -8,6 +8,7 @@ import json
 import re
 import time
 
+from ..harness.eventlog import ReplyStream
 
 CHARS_PER_TOKEN = 3            # a cautious estimate; code and JSON are denser than prose
 CONTEXT_SHARE = 0.75           # shorten old results before the conversation passes this share of the context
@@ -83,8 +84,14 @@ class Turns:
                 if saved:
                     a.log.emit("info", text=f"conversation near the {limit}-token context: older tool results shortened "
                                             f"({saved} characters)")
-            reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True),
-                                   options=a.model_options, on_delta=a.on_delta, stop_event=a.stop_event)
+            stream = ReplyStream(a.log, step=self.step, model=a.model)    # thinking and text blocks, streamed
+            try:
+                reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True),
+                                       options=a.model_options, on_delta=stream, stop_event=a.stop_event)
+            except BaseException:
+                stream.close("error")
+                raise
+            stream.close("stopped" if reply.get("stopped") else "error" if reply.get("raw_error") else "ok")
             used = (reply.get("prompt_tokens") or 0) + (reply.get("output_tokens") or 0)
             a.tokens += used
             a.tier_tokens[a.tier] = a.tier_tokens.get(a.tier, 0) + used

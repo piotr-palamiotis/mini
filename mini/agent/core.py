@@ -24,7 +24,7 @@ from ..harness import checkpoint as ckpt, hwmon, journal, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.backends import Endpoint, has_model, make_backend
 from ..harness.config import llama_settings, local_candidates
-from ..harness.eventlog import RunLog
+from ..harness.eventlog import JournalSink, RunLog
 from ..harness.lessons import LessonStore
 from ..harness.registry import Registry, is_bundled
 from ..harness.sandbox import PolicyError, Sandbox
@@ -60,6 +60,7 @@ class Agent:
         self.log = log or RunLog(journal.runs_dir(self.workspace) if self.memory else cfg.abspath("runs"), label=label)
         if self.memory:
             journal.ensure_excluded(self.workspace)
+            self.log.subscribe(JournalSink(self.workspace, self.log))   # the journal is a sink of the stream
         self.run_dir = self.log.dir
         # without a folder (tests, internal runs) the agent works in an empty folder of the run, with no checkpoint
         self.folder = self.workspace or os.path.join(self.run_dir, "files")
@@ -90,7 +91,6 @@ class Agent:
         self.created, self.repaired = [], 0
         self.escalations = 0
         self.run_t0 = time.time()
-        self.on_delta = lambda kind, text: self.log.emit("delta", stream=kind, text=text)
 
     # ------------------------------------------------------------ model tiers
     def _pick_local(self):
@@ -267,11 +267,6 @@ class Agent:
                    "workspace": self.workspace, "checkpoint": self.checkpoint.ref if self.checkpoint else None, "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
         self.log.emit("run_end", **{k: v for k, v in summary.items() if k != "registry_after"})
-        if self.memory:
-            try:
-                journal.record(self.workspace, summary)
-            except OSError as e:
-                self.log.emit("error", text=f"journal not written: {e}")
         return summary
 
     def _swap_trip(self, growth):
@@ -425,7 +420,14 @@ class Agent:
         """Run a core capability: the arguments are validated against its schema first. Returns (result text,
         whether the handler already answered in the conversation)."""
         call = Call(self, content, messages)
-        return self.core.invoke(call, name, args), call.answered
+        bid = self.log.start("tool", name=name, args=args)        # the sandbox runs and questions inside nest in it
+        try:
+            text = self.core.invoke(call, name, args)
+        except BaseException as e:
+            self.log.end(bid, "error", text=f"{type(e).__name__}: {e}")
+            raise
+        self.log.end(bid, "ok", text=trim(text, 3000))
+        return text, call.answered
 
     def _need(self, creator, args, task, ctx, tools):
         need = str(args.get("need") or "")

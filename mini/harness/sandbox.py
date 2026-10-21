@@ -106,6 +106,14 @@ class Sandbox:
         if self.log:
             self.log.emit(kind, **kw)
 
+    def _start(self, **info):
+        return self.log.start("command", **info) if self.log else None
+
+    def _end(self, bid, code, timed_out, lines):
+        if self.log:
+            self.log.end(bid, "timeout" if timed_out else "ok" if code == 0 else "failed", exit_code=code, lines=lines,
+                         timed_out=timed_out)
+
     def _cli(self, args, timeout=60, input=None):
         return subprocess.run([self.engine] + args, capture_output=True, text=True, timeout=timeout, input=input)
 
@@ -114,10 +122,10 @@ class Sandbox:
         return self._cli(["image", "exists" if self.engine == "podman" else "inspect", image]).returncode == 0
 
     def build_base(self):
-        r = self._cli(["build", "-t", self.cfg["image"], "-f", os.path.join(SANDBOX_DIR, "Containerfile.base"), SANDBOX_DIR],
-                      timeout=900)
-        if r.returncode:
-            raise RuntimeError("base image build failed:\n" + r.stderr[-3000:])
+        code, out = self._build(["build", "-t", self.cfg["image"], "-f", os.path.join(SANDBOX_DIR, "Containerfile.base"),
+                                 SANDBOX_DIR], 900, "build the base image")
+        if code:
+            raise RuntimeError("base image build failed:\n" + out[-3000:])
 
     @staticmethod
     def image_for(packages):
@@ -143,14 +151,18 @@ class Sandbox:
             lines.append("RUN pip install --no-cache-dir " + " ".join(pk["pip"]))
         lines.append("USER tool")
         cf = "\n".join(lines) + "\n"
-        self._emit("sandbox", action="build_image", image=image, packages=pk, text=cf)
-        t0 = time.time()
-        r = self._cli(["build", "-t", image, "-f", "-", SANDBOX_DIR], timeout=1200, input=cf)
-        self._emit("sandbox", action="build_done", image=image, ok=r.returncode == 0, secs=round(time.time() - t0, 1),
-                   text=(r.stdout + r.stderr)[-2500:] if r.returncode else None)
-        if r.returncode:
-            raise PolicyError(f"package install failed (exit {r.returncode}):\n" + (r.stdout + r.stderr)[-2500:])
+        code, out = self._build(["build", "-t", image, "-f", "-", SANDBOX_DIR], 1200, f"build {image}", input=cf,
+                                packages=pk, text=cf)
+        if code:
+            raise PolicyError(f"package install failed (exit {code}):\n" + out[-2500:])
         return image
+
+    def _build(self, args, timeout, purpose, input=None, **info):
+        """An image build as a command block with live output. Returns (exit code, output)."""
+        bid = self._start(argv=[self.engine] + args[:3], purpose=purpose, **info)
+        code, out, timed_out, lines = self._stream(args, timeout, bid=bid, input=input)
+        self._end(bid, code, timed_out, lines)
+        return code, out
 
     # ------------------------------------------------------------ network
     def _start_egress(self, targets, rid):
@@ -243,55 +255,68 @@ class Sandbox:
         else:
             args += ["--network", "none"]
         args += [image or self.cfg["image"]] + argv
-        self._emit("sandbox", action="run", purpose=purpose, argv=argv, network=targets or "none",
-                   image=image or self.cfg["image"], memory=self.cfg["memory"])
+        bid = self._start(argv=argv, purpose=purpose, image=image or self.cfg["image"], network=targets or "none",
+                          memory=self.cfg["memory"])
         t0 = time.time()
-        timed_out = False
-        try:
-            if on_message:
-                code, out, timed_out = self._run_live(args, timeout, on_message)
-                if timed_out:
-                    self._cli(["rm", "-f", "-t", "0", name])
-                    out += f"\n[sandbox] killed after {timeout} s timeout"
-            else:
-                r = self._cli(args, timeout=timeout)
-                code, out = r.returncode, (r.stdout + ("\n" + r.stderr if r.stderr else ""))
-        except subprocess.TimeoutExpired as e:
+        code, out, timed_out, lines = self._stream(args, timeout, on_message, bid)
+        if timed_out:
             self._cli(["rm", "-f", "-t", "0", name])
-            timed_out, code = True, -1
-            out = ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
             out += f"\n[sandbox] killed after {timeout} s timeout"
         egress_events = self._stop_egress(*egress) if egress else []
         if code == 137 and not timed_out:
             out += f"\n[sandbox] exit 137: killed, most likely by the {self.cfg['memory']} memory limit"
         res = {"exit_code": code, "output": out, "secs": round(time.time() - t0, 2), "timed_out": timed_out,
                "egress": egress_events, "network_note": network_diagnosis(out, egress_events, targets)}
-        self._emit("sandbox", action="exit", purpose=purpose, exit_code=code, secs=res["secs"], timed_out=timed_out,
-                   egress=egress_events or None)
+        self._end(bid, code, timed_out, lines)
+        if egress_events:
+            self._emit("sandbox", action="egress", purpose=purpose, egress=egress_events)
         return res
 
-    def _run_live(self, args, timeout, on_message):
-        """Run with a JSON-line message channel on stdin/stdout. Returns (exit code, output, timed out)."""
-        p = subprocess.Popen([self.engine] + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, bufsize=1)
-        err, plain, waited = [], [], [0.0]
-        threading.Thread(target=lambda: err.extend(p.stderr), daemon=True).start()
+    def _stream(self, args, timeout, on_message=None, bid=None, input=None):
+        """Run the engine with args; stdout and stderr lines go out as chunks of block bid while they arrive.
+        With on_message, stdout also carries JSON-line messages (a tool asking a question): each reply goes back on
+        stdin, and the timeout clock stops while on_message runs. Returns (exit code, output, timed out, lines):
+        output is stdout, then stderr."""
+        p = subprocess.Popen([self.engine] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             bufsize=1, errors="replace",
+                             stdin=subprocess.PIPE if on_message or input is not None else subprocess.DEVNULL)
+        if input is not None:
+            p.stdin.write(input)
+            p.stdin.close()
+        out, err, waited, count = [], [], [0.0], [0]
+
+        def emit(line, stream):
+            count[0] += 1
+            if bid and self.log:
+                self.log.chunk(bid, line.rstrip("\n"), stream=stream)
+
+        def read_err():
+            for line in p.stderr:
+                err.append(line)
+                emit(line, "stderr")
+        reader = threading.Thread(target=read_err, daemon=True)
+        reader.start()
         t0 = time.time()
         done = threading.Event()
 
         def watch():                                   # the timeout clock stops while the user answers
-            while not done.wait(0.5):
+            while not done.wait(0.2):
                 if time.time() - t0 - waited[0] > timeout:
                     p.kill()
                     return
         threading.Thread(target=watch, daemon=True).start()
         for line in p.stdout:
-            try:
-                msg = json.loads(line)
-                if not isinstance(msg, dict) or "op" not in msg:
-                    raise ValueError
-            except ValueError:
-                plain.append(line)
+            msg = None
+            if on_message:
+                try:
+                    msg = json.loads(line)
+                    if not isinstance(msg, dict) or "op" not in msg:
+                        msg = None
+                except ValueError:
+                    pass
+            if msg is None:
+                out.append(line)
+                emit(line, "stdout")
                 continue
             tw = time.time()
             reply = on_message(msg)
@@ -304,8 +329,9 @@ class Sandbox:
                     pass
         code = p.wait()
         done.set()
+        reader.join(5)
         timed_out = time.time() - t0 - waited[0] > timeout
-        return (-1 if timed_out else code), "".join(plain) + ("\n" + "".join(err) if err else ""), timed_out
+        return (-1 if timed_out else code), "".join(out) + ("\n" + "".join(err) if err else ""), timed_out, count[0]
 
     def invoke_tool(self, manifest, tool_dir, work_dir, inputs, timeout=None, on_message=None, settings=None,
                     network=None):

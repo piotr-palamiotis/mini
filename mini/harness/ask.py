@@ -1,5 +1,5 @@
 """Who answers a tool's questions. Each asker takes the question message from mini_io
-({"op": "ask", key, prompt, kind, choices, default}) and returns {"answer": value} or {"error": why}.
+({"op": "ask", key, prompt, kind, choices, default, multi}) and returns {"answer": value} or {"error": why}.
 "say" messages are shown and get no reply. File answers are host paths: a file in the user's folder is copied into
 the call's sandbox folder at its relative path, any other file under .mini/in/, and the tool gets the relative path.
 That holds for any answer naming an existing host file, whatever kind the tool asked for, the same as for values
@@ -10,6 +10,7 @@ import os
 import sys
 
 from . import workspace as ws
+from .approvals import pick
 from .sandbox import PolicyError
 
 
@@ -54,7 +55,16 @@ class TerminalAsker:
         kind, prompt, default, choices = msg.get("kind", "text"), msg.get("prompt") or msg["key"], msg.get("default"), msg.get("choices")
         hint = f" [{default}]" if default not in (None, "") and kind != "secret" else ""
         while True:
-            if kind == "choice" and choices:
+            if kind == "choice" and choices and msg.get("multi"):
+                print(prompt, file=self.out)
+                for i, c in enumerate(choices, 1):
+                    print(f"  {i}) {c}", file=self.out)
+                picks = pick(choices, input(f"pick any of 1-{len(choices)}, comma-separated{hint}: "))
+                if not picks and default:
+                    return default
+                if picks and all(p in choices for p in picks):
+                    return picks
+            elif kind == "choice" and choices:
                 print(prompt, file=self.out)
                 for i, c in enumerate(choices, 1):
                     print(f"  {i}) {c}", file=self.out)
@@ -110,17 +120,21 @@ class GateAsker:
         if msg.get("op") != "ask":
             return None
         kind, choices = msg.get("kind", "text"), msg.get("choices") or []
-        options = tuple(choices) + ("cancel",) if kind == "choice" and choices else \
-            ("yes", "no", "cancel") if kind == "confirm" else ("answer", "cancel")
+        multi = bool(msg.get("multi")) and kind == "choice"
+        options = ("yes", "no", "cancel") if kind == "confirm" else ("answer", "cancel")
         details = {"tool": self.tool, "question": msg.get("prompt") or msg["key"], "answer type": kind}
         if msg.get("default") not in (None, ""):
             details["default"] = str(msg["default"])
         if kind == "secret":
             details["_secret"] = True
-        d = self.gate.request("question", msg.get("prompt") or msg["key"], details, options=options)
+        d = self.gate.request("question", msg.get("prompt") or msg["key"], details, options=options,
+                              choices=choices if kind == "choice" else None, multi=multi)
         if not d.approved or d.choice == "cancel":
             return {"error": f"no answer for {msg['key']}: pass it in the tool inputs" if d.decided_by.startswith("auto")
                     else "the user cancelled"}
+        if multi:
+            bad = [p for p in d.picks or [] if p not in choices]
+            return {"error": f"{msg['key']}: {', '.join(bad)} not among the choices"} if bad else {"answer": d.picks or []}
         if kind == "choice":
             return {"answer": d.choice}
         if kind == "confirm":

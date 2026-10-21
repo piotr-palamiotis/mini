@@ -224,9 +224,12 @@ class SetupError(Exception):
 
 
 def _build_image(cfg, ui):
+    from .harness.eventlog import EventBus, LineSink
     from .harness.sandbox import Sandbox
     ui.say("building the sandbox image ...")
-    Sandbox(cfg).build_base()
+    bus = EventBus()
+    bus.subscribe(LineSink(ui.say))                   # the build's output, line by line as it arrives
+    Sandbox(cfg, bus).build_base()
 
 
 def _enable(name, ui):

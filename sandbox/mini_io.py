@@ -1,9 +1,9 @@
 """The io object a tool gets as run(inputs, io). Harness code, mounted read-only at /mini/mini_io.py.
 
-  io.ask(key, prompt, kind="text", choices=None, default=None)
+  io.ask(key, prompt, kind="text", choices=None, default=None, multi=False)
       The value for `key`: from inputs when the caller gave it (one-line use), else the user is asked.
-      kind: text | number | confirm (returns bool) | choice (one of choices) | file (a path in the working
-      directory) | secret (not echoed).
+      kind: text | number | confirm (returns bool) | choice (one of choices; with multi=True a list of them, the
+      user ticks several) | file (a path in the working directory) | secret (not echoed).
   io.setting(key)      A saved setting declared in the spec (a dict, or the value itself). The harness asks the
                        user for missing settings before the tool starts.
   io.say(text)         Show a line to the user while the tool runs.
@@ -22,7 +22,11 @@ class MissingInput(Exception):
 KINDS = ("text", "number", "confirm", "choice", "file", "secret")
 
 
-def _coerce(kind, value, choices):
+def _coerce(kind, value, choices, multi=False):
+    if kind == "choice" and multi:
+        items = value.split(",") if isinstance(value, str) else list(value or [])
+        return [_coerce(kind, str(v).strip() if isinstance(v, str) else v, choices) for v in items
+                if not isinstance(v, str) or v.strip()]
     if kind == "number" and isinstance(value, str):
         value = float(value) if "." in value else int(value)
     if kind == "confirm" and isinstance(value, str):
@@ -30,6 +34,13 @@ def _coerce(kind, value, choices):
     if kind == "choice" and choices and value not in choices:
         raise ValueError(f"{value!r} is not one of {choices}")
     return value
+
+
+def _check(kind, choices, multi):
+    if kind not in KINDS:
+        raise ValueError(f"unknown question kind {kind!r}; use one of {KINDS}")
+    if multi and (kind != "choice" or not choices):
+        raise ValueError("multi=True needs kind=\"choice\" and the choices")
 
 
 class IO:
@@ -42,19 +53,19 @@ class IO:
         self._out.write(json.dumps(msg) + "\n")
         self._out.flush()
 
-    def ask(self, key, prompt, kind="text", choices=None, default=None):
-        if kind not in KINDS:
-            raise ValueError(f"unknown question kind {kind!r}; use one of {KINDS}")
+    def ask(self, key, prompt, kind="text", choices=None, default=None, multi=False):
+        _check(kind, choices, multi)
         if key in self.inputs and self.inputs[key] is not None:
-            return _coerce(kind, self.inputs[key], choices)
-        self._send({"op": "ask", "key": key, "prompt": prompt, "kind": kind, "choices": choices, "default": default})
+            return _coerce(kind, self.inputs[key], choices, multi)
+        self._send({"op": "ask", "key": key, "prompt": prompt, "kind": kind, "choices": choices, "default": default,
+                    "multi": bool(multi)})
         line = self._in.readline()
         if not line:
             raise MissingInput(f"no answer for {key!r}: the harness closed the channel")
         reply = json.loads(line)
         if "answer" not in reply:
             raise MissingInput(reply.get("error") or f"no answer for {key!r}")
-        value = _coerce(kind, reply["answer"], choices)
+        value = _coerce(kind, reply["answer"], choices, multi)
         self.inputs[key] = value
         return value
 
@@ -74,15 +85,14 @@ class ScriptedIO:
         self.answers, self.settings, self.inputs = dict(answers or {}), dict(settings or {}), dict(inputs or {})
         self.asked, self.said = [], []
 
-    def ask(self, key, prompt, kind="text", choices=None, default=None):
-        if kind not in KINDS:
-            raise ValueError(f"unknown question kind {kind!r}; use one of {KINDS}")
+    def ask(self, key, prompt, kind="text", choices=None, default=None, multi=False):
+        _check(kind, choices, multi)
         if key in self.inputs and self.inputs[key] is not None:
-            return _coerce(kind, self.inputs[key], choices)
+            return _coerce(kind, self.inputs[key], choices, multi)
         self.asked.append(key)
         if key not in self.answers:
             raise MissingInput(f"no answer for {key!r}")
-        return _coerce(kind, self.answers[key], choices)
+        return _coerce(kind, self.answers[key], choices, multi)
 
     def setting(self, key):
         if key not in self.settings:

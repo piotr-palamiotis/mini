@@ -114,7 +114,7 @@ Rootless sandbox with an egress allowlist; git-backed tools with staging, accept
 3. **Core catalog** with the capabilities above, a generated prompt section, the creator guard, and the run-code path (items 1 and 3 of section 5).
 4. **Replay tests** (item 7), added alongside step 3 so later changes are checked.
 5. **Bundled document tools** (PDF, docx, xlsx). Done: `mini/bundled/`, standard library only (PDF text extraction handles plain and Flate content streams, not scans, object streams or custom font encodings).
-6. **Event model:** start/chunk/end events, live sandbox output, `multi` in `io.ask`.
+6. **Event model:** start/chunk/end events, live sandbox output, `multi` in `io.ask`. Done: `mini/harness/eventlog.py` (block kinds and fields in its docstring, `Sink`; the journal, `mini run` and the current UI panes are sinks), sandbox output streamed line by line, `choices`/`multi` through the approval gate.
 7. **Stream UI:** markdown, thinking, tool and question blocks.
 8. **Full-screen views:** `/registry`, `/config`, `/tools`.
 8b. **Slash commands:** the command registry (core commands and tools from one schema), autocomplete, the modal form, `ui` hints in the spec and the creator prompt. Needs steps 3, 6 and 7. The CLI side (flags from the schema) already exists in `mini/toolcli.py`.

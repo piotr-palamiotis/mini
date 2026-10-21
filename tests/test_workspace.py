@@ -202,10 +202,9 @@ class CopyInExportTest(unittest.TestCase):
 
     def test_sandbox_mounts_no_user_folder(self):
         sb = Sandbox(temp_config())
-        with mock.patch.object(Sandbox, "_cli") as cli:
-            cli.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(Sandbox, "_stream", return_value=(0, "", False, 0)) as run:
             sb.run(["python", "-c", "1"], self.box)
-        args = " ".join(cli.call_args[0][0])
+        args = " ".join(run.call_args[0][0])
         self.assertNotIn(self.root, args)
         self.assertIn(f"{os.path.realpath(self.box)}:/work:rw", args)
 

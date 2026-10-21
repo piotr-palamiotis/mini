@@ -101,8 +101,8 @@ def main(argv=None):
             return 2
         agent = Agent(cfg, label=a.label, start_tier=a.model, workspace=folder)
         if not a.quiet:
-            from .harness.eventlog import RunLog
-            agent.log.subscribe(lambda ev: ev["kind"] != "delta" and print(RunLog.format(ev)[:1500], flush=True))
+            from .harness.eventlog import HeadlessSink
+            agent.log.subscribe(HeadlessSink())
         s = agent.run_task(a.task, a.attach)
         print(json.dumps({k: s[k] for k in ("run_id", "status", "answer", "error", "secs", "created", "escalations",
                                             "tiers", "watchdogs", "outputs", "checkpoint")}, indent=1))
