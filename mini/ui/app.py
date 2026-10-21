@@ -1,10 +1,14 @@
-"""Textual UI: chat, live log, attempt counter, cap indicator, registry browser, config screen, approval dialogs.
+"""Textual UI: one scrolling stream (answers as markdown, thinking, tool and command blocks, inline question cards)
+with the prompt fixed below it, plus the attempt counter, cap indicator, registry browser and config screen.
 
-The agent runs in a worker thread. Approval requests block that thread until the user answers in a modal dialog.
+The agent runs in a worker thread. The UI consumes the event stream (start / chunk / end, see harness/eventlog.py)
+directly: each block event drives one widget in the stream. A question block becomes a card at the bottom of the
+stream; the approval handler blocks the agent thread until the card is answered.
 """
 import json
 import os
 import threading
+import time
 import tomllib
 
 from rich.markup import escape
@@ -14,8 +18,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent,
-                             TabPane, TextArea)
+from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static,
+                             TabbedContent, TabPane, TextArea)
 
 from ..harness import checkpoint
 from ..harness import config as config_mod
@@ -23,12 +27,285 @@ from ..harness import workspace as ws
 from . import settingsform
 from ..harness.approvals import Decision
 from ..harness.config import TIERS
-from ..harness.eventlog import RunLog
 from ..harness.registry import Registry
 
-KIND_STYLE = {"watchdog": "bold yellow", "cap": "bold red", "error": "bold red", "test_run": "cyan",
-              "install": "bold green", "approval": "magenta", "tier": "bold blue", "gap": "bold",
-              "registry_state": "dim", "sandbox": "dim", "start": "dim", "end": "dim", "phase": "bold white", "attempt": "cyan"}
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+TAIL = 8                                            # live lines shown while a block runs
+KEEP = 2000                                         # lines kept per block
+NEGATIVE = ("refuse", "stop", "cancel")
+
+
+def clip(text, n):
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+class Block(Static, can_focus=True):
+    """A thinking, tool or command block. Running: open, with a spinner, elapsed time and the tail of its live
+    lines. Finished: one summary line, expandable by click or Enter; failed tool and command blocks stay open."""
+    BINDINGS = [Binding("enter,space", "toggle", "Expand / collapse", show=False)]
+    DEFAULT_CSS = """
+    Block { height: auto; padding: 0 1; }
+    Block:focus { background: $boost; }
+    """
+
+    def __init__(self, ev):
+        super().__init__()
+        self.ev, self.kind = ev, ev["block"]
+        self.t0 = time.monotonic()
+        self.text, self.lines, self.dropped = "", [], 0           # thinking: text; tool and command: lines
+        self.status = self.secs = self.result = None
+        self.expanded = False
+
+    @property
+    def done(self):
+        return self.status is not None
+
+    def label(self):
+        if self.kind == "thinking":
+            return "Thinking"
+        if self.kind == "command":
+            return "$ " + clip(" ".join(map(str, self.ev.get("argv") or [])) or self.ev.get("purpose") or "", 90)
+        args = ", ".join(f"{k}={clip(v if isinstance(v, str) else json.dumps(v, default=str), 40)}"
+                         for k, v in (self.ev.get("args") or {}).items())
+        return f"{self.ev.get('name')}({clip(args, 90)})"
+
+    def count(self):
+        return len(self.text.splitlines()) if self.kind == "thinking" else self.dropped + len(self.lines)
+
+    def add(self, text):
+        if self.kind == "thinking":
+            self.text += text
+        else:
+            self.lines.append(text.rstrip("\n"))
+            if len(self.lines) > KEEP:
+                del self.lines[0]
+                self.dropped += 1
+        self.paint()
+
+    def finish(self, ev):
+        self.status, self.secs, self.result = ev.get("status", "ok"), ev.get("secs", 0), ev.get("text")
+        self.expanded = self.kind != "thinking" and self.status != "ok"           # failed ones stay open
+        self.paint()
+
+    def body(self):
+        if self.kind == "thinking":
+            return self.text.splitlines() if self.expanded or not self.done else []
+        lines = self.lines
+        if self.result and not lines:
+            lines = str(self.result).splitlines()
+        return lines if self.expanded else lines[-TAIL:] if not self.done else []
+
+    def render_text(self):
+        if self.done:
+            if self.kind == "thinking":
+                head = Text(f"{'▾' if self.expanded else '▸'} Thought for {self.secs:.0f}s", style="dim italic")
+            else:
+                ok = self.status == "ok"
+                head = Text(f"{'▾' if self.expanded else '▸'} {'✓' if ok else '✗'} ", style="green" if ok else "bold red")
+                head.append(self.label(), style="bold" if not ok else "")
+                head.append(f"  {self.status}  {self.secs:.1f}s  {self.count()} lines", style="dim" if ok else "red")
+        else:
+            elapsed = time.monotonic() - self.t0
+            head = Text(f"{SPINNER[int(elapsed * 10) % len(SPINNER)]} ", style="yellow")
+            head.append("Thinking…" if self.kind == "thinking" else self.label(), style="italic" if self.kind == "thinking" else "bold")
+            head.append(f"  {elapsed:.0f}s", style="dim")
+        out = Text()
+        out.append_text(head)
+        body = self.body()
+        if self.done and self.expanded:
+            body = body[-300:]
+        elif not self.done:
+            body = body[-TAIL:]
+        for line in body:
+            out.append("\n  " + line, style="dim italic" if self.kind == "thinking" else "dim")
+        return out
+
+    def paint(self):
+        if self.is_attached:
+            self.update(self.render_text())
+
+    def on_mount(self):
+        self.paint()
+
+    def action_toggle(self):
+        self.expanded = not self.expanded
+        self.paint()
+
+    def on_click(self):
+        if self.done:
+            self.action_toggle()
+
+
+class TextBlock(Markdown):
+    """The answer, streamed: markdown re-rendered at most every 80 ms while it grows."""
+    DEFAULT_CSS = "TextBlock { margin: 0 1; padding: 0; }"
+
+    def __init__(self):
+        super().__init__("")
+        self.text, self.pending = "", False
+
+    def add(self, text):
+        self.text += text
+        if not self.pending:
+            self.pending = True
+            self.set_timer(0.08, self.flush) if self.is_attached else None
+
+    def flush(self):
+        self.pending = False
+        if self.is_attached:
+            self.update(self.text)
+
+    def on_mount(self):
+        self.flush()
+
+
+class QuestionCard(Static, can_focus=True):
+    """A question or approval inline in the stream. Rows: the asker's choices (or the fixed approval options) and
+    always a free-text row added here. Arrows or number keys move, Space ticks (checklist), Enter sends, typing
+    starts the text row, Esc cancels (a refusal). Once answered the card stays in the history with the answer."""
+    DEFAULT_CSS = """
+    QuestionCard { height: auto; border: round $warning; padding: 0 1; margin: 1 0; }
+    QuestionCard.-done { border: round $primary-darken-2; color: $text-muted; }
+    """
+
+    def __init__(self, ev):
+        super().__init__()
+        self.ev, self.req = ev, ev.get("req", "")
+        self.choices, self.multi = list(ev.get("choices") or []), bool(ev.get("multi"))
+        opts = list(ev.get("options") or [])
+        if self.choices:
+            self.rows = self.choices
+        elif self.req == "question":
+            self.rows = []                      # only the text row; Esc cancels
+        else:
+            self.rows = opts                    # approvals keep their fixed options; the text row is a note
+        self.options = opts
+        self.details = {k: v for k, v in (ev.get("details") or {}).items()
+                        if not (self.multi and k in ("options", "how"))}
+        self.secret = bool(self.details.pop("_secret", False))
+        self.cursor, self.ticked, self.text = 0, set(), ""
+        self.on_answer, self.active, self.final = None, False, None
+
+    def ask(self, on_answer):
+        self.on_answer, self.active = on_answer, True
+        self.paint()
+        self.focus()
+
+    # ---------------------------------------------------------------- keys
+    def handle_key(self, key, char=None):
+        """Returns True when the key was used."""
+        if not self.active:
+            return False
+        n = len(self.rows)
+        if key == "escape":
+            self.answer(Decision(False, "refuse" if "refuse" in self.options else "cancel" if "cancel" in self.options
+                                 else self.options[-1], "", "user"))
+        elif key == "up":
+            self.cursor = max(0, self.cursor - 1)
+        elif key == "down":
+            self.cursor = min(n, self.cursor + 1)
+        elif key == "enter":
+            d = self.decision()
+            if d is None:
+                return True
+            self.answer(d)
+            return True
+        elif key == "backspace":
+            self.text = self.text[:-1]
+            self.cursor = n
+        elif key == "space" and self.cursor < n and not self.text:
+            if self.multi:
+                self.ticked ^= {self.cursor}
+        elif char and char.isprintable():
+            if char in "123456789" and not self.text and int(char) <= n:
+                self.cursor = int(char) - 1
+            else:
+                self.cursor, self.text = n, self.text + char
+        else:
+            return False
+        self.paint()
+        return True
+
+    def on_key(self, event):
+        if self.handle_key(event.key, event.character):
+            event.stop()
+            event.prevent_default()
+
+    def decision(self):
+        n, text = len(self.rows), self.text.strip()
+        if self.choices and self.multi:
+            picks = [self.choices[i] for i in sorted(self.ticked)]
+            if not picks and not text:
+                picks = [self.choices[self.cursor]] if self.cursor < n else []
+            picks += [text] if text else []
+            return Decision(True, "answer", ", ".join(picks), "user", picks=picks) if picks else None
+        if self.choices:
+            if self.cursor < n:
+                return Decision(True, self.choices[self.cursor], text, "user", picks=[self.choices[self.cursor]])
+            return Decision(True, "answer", text, "user", picks=[text]) if text else None
+        if self.req == "question":
+            return Decision(True, "answer", text, "user") if text else None
+        choice = self.rows[self.cursor] if self.cursor < n else self.rows[0]     # the text row sends the first option
+        return Decision(choice not in NEGATIVE, choice, text, "user")
+
+    def answer(self, decision):
+        self.active = False
+        cb, self.on_answer = self.on_answer, None
+        self.paint()
+        try:
+            self.app.query_one("#prompt", Input).focus()
+        except Exception:                                    # noqa: BLE001 - the card may outlive the screen
+            pass
+        if cb:
+            cb(decision)
+
+    def finish(self, ev):
+        self.final = ev
+        self.active = False
+        self.add_class("-done")
+        self.paint()
+
+    # ---------------------------------------------------------------- view
+    def render_text(self):
+        out = Text()
+        title = self.ev.get("title", "")
+        out.append(f"{'?' if self.req == 'question' else self.req.upper()} {title}", style="bold yellow" if not self.final else "bold")
+        for k, v in self.details.items():
+            val = v if isinstance(v, str) else json.dumps(v, default=str)
+            out.append(f"\n  {k}: ", style="dim bold")
+            out.append(val if len(val) <= 1200 else val[:1200] + "…", style="dim")
+        if self.final:
+            st = self.final.get("status")
+            ans = ", ".join(map(str, self.final.get("picks") or [])) or self.final.get("answer") or self.final.get("choice") or ""
+            note = self.final.get("answer") if self.final.get("picks") or self.final.get("choice") not in ("answer", None) else ""
+            out.append(f"\n  -> {st}: " + (str(ans) if st == "answered" else self.final.get("choice") or ""),
+                       style="green" if st == "answered" else "red")
+            if note and note != ans and st == "answered":
+                out.append(f" (note: {note})", style="dim")
+            if self.final.get("decided_by") not in (None, "user"):
+                out.append(f"  [{self.final['decided_by']}]", style="dim")
+            return out
+        if not self.active:
+            out.append("\n  waiting…", style="dim")
+            return out
+        for i, row in enumerate(self.rows):
+            mark = ("[x] " if i in self.ticked else "[ ] ") if self.multi else ""
+            out.append(f"\n{'❯' if self.cursor == i else ' '} {i + 1}. {mark}{row}", style="bold" if self.cursor == i else "")
+        shown = "*" * len(self.text) if self.secret else self.text
+        hint = "your answer" if self.req == "question" and not self.choices else "other / note"
+        at = self.cursor == len(self.rows)
+        out.append(f"\n{'❯' if at else ' '} ", style="bold" if at else "")
+        out.append(shown + ("▌" if at else "") if self.text or at else hint, style="" if self.text or at else "dim italic")
+        out.append("\n  ↑↓ / 1-9 move" + ("   Space ticks" if self.multi else "") + "   Enter sends   Esc cancels", style="dim")
+        return out
+
+    def paint(self):
+        if self.is_attached:
+            self.update(self.render_text())
+
+    def on_mount(self):
+        self.paint()
 
 
 class ApprovalScreen(ModalScreen):
@@ -74,13 +351,10 @@ class MiniApp(App):
     TITLE = "mini"
     CSS = """
     #status { height: 1; background: $boost; padding: 0 1; }
-    #main { height: 1fr; }
-    #left { width: 45%; }
-    #main > TabbedContent { width: 1fr; }   /* the rest of the row, not a full row width past the edge */
-    #chat { height: 1fr; border: round $primary; }
-    #live { height: 3; color: $text-muted; padding: 0 1; }
-    #prompt { dock: bottom; }
-    #log { height: 1fr; }
+    #col { height: 1fr; }
+    #views { height: 1fr; }
+    #stream { height: 1fr; }
+    #prompt { height: 3; }
     #reg-table { height: 12; }
     #reg-detail { height: 1fr; }
     #reg-buttons { height: auto; }
@@ -113,19 +387,17 @@ class MiniApp(App):
         self.attempt = (0, cfg["caps"]["attempts_per_tool"], self.next_tier)
         self.cap_hit = ""
         self.busy = False
-        self.live_text = ""
+        self.blocks = {}                            # open block id -> widget
+        self.card = None                            # the question card waiting for an answer
+        self.last_text = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="status")
-        with Horizontal(id="main"):
-            with Vertical(id="left"):
-                yield RichLog(id="chat", wrap=True, markup=True, min_width=1)   # wrap to the pane, not to 78 columns
-                yield Static(id="live")
-                yield Input(placeholder="Give mini a task.  /attach PATH  /registry  /help", id="prompt")
-            with TabbedContent(initial="tab-log"):
-                with TabPane("Live log", id="tab-log"):
-                    yield RichLog(id="log", wrap=True, markup=False, max_lines=5000, min_width=1)
+        with Vertical(id="col"):
+            with TabbedContent(initial="tab-stream", id="views"):
+                with TabPane("Stream", id="tab-stream"):
+                    yield VerticalScroll(id="stream")
                 with TabPane("Registry", id="tab-reg"):
                     yield DataTable(id="reg-table", cursor_type="row")
                     with Horizontal(id="reg-buttons"):
@@ -145,11 +417,14 @@ class MiniApp(App):
                             yield TextArea(self.config_file_text(), language="toml", id="cfg-text")
                             yield Button("Save config", id="cfg-save", variant="primary")
                     yield Static(id="cfg-msg")
+            yield Input(placeholder="Give mini a task.  /attach PATH  /registry  /help", id="prompt")
         yield Footer()
 
     def on_mount(self):
         self.update_status()
         self.refresh_registry()
+        self.stream.anchor()                        # follow the newest block until the user scrolls up
+        self.set_interval(0.1, self.tick)
         budget = self.cfg["routing"]["local_budget_s"]
         self.chat("[b]mini[/b] ready. " + "  ".join(
             f"{t}: {self.cfg[t]['model']}" + ("" if self.cfg[t].get("enabled", True) else " (off)") for t in TIERS) +
@@ -188,21 +463,27 @@ class MiniApp(App):
             parts.append(f"[b white on red] CAP: {escape(self.cap_hit)} [/]")
         self.query_one("#status", Static).update("  |  ".join(parts))
 
+    @property
+    def stream(self):
+        return self.query_one("#stream", VerticalScroll)
+
     def chat(self, text):
-        self.query_one("#chat", RichLog).write(text)
+        self.stream.mount(Static(text, classes="note"))
+
+    def tick(self):
+        """Spinners and elapsed times of the running blocks."""
+        for w in self.blocks.values():
+            if isinstance(w, Block):
+                w.paint()
 
     # ------------------------------------------------------------ events from the agent thread
     def on_agent_event(self, ev):
-        """Adapter from the event stream to the current panes: chunks (thinking, answer text, command output) feed
-        the live line, every other event a line in the live log."""
+        """The event stream: block events drive the stream widgets, the other kinds update the counters and add a
+        note line for what the user should see."""
         k = ev["kind"]
-        if k == "chunk":
-            self.live_text = (self.live_text + ev["text"] + ("\n" if ev["block"] == "command" else ""))[-400:]
-            self.query_one("#live", Static).update(Text(self.live_text.replace("\n", " ")[-300:], style="dim italic"))
+        if k in ("start", "chunk", "end"):
+            self.on_block(ev)
             return
-        self.live_text = ""
-        line = RunLog.format(ev)
-        self.query_one("#log", RichLog).write(Text(line[:4000], style=KIND_STYLE.get(k, "")))
         if k == "run_start":
             self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], ev.get("tier", "local"))
         elif k == "attempt":
@@ -229,9 +510,15 @@ class MiniApp(App):
             self.chat(f"[yellow]watchdog[/yellow] {escape(ev.get('name', ''))}")
         elif k == "run_end":
             self.busy = False
+            self.close_blocks()
             self.history.append({x: ev.get(x) for x in ("task", "status", "answer", "error", "created", "outputs")})
             if ev["status"] == "success":
-                self.chat(f"[b green]done[/b green] in {ev['secs']} s\n{escape(ev.get('answer') or '')}")
+                self.chat(f"[b green]done[/b green] in {ev['secs']} s")
+                answer = (ev.get("answer") or "").strip()
+                if answer and answer not in self.last_text:           # the finish answer, unless it was streamed
+                    block = TextBlock()
+                    self.stream.mount(block)
+                    block.add(answer)
             else:
                 self.chat(f"[b red]{ev['status']}[/b red]: {escape(ev.get('error') or '')}")
             if ev.get("outputs"):
@@ -240,15 +527,52 @@ class MiniApp(App):
             self.refresh_registry()
         self.update_status()
 
+    def on_block(self, ev):
+        k, bid, block = ev["kind"], ev["id"], ev["block"]
+        w = self.blocks.get(bid)
+        if k == "start":
+            w = (TextBlock() if block == "text" else QuestionCard(ev) if block == "question" else Block(ev))
+            self.blocks[bid] = w
+            if block == "text":
+                self.last_text = ""
+            if block == "question":
+                self.card = w
+                self.query_one("#views", TabbedContent).active = "tab-stream"
+            self.stream.mount(w)
+        elif w is None:
+            return
+        elif k == "chunk":
+            w.add(ev["text"])
+            if block == "text":
+                self.last_text += ev["text"]
+        elif k == "end":
+            self.blocks.pop(bid, None)
+            if isinstance(w, TextBlock):
+                w.flush()
+            else:
+                w.finish(ev)
+            if w is self.card:
+                self.card = None
+
+    def close_blocks(self):
+        """A run ended with blocks still open (stopped, cancelled): close them so no spinner is left running."""
+        for bid, w in list(self.blocks.items()):
+            self.on_block({"kind": "end", "id": bid, "block": w.ev["block"] if hasattr(w, "ev") else "text",
+                           "status": "stopped", "secs": round(time.monotonic() - getattr(w, "t0", time.monotonic()), 1)})
+
     def approval_handler(self, kind, title, details, options):
-        """Called from the agent thread; blocks it until the user answers."""
+        """Called from the agent thread; blocks it until the user answers the card the question block opened."""
         done, box = threading.Event(), {}
 
+        def got(decision):
+            box["d"] = decision
+            done.set()
+
         def show():
-            def got(decision):
-                box["d"] = decision
-                done.set()
-            self.push_screen(ApprovalScreen(kind, title, details, options), got)
+            if self.card is not None:
+                self.card.ask(got)
+            else:                                           # no card (should not happen): the old dialog
+                self.push_screen(ApprovalScreen(kind, title, details, options), got)
         self.call_from_thread(show)
         done.wait()
         return box["d"]
@@ -260,6 +584,8 @@ class MiniApp(App):
         ev.input.value = ""
         if not text:
             return
+        if text != "/registry":
+            self.query_one("#views", TabbedContent).active = "tab-stream"
         if text.startswith("/attach "):
             p = os.path.expanduser(text[8:].strip())
             if os.path.isfile(p):
@@ -276,7 +602,7 @@ class MiniApp(App):
             self.chat("new conversation: earlier tasks are forgotten")
             return
         if text == "/registry":
-            self.query_one("#main > TabbedContent", TabbedContent).active = "tab-reg"
+            self.query_one("#views", TabbedContent).active = "tab-reg"
             return
         if text == "/help":
             self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"

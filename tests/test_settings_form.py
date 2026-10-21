@@ -34,7 +34,7 @@ def make_app():
 
 
 async def open_config(app, pilot):
-    app.query_one("#main > TabbedContent", TabbedContent).active = "tab-cfg"
+    app.query_one("#views", TabbedContent).active = "tab-cfg"
     await pilot.pause()
 
 
