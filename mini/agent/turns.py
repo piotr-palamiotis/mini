@@ -5,7 +5,30 @@ empty replies are answered by the harness (they never count as attempts). Time/t
 When the local model's time budget for the task is used up, the conversation moves to the free tier.
 """
 import json
+import re
 import time
+
+
+CHARS_PER_TOKEN = 3            # a cautious estimate; code and JSON are denser than prose
+CONTEXT_SHARE = 0.75           # shorten old results before the conversation passes this share of the context
+
+
+def conversation_chars(messages):
+    return sum(len(m.get("content") or "") + len(json.dumps(m.get("tool_calls") or "")) for m in messages)
+
+
+def shrink(messages, target_chars, keep_last=4):
+    """Shorten the oldest large tool results until the conversation is under target_chars. The latest messages and
+    the structure (who said what, which calls were made) stay. Returns the characters saved."""
+    saved = 0
+    for m in messages[:-keep_last]:
+        if conversation_chars(messages) <= target_chars:
+            break
+        text = m.get("content") or ""
+        if m.get("role") == "tool" and len(text) > 600:
+            m["content"] = text[:300].rstrip() + f"\n[... older result shortened to save context: was {len(text)} characters]"
+            saved += len(text) - len(m["content"])
+    return saved
 
 
 class AgentStop(Exception):
@@ -54,6 +77,12 @@ class Turns:
                                             "staying on local")
             if a.wd.time_or_turns_exceeded():
                 self._limit_reached()
+            limit = a.context_tokens()
+            if limit and conversation_chars(self.messages) > limit * CONTEXT_SHARE * CHARS_PER_TOKEN:
+                saved = shrink(self.messages, limit * CONTEXT_SHARE * CHARS_PER_TOKEN)
+                if saved:
+                    a.log.emit("info", text=f"conversation near the {limit}-token context: older tool results shortened "
+                                            f"({saved} characters)")
             reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True),
                                    options=a.model_options, on_delta=a.on_delta, stop_event=a.stop_event)
             used = (reply.get("prompt_tokens") or 0) + (reply.get("output_tokens") or 0)
@@ -65,6 +94,16 @@ class Turns:
                        error=reply.get("raw_error"), run_tokens=a.tokens, tier=a.tier, model=a.model)
             if reply.get("stopped"):
                 a.check_abort()
+            over = re.search(r"\((\d+) tokens\) exceeds the available context size \((\d+) tokens", reply.get("raw_error") or "")
+            if over:                     # the server refused the request: make it smaller, or say plainly that it cannot be
+                need, have = int(over[1]), int(over[2])
+                chars = conversation_chars(self.messages)
+                saved = shrink(self.messages, int(chars * have / need * 0.7))
+                a.log.emit("watchdog", name="context_full", request_tokens=need, context_tokens=have, shortened_chars=saved)
+                if not saved:
+                    raise AgentStop(f"the conversation ({need} tokens) no longer fits the model's context ({have} tokens) "
+                                    f"and cannot be shortened further: ask for a smaller step, or raise ctx in the preset")
+                continue
             if a.tier_tokens[a.tier] > a.tier_tokens_cap():
                 a.log.emit("cap", cap="tokens_per_run", tier=a.tier, used=a.tier_tokens[a.tier], limit=a.tier_tokens_cap())
                 raise AgentStop(f"{a.tier} token cap reached: {a.tier_tokens[a.tier]} > {a.tier_tokens_cap()}")

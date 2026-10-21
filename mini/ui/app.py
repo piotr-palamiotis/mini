@@ -18,6 +18,8 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, Ri
                              TabPane, TextArea)
 
 from ..harness import config as config_mod
+from ..harness import workspace as ws
+from . import settingsform
 from ..harness.approvals import Decision
 from ..harness.config import TIERS
 from ..harness.eventlog import RunLog
@@ -83,6 +85,17 @@ class MiniApp(App):
     #reg-buttons { height: auto; }
     #cfg-text { height: 1fr; }
     #cfg-msg { height: 2; }
+    #cfg-form { height: 1fr; padding: 0 1; }
+    #cfg-form .grp { text-style: bold; color: $accent; margin-top: 1; }
+    #cfg-form .row { height: 1; }
+    #cfg-form .lbl { width: 1fr; }
+    #cfg-form Switch { border: none; height: 1; padding: 0 1; }
+    #cfg-form Input { border: none; height: 1; padding: 0 1; width: 22; background: $boost; }
+    #cfg-form Select { width: 22; height: 1; }
+    #cfg-form SelectCurrent { border: none; height: 1; padding: 0 1; background: $boost; }
+    #cfg-form .note { color: $text-muted; margin-top: 1; }
+    #cfg-buttons { height: auto; }
+    #cfg-buttons Button { margin-right: 1; }
     """
     BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit")]
 
@@ -91,6 +104,8 @@ class MiniApp(App):
         self.cfg = cfg
         self.backend_factory = backend_factory      # tests inject a scripted model
         self.agent = None
+        self.workspace, self.workspace_note = (None, "") if backend_factory else ws.resolve(cfg)   # the launch folder
+        self.history = []                           # finished tasks of this conversation; every new task is told about them
         self.attachments = []
         self.next_tier = cfg["routing"]["start"]
         self.attempt = (0, cfg["caps"]["attempts_per_tool"], self.next_tier)
@@ -118,18 +133,30 @@ class MiniApp(App):
                         yield Button("Discard staged", id="discard", variant="error")
                     yield RichLog(id="reg-detail", wrap=True, min_width=1)
                 with TabPane("Config", id="tab-cfg"):
-                    yield TextArea(config_mod.dumps(self.cfg), language="toml", id="cfg-text")
+                    with TabbedContent(id="cfg-tabs"):
+                        with TabPane("Settings", id="cfg-tab-form"):
+                            yield settingsform.widgets(self.cfg)
+                            with Horizontal(id="cfg-buttons"):
+                                yield Button("Save settings", id="cfg-save-form", variant="primary")
+                                yield Button("Reset", id="cfg-reset")
+                        with TabPane("Raw TOML", id="cfg-tab-raw"):
+                            yield TextArea(self.config_file_text(), language="toml", id="cfg-text")
+                            yield Button("Save config", id="cfg-save", variant="primary")
                     yield Static(id="cfg-msg")
-                    yield Button("Save config", id="cfg-save", variant="primary")
         yield Footer()
 
     def on_mount(self):
         self.update_status()
         self.refresh_registry()
+        budget = self.cfg["routing"]["local_budget_s"]
         self.chat("[b]mini[/b] ready. " + "  ".join(
             f"{t}: {self.cfg[t]['model']}" + ("" if self.cfg[t].get("enabled", True) else " (off)") for t in TIERS) +
-            f"\nTasks start on {self.cfg['routing']['start']}; local moves to free after "
-            f"{self.cfg['routing']['local_budget_s'] // 60} min. /model to choose the next task's model.")
+            f"\nTasks start on {self.cfg['routing']['start']}"
+            + (f"; local moves to free after {budget // 60} min" if budget and self.cfg["free"].get("enabled", True) else "")
+            + ". /model to choose the next task's model.")
+        self.chat(f"shared with the agent, read-only: [b]{escape(self.workspace)}[/b] (as /host). Its changes wait in "
+                  f"out/ until you /apply them." if self.workspace else escape(self.workspace_note) if self.workspace_note else
+                  "no folder is shared with the agent (workspace is off).")
         self.check_tiers()
         self.query_one("#prompt", Input).focus()
 
@@ -196,6 +223,7 @@ class MiniApp(App):
             self.chat(f"[yellow]watchdog[/yellow] {escape(ev.get('name', ''))}")
         elif k == "run_end":
             self.busy = False
+            self.history.append({x: ev.get(x) for x in ("task", "status", "answer", "error", "created", "outputs")})
             if ev["status"] == "success":
                 self.chat(f"[b green]done[/b green] in {ev['secs']} s\n{escape(ev.get('answer') or '')}")
             else:
@@ -233,14 +261,23 @@ class MiniApp(App):
             else:
                 self.chat(f"[red]no such file:[/red] {escape(p)}")
             return
+        if text == "/apply":
+            self.apply_changes()
+            return
+        if text == "/new":
+            self.history = []
+            self.chat("new conversation: earlier tasks are forgotten")
+            return
         if text == "/registry":
-            self.query_one(TabbedContent).active = "tab-reg"
+            self.query_one("#main > TabbedContent", TabbedContent).active = "tab-reg"
             return
         if text == "/help":
             self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"
+                      "/apply         review and copy the last task's changes (out/) into the shared folder\n"
+                      "/new           forget the conversation so far (each task is told about the earlier ones)\n"
                       "/status        check the local model and the cloud tiers\n"
                       "/model [local|free|paid]   model for the next task (paid lasts one task)\n"
-                      "Config tab: edit and save the TOML config (models, routing, caps, watchdogs).")
+                      "Config tab: switches and fields for the settings (saved in place), or the raw TOML.")
             return
         if text == "/status":
             self.check_tiers()
@@ -274,10 +311,30 @@ class MiniApp(App):
     def run_task(self, text, attachments, tier):
         from ..agent.core import Agent
         cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
-        self.agent = Agent(cfg, approval_handler=self.approval_handler, start_tier=tier,
+        self.agent = Agent(cfg, approval_handler=self.approval_handler, start_tier=tier, history=self.history, workspace=self.workspace,
                            tier_backends={tier: self.backend_factory()} if self.backend_factory else None)
         self.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, ev))
         self.agent.run_task(text, attachments)
+
+    def apply_changes(self):
+        """Show what the last task left for the shared folder as diffs; copy it over only after a yes."""
+        if self.busy:
+            self.chat("[yellow]a task is running[/yellow]")
+            return
+        run_dir = self.agent.run_dir if self.agent else None
+        items = [i for i in ws.pending(run_dir)] if run_dir else []
+        if not items:
+            self.chat("nothing to apply: the last task left no changes for the shared folder")
+            return
+        details = {f"{rel} ({status})": diff[:3000] for rel, status, diff in items}
+
+        def got(d):
+            if d.approved:
+                done = ws.apply(run_dir)
+                self.chat(f"[b green]applied[/b green] to {escape(ws.run_workspace(run_dir))}: {escape(', '.join(done))}")
+            else:
+                self.chat("not applied; the changes stay in out/ of the run")
+        self.push_screen(ApprovalScreen("apply", f"Copy into {ws.run_workspace(run_dir)}", details, ("apply", "cancel")), got)
 
     # ------------------------------------------------------------ registry browser
     def action_refresh_registry(self):
@@ -367,20 +424,58 @@ class MiniApp(App):
         self.refresh_registry()
 
     # ------------------------------------------------------------ config screen
+    def config_file_text(self):
+        try:
+            with open(self.cfg.path) as f:
+                return f.read()
+        except OSError:
+            return config_mod.dumps(self.cfg)
+
+    def reload_config(self):
+        """Take the file's values into the running UI; the next task uses them."""
+        self.cfg = config_mod.load(self.cfg.path)
+        if not self.cfg.get(self.next_tier, {}).get("enabled", True) or self.next_tier not in TIERS:
+            self.next_tier = self.cfg["routing"]["start"]
+        settingsform.refresh(self, self.cfg)
+        self.query_one("#cfg-text", TextArea).text = self.config_file_text()
+        self.update_status()
+
+    @on(Button.Pressed, "#cfg-save-form")
+    def save_settings(self):
+        msg = self.query_one("#cfg-msg", Static)
+        updates, errors = settingsform.collect(self, self.cfg)
+        if errors:
+            msg.update("[red]not saved: " + escape("; ".join(errors)) + "[/red]")
+            return
+        if not updates:
+            msg.update("nothing changed")
+            return
+        try:
+            config_mod.set_values(self.cfg.path, updates)
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            msg.update(f"[red]not saved: {escape(str(e))}[/red]")
+            return
+        self.reload_config()
+        msg.update(f"[green]saved: {settingsform.summary(updates)}; applies to the next task[/green]")
+
+    @on(Button.Pressed, "#cfg-reset")
+    def reset_settings(self):
+        settingsform.refresh(self, self.cfg)
+        self.query_one("#cfg-msg", Static).update("form reset to the saved values")
+
     @on(Button.Pressed, "#cfg-save")
     def save_config(self):
         text = self.query_one("#cfg-text", TextArea).text
         msg = self.query_one("#cfg-msg", Static)
         try:
-            data = tomllib.loads(text)
+            tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
             msg.update(f"[red]not saved: {escape(str(e))}[/red]")
             return
-        msg.update(f"[green]saved to {escape(self.cfg.path)}; applies to the next task[/green]")
         with open(self.cfg.path, "w") as f:
             f.write(text)
-        self.cfg = config_mod.load(self.cfg.path)
-        self.update_status()
+        self.reload_config()
+        msg.update(f"[green]saved to {escape(self.cfg.path)}; applies to the next task[/green]")
 
 
 def run_ui(cfg):

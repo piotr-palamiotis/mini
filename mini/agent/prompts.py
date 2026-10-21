@@ -35,11 +35,13 @@ Tools installed in the registry ({count}):
 {registry}
 
 Built-in actions you always have (they are not tools and never need to be built): reading and writing text
-files in the working directory, and pure text reasoning (reading, summarizing, writing or rephrasing text you
+files in the working directory, {shared}and pure text reasoning (reading, summarizing, writing or rephrasing text you
 have seen). Anything else that touches files, the network or other systems, or that needs exact repeatable
 processing, needs a tool.
 
-Decide whether the installed tools plus the built-in actions cover every step.
+Decide whether the installed tools plus the built-in actions cover every step. A step a built-in action does is
+covered: never put it in `missing` and never build a tool for it. If every step is a built-in action or an installed
+tool, `missing` is an empty list.
 
 Call `decide_coverage` with:
 - reasoning: how each step is covered, or why it is not
@@ -183,12 +185,16 @@ Files in the working directory:
 
 Complete the task now. Call `invoke_tool` to run a tool. Pass every input you already know from the task;
 the tool asks the user only for what is missing, and saved settings are filled in by the harness. Tool outputs
-come back as JSON. Use `read_file` and
-`write_file` for files in the working directory (write_file takes the content as a fenced block in the same
-reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that
+come back as JSON. `invoke_tool` runs only the installed tools listed above. Use `list_files`, `read_file` and
+`write_file` yourself, as actions of their own (never through `invoke_tool`): they work on the working directory
+and, read-only, on the user's /host folder when there is one (write_file takes the content as a fenced block in
+the same reply). If a tool fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that
 no tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked
 (the requested item, not a different or nearby one). If it does not, that is a tool bug: call `report_tool_bug`.
-When the task is done, call `finish` with the answer for the user and the list of files you produced."""
+When the task is done, call `finish` with the answer for the user and the list of files you produced.
+Keep what you read small: your context is limited. For "what is in this folder", list it (depth 1), then go
+deeper only where the task needs it, and answer from the listing; read a file only when the task is about its
+content."""
 
 WRITE_CONTENT = """Send the content of {path} now as one fenced block, no tool call:
 

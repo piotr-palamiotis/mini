@@ -18,11 +18,11 @@ import time
 from . import codeblocks, prompts
 from .creator import Creator, ToolFailed, trim
 from .turns import AgentStop, RestartRequested, Turns, fn
-from ..harness import hwmon
+from ..harness import hwmon, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.ask import GateAsker
 from ..harness.backends import Endpoint, has_model, make_backend
-from ..harness.config import local_candidates
+from ..harness.config import llama_settings, local_candidates
 from ..harness.eventlog import RunLog
 from ..harness.lessons import LessonStore
 from ..harness.registry import Registry
@@ -39,15 +39,22 @@ T_COVERAGE = fn("decide_coverage", "Decide which installed tools cover the task 
     "reasoning": S, "use": ARR, "missing": ARR}, ["reasoning", "use", "missing"])
 T_INVOKE = fn("invoke_tool", "Run an installed tool in the sandbox.", {"name": S, "inputs": {"type": "object"}},
               ["name", "inputs"])
-T_READ = fn("read_file", "Read a text file in the working directory.", {"path": S}, ["path"])
+T_READ = fn("read_file", "Read a text file in the working directory or, read-only, in the user's /host folder. Long "
+            "files come in parts: offset is the character to start at.", {"path": S, "offset": {"type": "integer"}}, ["path"])
 T_WRITE = fn("write_file", "Write a text file in the working directory. The content is the fenced block in this "
              "reply. mode: write (default), prepend or append.", {"path": S, "mode": S}, ["path"])
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
            {"name": S, "problem": S}, ["name", "problem"])
 T_NEED = fn("need_tool", "A capability is missing; build a new tool for it.", {"need": S}, ["need"])
-T_FINISH = fn("finish", "The task is done. answer: the reply to the user.", {"answer": S, "files": ARR}, ["answer"])
-EXEC_TOOLS = [T_INVOKE, T_READ, T_WRITE, T_BUG, T_NEED, T_FINISH]
-MAX_READ = 20000
+T_FINISH = fn("finish", "The task is done. answer: the reply to the user, with any list or result written out in it. "
+              "files: only deliverable files you wrote into the working directory; leave it out when the answer is text "
+              "(names a tool returned are not files).", {"answer": S, "files": ARR}, ["answer"])
+T_LIST = fn("list_files", "List a folder: the working directory (path '.') or the user's shared folder (/host, "
+            "read-only). The listing is compact: folders show their item count. depth 1 (default) is the folder "
+            "itself, 2 or 3 add subfolders. To see inside one folder, list that folder.",
+            {"path": S, "depth": {"type": "integer"}}, ["path"])
+EXEC_TOOLS = [T_INVOKE, T_READ, T_LIST, T_WRITE, T_BUG, T_NEED, T_FINISH]
+MAX_READ = 8000                                   # characters of a file per read (about 2,000 tokens)
 
 
 def describe_tool(m, full=True):
@@ -65,8 +72,11 @@ def describe_tool(m, full=True):
 
 
 class Agent:
-    def __init__(self, cfg, approval_handler=None, backend=None, tier_backends=None, start_tier=None, label="", log=None):
+    def __init__(self, cfg, approval_handler=None, backend=None, tier_backends=None, start_tier=None, label="", log=None,
+                 history=(), workspace=None):
         self.cfg = cfg
+        self.workspace = os.path.realpath(workspace) if workspace else None   # the user's folder, shared read-only
+        self.history = list(history)                       # finished earlier tasks of this conversation (run_end events)
         self.log = log or RunLog(cfg.abspath("runs"), label=label)
         self.run_dir = self.log.dir
         self.work = os.path.join(self.run_dir, "work")
@@ -101,13 +111,16 @@ class Agent:
         """With several local backends ([local] use), the first that answers and has its model becomes [local]
         for this task. Returns its name."""
         cands = local_candidates(self.cfg)
-        if len(cands) == 1 or "local" in self.tier_backends:
+        if "local" in self.tier_backends:
             return cands[0][0]
-        for name, entry in cands:
-            if has_model(entry):
-                break
+        if len(cands) == 1:                           # the only backend: its own url and model, not [local]'s
+            name, entry = cands[0]
         else:
-            name, entry = cands[0]                    # none answers: keep the first, its error shows up in the log
+            for name, entry in cands:
+                if has_model(entry):
+                    break
+            else:
+                name, entry = cands[0]                # none answers: keep the first, its error shows up in the log
         self.cfg = copy.deepcopy(self.cfg)
         self.cfg["local"] = entry
         if name != cands[0][0]:
@@ -153,7 +166,8 @@ class Agent:
                       leaves_machine=tier != "local")
 
     def local_time_up(self):
-        return self.tier == "local" and time.time() - self.local_t0 > self.cfg["routing"]["local_budget_s"]
+        budget = self.cfg["routing"]["local_budget_s"]          # 0: no limit on local model time
+        return bool(budget) and self.tier == "local" and time.time() - self.local_t0 > budget
 
     def auto_escalate(self, why):
         """local -> free without asking (routing.auto_escalate). False when free is off or unreachable."""
@@ -184,7 +198,32 @@ class Agent:
     def context(self):
         facts = [f"Today is {time.strftime('%A %Y-%m-%d')}, local time {time.strftime('%H:%M %Z')}."]
         facts += list(self.cfg["environment"]["facts"])
-        return "Facts about the user's environment:\n" + "\n".join(f"- {f}" for f in facts)
+        out = "Facts about the user's environment:\n" + "\n".join(f"- {f}" for f in facts)
+        if self.workspace:
+            out += (f"\n\nThe user's folder {self.workspace} is shared read-only as /host, with you and with tools: "
+                    f"list_files and read_file work on /host paths, and a tool gets /host paths in its inputs. Never "
+                    f"change it. To change or add a file there, write the complete new file under out/ with the same "
+                    f"relative path (out/src/a.py for /host/src/a.py); the user reviews it and applies it with "
+                    f"`mini apply`. Nothing you write reaches /host by itself. \"The current folder\", \"this directory\" "
+                    f"or \"here\" in a task means /host.")
+        if self.history:
+            out += ("\n\nEarlier in this conversation (oldest first). The new task may refer to it: \"retry\", "
+                    "\"again\", \"that file\", \"why did it fail\".\n" + "\n".join(self._past(h) for h in self.history[-6:]))
+        return out
+
+    @staticmethod
+    def _past(h):
+        cut = lambda v, n: (str(v) if v else "").replace("\n", " ")[:n]
+        line = f"- the user asked: {cut(h.get('task'), 300)} -> {h.get('status')}"
+        if h.get("error"):
+            line += f"; error: {cut(h['error'], 300)}"
+        if h.get("answer"):
+            line += f"; you answered: {cut(h['answer'], 600)}"
+        if h.get("created"):
+            line += f"; tools built: {cut(h['created'], 150)}"
+        if h.get("outputs"):
+            line += f"; files produced: {cut(h['outputs'], 150)}"
+        return line
 
     def list_work(self):
         out = []
@@ -203,7 +242,7 @@ class Agent:
             shutil.copy(a, os.path.join(self.work, "in", os.path.basename(a)))
         self.log.emit("run_start", task=task, attachments=[os.path.basename(a) for a in attachments],
                       model=self.model, tier=self.tier, backend=self.cfg[self.tier]["backend"], local=self.local_backend,
-                      caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
+                      workspace=self.workspace, caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
         tl = time.time()
         try:
             self.backend.load(self.model, self.model_options)
@@ -212,7 +251,11 @@ class Agent:
         self.log.emit("info", text=f"model {self.model} loaded in {time.time() - tl:.1f} s; swap baseline taken after loading",
                       swap_used_mib=round(hwmon.swap_used_mib()))
         self.local_t0 = time.time()
-        swap = hwmon.SwapWatch(self.cfg["watchdogs"]["swap_growth_mib"], self._swap_trip).begin()
+        swap = hwmon.SwapWatch(self.cfg["watchdogs"]["swap_growth_mib"], self._swap_trip)
+        if self.cfg["watchdogs"]["swap_watch"]:
+            swap.begin()
+        else:
+            self.log.emit("info", text="swap watchdog is off ([watchdogs] swap_watch); swap growth is only recorded")
         self.wd.reset_task()
         try:
             self.task = task
@@ -236,7 +279,7 @@ class Agent:
                    "repairs": self.repaired, "escalations": self.escalations,
                    "tiers": {"start": self.start_tier, "used": self.tiers_used, "tokens": self.tier_tokens},
                    "watchdogs": self._watchdog_counts(), "outputs": self.produced_files(),
-                   "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
+                   "workspace": self.workspace, "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
         self.log.emit("run_end", **{k: v for k, v in summary.items() if k != "registry_after"})
         return summary
@@ -280,6 +323,7 @@ class Agent:
                 t.result("understand", "ok")
                 return u
             d = self.gate.request("confirm", "Confirm the plan", {
+                **({"shared folder (read-only)": self.workspace} if self.workspace else {}),
                 "goal": u.get("goal"), "inputs": u.get("inputs"), "outputs": u.get("outputs"),
                 "side effects": u.get("side_effects") or "-", "ambiguities": u.get("ambiguities") or "-",
                 "plan": u.get("plan")}, options=("proceed", "clarify", "cancel"))
@@ -303,8 +347,10 @@ class Agent:
         tools = self.registry.list_tools() if len(snap) <= 40 else self.registry.search(query, limit=15)
         listing = "\n".join(describe_tool(m) for m in tools) or "(the registry is empty)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
-                {"role": "user", "content": prompts.GAP.format(understanding=json.dumps(understanding, indent=1),
-                                                               count=len(snap), registry=listing)}]
+                {"role": "user", "content": prompts.GAP.format(
+                    understanding=json.dumps(understanding, indent=1), count=len(snap), registry=listing,
+                    shared="listing (list_files) and reading (read_file) any file in the user's folder, shared read-only "
+                           "as /host, " if self.workspace else "")}]
         t = Turns(self, "gap", msgs, [T_COVERAGE])
         for _ in range(4):
             reply = t.ask()
@@ -371,6 +417,8 @@ class Agent:
                     text = self._invoke(args, last_invoke)
                 elif name == "read_file":
                     text = self._read(args)
+                elif name == "list_files":
+                    text = self._list(args)
                 elif name == "write_file":
                     self._text_turn_done = False
                     text = self._write(args, content, msgs)
@@ -413,7 +461,7 @@ class Agent:
         self.log.emit("invoke", tool=name, version=m["version"], inputs=inputs,
                       settings=sorted(settings) or None, network=network or None)
         out, res = self.sandbox.invoke_tool(m, m["_dir"], self.work, inputs, on_message=asker, settings=settings,
-                                            network=network)
+                                            network=network, workspace=self.workspace)
         last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:],
                              "network": res.get("network_note") or None}
         self.log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
@@ -445,14 +493,46 @@ class Agent:
             raise PolicyError(f"path outside the working directory: {p}")
         return full
 
+    def _list(self, args):
+        p = str(args.get("path") or ".")
+        try:
+            depth = int(args.get("depth") or (2 if args.get("recursive") else 1))
+        except (TypeError, ValueError):
+            depth = 1
+        try:
+            if p.startswith(ws.MOUNT):
+                return ws.list_dir(self.workspace, p, depth)
+            full = self._path(p)
+            if not os.path.isdir(full):
+                return f"{p} is not a folder.\nFiles:\n{self.list_work()}"
+            return ws.tree(full, p, depth)
+        except (OSError, PolicyError) as e:
+            return f"Cannot list: {e}"
+
+    def context_tokens(self):
+        """The local model's context size, when it is known (llama.cpp); None otherwise."""
+        if self.tier == "local" and self.local_backend == "llamacpp":
+            return int(llama_settings(self.cfg).get("ctx") or 0) or None
+        return None
+
     def _read(self, args):
         try:
-            full = self._path(args.get("path"))
+            p = str(args.get("path") or "")
+            full = ws.host_path(self.workspace, p) if p.startswith(ws.MOUNT) else self._path(p)
+            if os.path.isdir(full):
+                return f"{p} is a folder; use list_files.\nFiles:\n{self.list_work()}"
             data = open(full, errors="replace").read()
         except (OSError, PolicyError) as e:
             return f"Cannot read: {e}\nFiles:\n{self.list_work()}"
-        if len(data) > MAX_READ:
-            return data[:MAX_READ] + f"\n[... file is {len(data)} characters; first {MAX_READ} shown]"
+        try:
+            start = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            start = 0
+        if len(data) > MAX_READ or start:
+            end = start + MAX_READ
+            more = f"\n[... characters {start}-{min(end, len(data))} of {len(data)}; read_file with offset={end} for the rest]" \
+                if end < len(data) else f"\n[... characters {start}-{len(data)} of {len(data)}: the end]"
+            return data[start:end] + more
         return data
 
     def produced_files(self):
@@ -478,7 +558,10 @@ class Agent:
             if not os.path.isfile(full) or os.path.getsize(full) == 0:
                 return f"{f} does not exist or is empty. Write it first. Files present: {', '.join(produced) or '(none)'}"
         promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
-        if re.search(r"\bfiles?\b|\.[a-z]{2,4}\b", promised.lower()) and not produced:
+        # a promised deliverable: "save/write/create ... file", or a file name with an extension. "A list of files in
+        # /host" is an answer, not a file.
+        if re.search(r"\b(save|write|written|create|produce|export|generate)\w*\b.*\bfiles?\b|\b\w+\.[a-z]{2,4}\b",
+                     promised.lower()) and not produced:
             return ("your plan produces a file, but no file was written in the working directory. Use write_file "
                     "(or a tool) to create it, then finish with its path in files.")
         return ""
@@ -488,6 +571,8 @@ class Agent:
             full = self._path(args.get("path"))
         except PolicyError as e:
             return str(e)
+        if os.path.isdir(full):
+            return f"{args.get('path')} is a directory, not a file. Files:\n{self.list_work()}"
         path = str(args.get("path", "")).lstrip("./")
         body = None
         if "```" in (content or ""):
@@ -520,10 +605,13 @@ class Agent:
         if body is None:
             return "No content received; the file was not written."
         mode = args.get("mode", "write")
-        os.makedirs(os.path.dirname(full), exist_ok=True)
-        old = open(full).read() if os.path.exists(full) else ""
-        new = body + old if mode == "prepend" else old + body if mode == "append" else body
-        open(full, "w").write(new)
+        try:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            old = open(full).read() if os.path.exists(full) else ""
+            new = body + old if mode == "prepend" else old + body if mode == "append" else body
+            open(full, "w").write(new)
+        except (OSError, UnicodeError) as e:
+            return f"Cannot write {args.get('path')}: {e}"
         shown = new if len(new) <= 4000 else new[:2000] + f"\n[... {len(new) - 4000} characters ...]\n" + new[-2000:]
         return (f"Wrote {os.path.relpath(full, self.work)} ({len(new)} characters, mode {mode}). The file now "
                 f"contains:\n{shown}\nDo not write it again unless something in it is wrong.")

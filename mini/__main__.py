@@ -7,6 +7,9 @@
   python -m mini tool NAME [--field VALUE ...]        run an accepted tool; it asks for what is not given
   python -m mini tools shims                          (re)write the PATH commands of accepted tools
   python -m mini settings list|show KEY|set KEY|delete KEY
+  python -m mini preset list|add NAME [--gpu vulkan|cuda|cpu --device D --model M --ctx N --args A]|use NAME|show [NAME]
+                                                      llama-server presets (GPU, model, context) in [presets.*]
+  python -m mini apply [RUN] [--yes]                  copy a run's changes (out/) into the folder it was started in
   python -m mini setup                                guided setup: sandbox, local model, cloud gateway
   python -m mini doctor                               check the setup, change nothing
 
@@ -54,6 +57,17 @@ def main(argv=None):
     st = sub.add_parser("settings")
     st.add_argument("action", choices=["list", "show", "set", "delete"])
     st.add_argument("key", nargs="?")
+    pr = sub.add_parser("preset")
+    pr.add_argument("action", choices=["list", "add", "use", "show"])
+    pr.add_argument("name", nargs="?")
+    pr.add_argument("--gpu", choices=["vulkan", "cuda", "cpu"])
+    pr.add_argument("--device")
+    pr.add_argument("--model")
+    pr.add_argument("--ctx", type=int)
+    pr.add_argument("--args", help="llama-server arguments (default: [llamacpp] extra_args)")
+    ap_ = sub.add_parser("apply")
+    ap_.add_argument("run", nargs="?", help="run id (default: the newest run with changes)")
+    ap_.add_argument("--yes", action="store_true", help="do not ask")
     sub.add_parser("setup")
     sub.add_parser("doctor")
     le = sub.add_parser("lessons")
@@ -74,7 +88,11 @@ def main(argv=None):
             cfg["approvals"]["confirm_first"] = False
         if a.no_escalate:
             cfg["routing"]["auto_escalate"] = False
-        agent = Agent(cfg, label=a.label, start_tier=a.model)
+        from .harness import workspace as ws
+        folder, why = ws.resolve(cfg)
+        if why:
+            print("note: " + why, file=sys.stderr)
+        agent = Agent(cfg, label=a.label, start_tier=a.model, workspace=folder)
         if not a.quiet:
             from .harness.eventlog import RunLog
             agent.log.subscribe(lambda ev: ev["kind"] != "delta" and print(RunLog.format(ev)[:1500], flush=True))
@@ -96,6 +114,11 @@ def main(argv=None):
         else:
             print(format_lessons(store.all()) or "(no lessons yet)")
         return 0
+    if a.cmd == "apply":
+        return apply_cmd(cfg, a.run, a.yes)
+    if a.cmd == "preset":
+        from .setup import preset_cmd
+        return preset_cmd(cfg, a.action, a.name, {k: getattr(a, k) for k in ("gpu", "device", "model", "ctx", "args")})
     if a.cmd == "setup":
         from .setup import wizard
         return wizard(cfg)
@@ -106,6 +129,25 @@ def main(argv=None):
     first_run_offer(cfg)
     from .ui.app import run_ui
     return run_ui(cfg)
+
+
+def apply_cmd(cfg, run, yes):
+    import os
+    from .harness import workspace as ws
+    runs = cfg.abspath("runs")
+    run_dir = os.path.join(runs, run) if run else ws.latest_run_with_changes(runs)
+    items = ws.pending(run_dir) if run_dir else []
+    if not items:
+        print("nothing to apply: no run left changes for the folder it was started in")
+        return 0
+    print(f"run {os.path.basename(run_dir)} -> {ws.run_workspace(run_dir)}")
+    for rel, status, diff in items:
+        print(f"\n--- {rel} ({status})\n{diff[:3000]}")
+    if not yes and input(f"\nCopy {len(items)} file(s) into {ws.run_workspace(run_dir)}? [y/N] ").strip().lower() != "y":
+        print("not applied")
+        return 1
+    print("applied: " + ", ".join(ws.apply(run_dir)))
+    return 0
 
 
 def tools_cmd(cfg, a):

@@ -109,8 +109,9 @@ def run_tool(cfg, name, argv):
         return 2
     log.emit("invoke", tool=name, version=m["version"], inputs=inputs, settings=sorted(settings) or None, via="terminal")
     try:
+        from .harness import workspace as ws
         out, res = Sandbox(cfg, log).invoke_tool(m, m["_dir"], work, inputs, on_message=asker, settings=settings,
-                                                 network=network)
+                                                 network=network, workspace=ws.resolve(cfg)[0])
     except PolicyError as e:
         print(f"{name}: {e}", file=sys.stderr)
         return 1

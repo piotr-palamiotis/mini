@@ -4,7 +4,7 @@
 # The local tier. `use` lists backends from [backends.*] in order of preference; mini setup writes them.
 backend = "openai"
 url = "http://127.0.0.1:8080/v1"
-model = "gemma4-12b"
+model = "gemma4-12b-it-qat"
 temperature = 0.6
 use = ["llamacpp"]
 
@@ -17,22 +17,24 @@ port = 8080
 device = "Vulkan0"       # llama-server --list-devices
 ctx = 65536              # context per model
 models_max = 1           # models in VRAM at once; others load on demand
-extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1"
+extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024"
+preset = "rtx3070"       # the active entry of [presets.*]; `mini preset use NAME` switches
+gpu = "vulkan"           # build used when no preset is active: vulkan | cuda | cpu
 
 [thinking]
-parse = false
-gap = false
+parse = true
+gap = true
 spec = true
 code = true
 fix = true
 execute = true
-write = false     # text-only turns that deliver document content
+write = true     # text-only turns that deliver document content
 
 [caps]
 attempts_per_tool = 10
 task_wall_clock_s = 1200
 task_turns = 30
-run_hard_wall_clock_s = 3600
+run_hard_wall_clock_s = 99999999
 reply_max_tokens = 8192
 reply_max_s = 300
 tokens_per_run = 1500000
@@ -46,6 +48,7 @@ fail_streak_restart = 3
 parse_error_retries = 5
 empty_reply_nudges = 1
 swap_growth_mib = 250
+swap_watch = false      # true: abort a run when swap grows by swap_growth_mib
 
 [sandbox]
 engine = "podman"
@@ -79,7 +82,7 @@ thinking_controls = false
 tokens_per_run = 3000000
 
 [paid]
-enabled = true
+enabled = false
 backend = "openai"
 url = "http://127.0.0.1:20128/v1"
 model = "mini-paid"
@@ -90,7 +93,7 @@ tokens_per_run = 2000000
 
 [routing]
 start = "local"          # local | free | paid
-local_budget_s = 900     # local model time per task, then the task moves to free
+local_budget_s = 0     # local model time per task, then the task moves to free (seconds; 0 = no limit)
 auto_escalate = true     # local -> free without asking; paid is only used when you pick it
 
 [consult]
@@ -118,4 +121,24 @@ runs = "runs"
 [backends.llamacpp]
 backend = "openai"
 url = "http://127.0.0.1:8080/v1"
+model = "gemma4-12b-it-qat"
+
+# Named ways to run llama-server (gpu, device, model, ctx, models_max, extra_args), laid over [llamacpp].
+[presets.rx6700xt]
+gpu = "vulkan"
+device = "Vulkan0"
 model = "gemma4-12b"
+ctx = 65536
+extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024"
+
+[presets.rtx3070]
+gpu = "cuda"
+device = "CUDA0"
+model = "gemma4-12b-it-qat"
+ctx = 40960
+extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024 --no-mmproj-offload"
+
+# The folder mini is started in is shared read-only as /host; changes wait in out/ until `mini apply`.
+[workspace]
+enabled = true
+refuse = ["~", "/"]

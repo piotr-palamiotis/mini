@@ -34,7 +34,8 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
    (LM Studio, vLLM, ...). Tick several and pick which comes first: each task runs on the first one that
    answers with its model, so the others are a fallback (`[local] use`, `[backends.*]`).
    - **llama.cpp** is built in `[llamacpp] dir` (setup asks where) from exactly the release mini is tested
-     with, **`b11567` (commit `972b5fc`)**, with Vulkan. The pin lives in `mini/setup.py` (`LLAMA_TAG`,
+     with, **`b11567` (commit `972b5fc`)**, for the GPU backend of the active preset (Vulkan, CUDA or CPU; each in
+     its own `build*` folder, so both can exist). The pin lives in `mini/setup.py` (`LLAMA_TAG`,
      `LLAMA_COMMIT`); `doctor` checks that the built `llama-server` is that commit.
    - `llama-server` runs in **router mode** over `[llamacpp] models_dir`: every `NAME.gguf`, or `NAME/` folder
      with the model and its `mmproj-*.gguf` (vision), is a model, loaded on demand (`models_max` at once).
@@ -42,8 +43,15 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
    - Setup checks each model's architecture (read from the GGUF header, looked up in the built library) and
      **load-tests** the model mini uses: a known architecture is not enough (Ollama's qwen3.5 9B conversion
      names a known architecture but this release rejects its rope metadata). Tested: gemma4 12B, Vulkan on
-     an RX 6700 XT, tool calls via `--jinja`, thinking via `--reasoning-format auto`, 64k context, q8_0 KV
-     cache.
+     an RX 6700 XT (64k context) and CUDA on an RTX 3070 (QAT build, 40k context, about 44 tokens/s), tool
+     calls via `--jinja`, thinking via `--reasoning-format auto`, q8_0 KV cache.
+   - **Presets** (`[presets.NAME]`) are named ways to run it: `gpu` (vulkan | cuda | cpu), `device`, `model`,
+     `ctx`, `models_max`, `extra_args`. `[llamacpp] preset` is the active one, laid over `[llamacpp]`.
+     `mini preset list`, `mini preset add NAME --gpu cuda --device CUDA0 --model M --ctx N [--args A]`,
+     `mini preset use NAME` (builds that backend if missing, rewrites the service, restarts it, points the
+     local tier at the preset's model). CUDA needs `sudo apt install nvidia-cuda-toolkit`. On 8 GB the 12B QAT
+     model fits with the vision projector kept on the CPU (`--no-mmproj-offload`) up to about 49k context;
+     the `rtx3070` preset uses 40960 for headroom.
    - Setup picks the GPU and the context size and runs the router as a systemd user service started at boot.
      It prints the `sudo apt` line for missing build tools.
 3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
@@ -67,8 +75,10 @@ files into the models folder layout (instant on the same disk, no copies); run t
 .venv/bin/python -m mini settings list|show|set|delete KEY
 ```
 
-Configuration lives in `config/mini.toml` (every key is documented in `mini/harness/config.py`). The UI has a
-config screen for the same file.
+Configuration lives in `config/mini.toml` (every key is documented in `mini/harness/config.py`). The UI's Config
+tab is a form for the common settings (switches, dropdowns, number fields) that saves only what you changed, in
+place, so the file's comments stay; a second sub-tab edits the raw TOML. Backends and presets are managed with
+`mini preset` and `mini setup`.
 
 ## How a task runs
 
@@ -115,18 +125,42 @@ config screen for the same file.
 | Time and turn limits | 20 min or 30 turns per tool creation / execution phase | Dialog: hint, restart, paid, stop |
 | Hard run cap | 3600 s per run, 1.5M local tokens per run | Stop |
 | Command policy | argv allowlist | Commands are argv lists and never touch a shell. Denials are logged. |
-| Hardware | Swap grows by more than 250 MiB | Abort the run. The baseline is taken after the model is loaded. |
+| Hardware | Swap grows by more than 250 MiB (`[watchdogs] swap_watch`, on by default) | Abort the run. The baseline is taken after the model is loaded. Growth is recorded even when the watchdog is off. |
 
 `tests/test_watchdogs.py` checks that each one fires exactly at its threshold. It also checks that the attempt
 budget stops at 10 and that restarts do not reset it.
+
+## Your folder: read-only in, reviewed changes out
+
+The folder you start `mini` in is shared with the agent **read-only** as `/host` (`[workspace]`; your home folder
+and `/` are never shared, and `enabled = false` turns it off). The plan-confirm dialog shows the shared folder.
+
+- The agent lists and reads `/host` itself (`list_files`, `read_file`), and tools get `/host` paths in their
+  inputs. "The current folder" means `/host`. No tool has to be built to list or read your files.
+- Listings are compact so a big folder cannot fill the model's context: names without their path, folders with
+  their item count, files with their size, `depth` 1 to 3, at most 60 lines / 4,000 characters (about 1,000
+  tokens), `.git`, `node_modules` and similar shown but not opened. The agent lists a subfolder to see inside it.
+  Files are read 8,000 characters at a time (`offset` for the rest).
+- Context guard: before each model call, older large tool results are shortened once the conversation passes 75%
+  of the local model's context; if the server still refuses a request as too long, they are shortened further and
+  the call is retried. When nothing is left to shorten the run stops with a clear message (it used to be reported
+  as unparseable tool calls).
+- Nothing is ever written to `/host` by a run. To change or add a file the agent writes the whole new file to
+  `out/<same relative path>` in the run's scratch folder (`out/src/a.py` for `/host/src/a.py`).
+- `mini apply [RUN]` (or `/apply` in the UI) shows one diff per file and copies them into the folder only
+  after you say yes (`--yes` skips the question). Paths are resolved first, so a symlink in the folder cannot
+  lead a copy outside it. `tests/test_workspace.py` checks this.
+- The llama-server prompt cache is capped (`--cache-ram 1024` in the default arguments). Without it the
+  server's RAM grew by about 560 MB per long prompt on a 7.7 GB machine until it swapped.
 
 ## Sandbox
 
 - Rootless Podman 4.9 (`[sandbox] engine`). Each run gets a fresh container: read-only root filesystem,
   `/tmp` as tmpfs, `--cap-drop ALL`, `no-new-privileges`, 1 GiB memory with no extra swap, 2 CPUs,
   256 PIDs and a timeout.
-- Mounts: the tool files (read-only) at `/tool` and the per-run scratch directory at `/work`, nothing else.
-  No host environment variables (`HOME=/tmp`), no credentials, no home directory.
+- Mounts: the tool files (read-only) at `/tool` and the per-run scratch directory at `/work`. When a folder is
+  shared (next section), that folder read-only at `/host` for tool *runs*, never for the tests that build a tool.
+  Nothing else. No host environment variables (`HOME=/tmp`), no credentials, no home directory.
 - Network: none by default. Declared and approved `host:port` targets put the container on a fresh
   `--internal` network with no route out. Each declared host resolves to an egress forwarder container
   (`sandbox/egress.py`), which forwards only to the allowlist and picks the destination by TLS SNI or HTTP
@@ -178,6 +212,9 @@ one is missing, which **questions** it asks and in what order, what it confirms 
 | `free` | OmniRoute combo `mini-free`: free cloud models with failover | Automatically, when local has used its 15 min or its attempt budget. Stays for the rest of the task |
 | `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Lasts one task |
 
+- Local only: set `[free] enabled = false`, `[paid] enabled = false` (Config tab: the two cloud switches). Then
+  nothing leaves the machine. `[routing] local_budget_s = 0` removes the local time limit per task (the default
+  900 s moves a task to free); `auto_escalate = false` stops the automatic move to free.
 - Config: `[local]`, `[free]`, `[paid]`, `[routing]` in `config/mini.toml`. Free and paid are OpenAI-compatible
   endpoints; the actual models behind `mini-free` and `mini-paid` are chosen in OmniRoute's dashboard.
 - The OmniRoute API key is read from `$OMNIROUTE_API_KEY` or `~/.config/mini/env` (`OMNIROUTE_API_KEY=...`). It is

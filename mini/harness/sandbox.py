@@ -211,7 +211,8 @@ class Sandbox:
         if argv[0] == "pip" and (len(argv) < 2 or argv[1] not in ("list", "show", "freeze")):
             raise PolicyError("pip may only list packages here; request packages through the spec instead")
 
-    def run(self, argv, work_dir, tool_dir=None, network=(), image=None, timeout=None, purpose="", on_message=None):
+    def run(self, argv, work_dir, tool_dir=None, network=(), image=None, timeout=None, purpose="", on_message=None,
+            workspace=None):
         """Run argv in a fresh container. Returns dict(exit_code, output, secs, timed_out, egress).
         on_message(msg) -> reply dict or None: the container's stdout carries JSON-line messages (a tool asking a
         question); each reply goes back on its stdin. Time spent in on_message does not count against the timeout."""
@@ -232,6 +233,8 @@ class Sandbox:
             args += ["--userns", "keep-id:uid=1000,gid=1000"]
         if tool_dir:
             args += ["-v", f"{os.path.realpath(tool_dir)}:/tool:ro"]
+        if workspace:                                  # the user's folder, read-only
+            args += ["-v", f"{os.path.realpath(workspace)}:/host:ro"]
         egress = None
         if targets:
             net, ename, ip = self._start_egress(targets, rid)
@@ -307,7 +310,7 @@ class Sandbox:
         return (-1 if timed_out else code), "".join(plain) + ("\n" + "".join(err) if err else ""), timed_out
 
     def invoke_tool(self, manifest, tool_dir, work_dir, inputs, timeout=None, on_message=None, settings=None,
-                    network=None):
+                    network=None, workspace=None):
         """Run a registered code tool on inputs. Returns (output dict, sandbox result)."""
         meta = os.path.join(work_dir, ".mini")
         os.makedirs(meta, exist_ok=True)
@@ -327,7 +330,7 @@ class Sandbox:
         try:
             res = self.run(["python", "/mini/runner.py"], work_dir, tool_dir=tool_dir, network=network, image=image,
                            timeout=timeout, purpose=f"invoke {manifest['name']} v{manifest.get('version', '?')}",
-                           on_message=on_message or (lambda msg: {"error": "no one to ask: pass this value in the inputs"}
+                           workspace=workspace, on_message=on_message or (lambda msg: {"error": "no one to ask: pass this value in the inputs"}
                                                      if msg.get("op") == "ask" else None))
         finally:
             if os.path.exists(setp):

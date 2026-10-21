@@ -11,7 +11,7 @@ Every trigger is logged as a "watchdog" event. Thresholds come from config [watc
 | empty reply / lost call | no tool call                            | one nudge                                   |
 | runaway output          | reply_max_tokens or reply_max_s         | "make smaller changes"                      |
 | time and turn limits    | task_wall_clock_s or task_turns         | ask the user                                |
-| hardware                | swap growth > N MiB                     | abort the run (hwmon.SwapWatch)             |
+| hardware                | swap growth > N MiB ([watchdogs] swap_watch) | abort the run (hwmon.SwapWatch)        |
 """
 import json
 import time

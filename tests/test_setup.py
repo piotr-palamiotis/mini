@@ -235,6 +235,35 @@ class SetupTest(unittest.TestCase):
                          "/b/llama-server --models-dir /m --models-max 1 --host 127.0.0.1 --port 8080 "
                          "--device Vulkan0 -ngl 999 -c 4096 --jinja --no-webui")
 
+    def test_preset_overlays_llamacpp_settings(self):
+        self.cfg["llamacpp"].update(models_dir="/m", device="Vulkan0", port=8080, ctx=4096, models_max=1, extra_args="--jinja")
+        setup.save_preset(self.cfg, "rtx", {"gpu": "cuda", "device": "CUDA0", "model": "g", "ctx": 8192})
+        self.assertEqual(self.cfg["presets"]["rtx"], {"gpu": "cuda", "device": "CUDA0", "model": "g", "ctx": 8192})
+        self.assertEqual(tomllib.loads(open(self.cfg.path).read())["presets"]["rtx"]["device"], "CUDA0")
+        self.cfg["llamacpp"]["preset"] = "rtx"
+        self.assertEqual(setup.router_args(self.cfg, "/b/llama-server"),
+                         "/b/llama-server --models-dir /m --models-max 1 --host 127.0.0.1 --port 8080 "
+                         "--device CUDA0 -ngl 999 -c 8192 --jinja --no-webui")
+        self.assertEqual(setup.llama_gpu(self.cfg), "cuda")
+        self.assertTrue(setup.llama_build_dir(self.cfg).endswith("build-cuda"))
+        self.assertTrue(setup.llama_build_dir(self.cfg, "vulkan").endswith("/build"))
+
+    def test_preset_rejects_bad_input(self):
+        for name, vals in (("bad name", {}), ("ok", {"gpu": "metal"})):
+            with self.assertRaises(setup.SetupError):
+                setup.save_preset(self.cfg, name, vals)
+
+    def test_use_preset_restores_the_old_one_when_it_fails(self):
+        setup.save_preset(self.cfg, "a", {"gpu": "cuda"})
+        with mock.patch.object(setup, "llama_server", return_value="/x"), \
+                mock.patch.object(setup, "setup_router", side_effect=setup.SetupError("boom")):
+            with self.assertRaises(setup.SetupError):
+                setup.use_preset(self.cfg, "a", ScriptUI())
+        self.assertEqual(self.cfg["llamacpp"]["preset"], "")
+        self.assertEqual(tomllib.loads(open(self.cfg.path).read())["llamacpp"]["preset"], "")
+        with self.assertRaises(setup.SetupError):
+            setup.use_preset(self.cfg, "nope", ScriptUI())
+
     def test_ollama_export_prints_moves(self):
         import subprocess
         store = os.path.join(self.tmp, "store")
@@ -255,6 +284,16 @@ class SetupTest(unittest.TestCase):
             f"mv {b}/sha256-bb /m/txt-2b/txt-2b.gguf", f"mv {b}/sha256-pp /m/txt-2b/mmproj-txt-2b.gguf",
             f"mv {b}/sha256-aa /m/vis-1b/vis-1b.gguf", "ln /m/txt-2b/mmproj-txt-2b.gguf /m/vis-1b/mmproj-vis-1b.gguf",
             f"mv {b}/sha256-dd /m-drafts/vis-1b-draft.gguf", "chown -R u: /m /m-drafts"])
+
+    def test_single_backend_model_wins_over_local_model(self):
+        from mini.agent.core import Agent
+        path = os.path.join(self.tmp, "one.toml")
+        open(path, "w").write('[local]\nmodel = "old"\nuse = ["llamacpp"]\n\n[backends.llamacpp]\nbackend = "openai"\n'
+                              'url = "http://127.0.0.1:9/v1"\nmodel = "new"\n')
+        self.assertEqual(config_mod.load(path)["local"]["model"], "new", "what the UI shows")
+        self.cfg["local"].update(model="old", use=["llamacpp"])
+        self.cfg["backends"] = {"llamacpp": {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "new"}}
+        self.assertEqual(Agent(self.cfg, label="one").model, "new", "what a task asks the server for")
 
     def test_task_falls_back_to_the_next_backend(self):
         from mini.agent.core import Agent

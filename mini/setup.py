@@ -22,19 +22,19 @@ import urllib.request
 
 from .harness import config as config_mod
 from .harness.backends import has_model
-from .harness.config import ENV_FILE, ROOT, local_candidates, secret
+from .harness.config import ENV_FILE, ROOT, llama_settings, local_candidates, secret
 
 LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
 # The llama.cpp release mini is tested with. setup builds exactly this one and checks that the built
 # llama-server is it. Tested: gemma4 12B (GGUF from Ollama's store) in router mode, Vulkan on AMD RDNA2
-# (RX 6700 XT), tool calls through --jinja, thinking through --reasoning-format auto, -fa on with a q8_0 KV cache
+# (RX 6700 XT) and CUDA on an RTX 3070, tool calls through --jinja, thinking through --reasoning-format auto, -fa on with a q8_0 KV cache
 # at 64k context. Not every GGUF loads: Ollama's qwen3.5 9B conversion is rejected by this release (rope metadata),
 # which is why setup load-tests the model it picks. To move to a newer release, change both values, run
 # `mini setup` and the test suite.
 LLAMA_TAG = "b11567"
 LLAMA_COMMIT = "972b5fc"
 BACKENDS = {                                # the local backends setup can set up; order = default preference
-    "llamacpp": "llama.cpp (llama-server, Vulkan GPU, every model in the models folder)",
+    "llamacpp": "llama.cpp (llama-server on the GPU: Vulkan or CUDA, every model in the models folder)",
     "custom": "another OpenAI-compatible server (LM Studio, vLLM, ...)",
 }
 DEFAULT_URLS = {"llamacpp": "http://127.0.0.1:8080/v1", "custom": "http://127.0.0.1:1234/v1"}
@@ -267,9 +267,22 @@ def llama_dir(cfg):
     return os.path.expanduser(cfg["llamacpp"]["dir"])
 
 
-def llama_server(cfg):
-    """The llama-server built in [llamacpp] dir, or None."""
-    p = os.path.join(llama_dir(cfg), "build", "bin", "llama-server")
+GPU_BACKENDS = ("vulkan", "cuda", "cpu")
+
+
+def llama_gpu(cfg):
+    """The llama.cpp backend the active preset (or [llamacpp]) asks for: vulkan | cuda | cpu."""
+    return llama_settings(cfg).get("gpu") or "vulkan"
+
+
+def llama_build_dir(cfg, gpu=None):
+    gpu = gpu or llama_gpu(cfg)
+    return os.path.join(llama_dir(cfg), "build" if gpu == "vulkan" else f"build-{gpu}")   # "build": the first, Vulkan one
+
+
+def llama_server(cfg, gpu=None):
+    """The llama-server built in [llamacpp] dir for the active backend, or None."""
+    p = os.path.join(llama_build_dir(cfg, gpu), "bin", "llama-server")
     return p if os.access(p, os.X_OK) else None
 
 
@@ -343,8 +356,8 @@ def load_test(url, model, timeout=600):
 
 
 def router_args(cfg, server):
-    lc = cfg["llamacpp"]
-    dev = f" --device {lc['device']} -ngl 999" if lc.get("device") else ""
+    lc = llama_settings(cfg)
+    dev = f" --device {lc['device']} -ngl 999" if lc.get("device") and lc.get("gpu") != "cpu" else ""
     return (f"{server} --models-dir {os.path.expanduser(lc['models_dir'])} --models-max {lc['models_max']} "
             f"--host 127.0.0.1 --port {lc['port']}{dev} -c {lc['ctx']} {lc['extra_args']} --no-webui")
 
@@ -355,11 +368,13 @@ def backend_checks(cfg, name, entry):
         return [Check(name, f"{BACKENDS.get(name, name)}: {entry['model']} at {entry['url']}", ok,
                       "" if ok else "not answering with that model",
                       fix=None if ok else lambda ui: setup_custom(cfg, ui), fix_text="set its URL and model name")]
-    out, lc = [], cfg["llamacpp"]
+    out, lc = [], llama_settings(cfg)
     server = llama_server(cfg)
+    gpu = llama_gpu(cfg)
     if not server:
-        return [Check("llama_install", f"llama.cpp {LLAMA_TAG} in {llama_dir(cfg)}", False, "not built there yet",
-                      fix=lambda ui: build_llama(cfg, ui), fix_text=f"build llama.cpp {LLAMA_TAG} with Vulkan (asks where)")]
+        return [Check("llama_install", f"llama.cpp {LLAMA_TAG} ({gpu}) in {llama_dir(cfg)}", False,
+                      f"no {gpu} build there yet",
+                      fix=lambda ui: build_llama(cfg, ui), fix_text=f"build llama.cpp {LLAMA_TAG} with {gpu} (asks where)")]
     have = llama_commit(server)
     right = have == LLAMA_COMMIT
     out.append(Check("llama_version", f"llama.cpp {LLAMA_TAG} ({LLAMA_COMMIT}) in {llama_dir(cfg)}", right,
@@ -408,13 +423,37 @@ def backend_checks(cfg, name, entry):
     return out
 
 
+def cuda_host_compiler():
+    """CUDA's nvcc refuses a host g++ newer than it knows (nvcc 12.0 - 12.3: g++ 12). The g++ to hand it, or None
+    when the default one is fine."""
+    v = sh(["nvcc", "--version"]).stdout
+    m = re.search(r"release (\d+)\.(\d+)", v)
+    g = re.search(r"(\d+)\.\d+\.\d+", sh(["g++", "-dumpfullversion"]).stdout)
+    if m and g and (int(m[1]), int(m[2])) < (12, 4) and int(g[1]) > 12:
+        return "g++-12"
+    return None
+
+
 def build_llama(cfg, ui):
-    """Check out the pinned llama.cpp release in [llamacpp] dir and build llama-server with Vulkan."""
-    missing = [b for b in ("git", "cmake", "g++", "glslc") if not shutil.which(b)]
-    if not os.path.exists("/usr/include/vulkan/vulkan.h"):
-        missing.append("libvulkan-dev")
+    """Check out the pinned llama.cpp release in [llamacpp] dir and build llama-server for the active GPU backend."""
+    gpu = llama_gpu(cfg)
+    missing = [b for b in ("git", "cmake", "g++") if not shutil.which(b)]
+    flags = []
+    if gpu == "vulkan":
+        missing += [b for b in ("glslc",) if not shutil.which(b)]
+        if not os.path.exists("/usr/include/vulkan/vulkan.h"):
+            missing.append("libvulkan-dev")
+        flags = ["-DGGML_VULKAN=ON"]
+    elif gpu == "cuda":
+        if not shutil.which("nvcc"):
+            missing.append("nvidia-cuda-toolkit")
+        else:
+            host = cuda_host_compiler()
+            if host and not shutil.which(host):
+                missing.append(host)
+            flags = ["-DGGML_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=native"] + ([f"-DCMAKE_CUDA_HOST_COMPILER={host}"] if host else [])
     if missing:
-        pk = {"g++": "build-essential", "glslc": "glslc"}
+        pk = {"g++": "build-essential"}
         raise SetupError("missing build tools; run: sudo apt install " +
                          " ".join(sorted({pk.get(m, m) for m in missing})) + " and then mini setup again")
     src = os.path.abspath(os.path.expanduser(ui.text("Where should llama.cpp live?", llama_dir(cfg))))
@@ -431,17 +470,18 @@ def build_llama(cfg, ui):
     head = sh(["git", "-C", src, "rev-parse", "--short=7", "HEAD"]).stdout.strip()
     if head != LLAMA_COMMIT:
         raise SetupError(f"{src} is at {head}, expected {LLAMA_TAG} ({LLAMA_COMMIT})")
-    _run(["cmake", "-B", "build", "-DGGML_VULKAN=ON", "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF",
+    bdir = os.path.basename(llama_build_dir(cfg))
+    _run(["cmake", "-B", bdir, *flags, "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF",
           "-DLLAMA_BUILD_EXAMPLES=OFF", "-DCMAKE_BUILD_TYPE=Release"], ui, cwd=src)
-    ui.say("building llama-server (10-20 minutes on 4 cores) ...")
-    _run(["cmake", "--build", "build", "--target", "llama-server", f"-j{max(1, (os.cpu_count() or 2) - 1)}"], ui,
+    ui.say(f"building llama-server for {gpu} (10-20 minutes on 4 cores) ...")
+    _run(["cmake", "--build", bdir, "--target", "llama-server", f"-j{max(1, (os.cpu_count() or 2) - 1)}"], ui,
          timeout=7200, cwd=src)
     os.makedirs(LOCAL_BIN, exist_ok=True)
     link = os.path.join(LOCAL_BIN, "llama-server")
     if os.path.lexists(link) and os.path.islink(link):
         os.remove(link)
     if not os.path.exists(link):
-        os.symlink(os.path.join(src, "build", "bin", "llama-server"), link)
+        os.symlink(os.path.join(src, bdir, "bin", "llama-server"), link)
     if sh(["systemctl", "--user", "is-active", "llama-server"]).stdout.strip() == "active":
         _run(["systemctl", "--user", "restart", "llama-server"], ui)         # serve with the new build
 
@@ -467,27 +507,95 @@ def gpu_devices(server):
 
 
 def setup_router(cfg, ui):
+    """Write and start the llama-server unit. With an active preset it asks nothing: the preset says what to run."""
     server = llama_server(cfg)
-    lc = cfg["llamacpp"]
-    devs = gpu_devices(server)
-    if devs:
-        best = max(devs, key=lambda d: d[2])
-        cur = next((d for d in devs if d[0] == lc.get("device")), best)
-        dev = ui.choice("Which GPU?", [f"{d[0]}: {d[1]} ({d[2]} MiB)" for d in devs],
-                        f"{cur[0]}: {cur[1]} ({cur[2]} MiB)").split(":")[0]
-    else:
-        dev = ""
-        ui.say("llama.cpp finds no GPU: models run on the CPU (slow).")
-    ctx = int(ui.text("Context size per model (tokens)", str(lc["ctx"])))
-    config_mod.set_values(cfg.path, {"llamacpp": {"device": dev, "ctx": ctx}})
-    lc.update(device=dev, ctx=ctx)
+    lc = llama_settings(cfg)
+    if not lc.get("preset"):
+        devs = gpu_devices(server)
+        if devs:
+            best = max(devs, key=lambda d: d[2])
+            cur = next((d for d in devs if d[0] == lc.get("device")), best)
+            dev = ui.choice("Which GPU?", [f"{d[0]}: {d[1]} ({d[2]} MiB)" for d in devs],
+                            f"{cur[0]}: {cur[1]} ({cur[2]} MiB)").split(":")[0]
+        else:
+            dev = ""
+            ui.say("llama.cpp finds no GPU: models run on the CPU (slow).")
+        ctx = int(ui.text("Context size per model (tokens)", str(lc["ctx"])))
+        config_mod.set_values(cfg.path, {"llamacpp": {"device": dev, "ctx": ctx}})
+        cfg["llamacpp"].update(device=dev, ctx=ctx)
     write_unit("llama-server", f"llama.cpp router over {os.path.expanduser(lc['models_dir'])} (mini local tier)",
                router_args(cfg, server), {}, ui)
     _wait(f"http://127.0.0.1:{lc['port']}/health", ui=ui)
     url = f"http://127.0.0.1:{lc['port']}/v1"
-    if cfg.get("backends", {}).get("llamacpp", {}).get("url") != url:
-        save_backend(cfg, "llamacpp", {"backend": "openai", "url": url,
-                                       "model": cfg.get("backends", {}).get("llamacpp", {}).get("model") or cfg["local"]["model"]})
+    have = cfg.get("backends", {}).get("llamacpp", {})
+    model = lc.get("model") or have.get("model") or cfg["local"]["model"]
+    if have.get("url") != url or have.get("model") != model:
+        save_backend(cfg, "llamacpp", {"backend": "openai", "url": url, "model": model})
+
+
+# ---------------------------------------------------------------- presets: named ways to run llama-server
+PRESET_KEYS = ("gpu", "device", "model", "ctx", "models_max", "extra_args")
+
+
+def preset_summary(name, p, active=False):
+    return (f"{'*' if active else ' '} {name:<16} {p.get('gpu', 'vulkan'):<7} {p.get('device') or '-':<9} "
+            f"{p.get('model') or '(model unchanged)'}  ctx {p.get('ctx', '(default)')}")
+
+
+def save_preset(cfg, name, values):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name or ""):
+        raise SetupError("a preset name is letters, digits, - and _")
+    if values.get("gpu", "vulkan") not in GPU_BACKENDS:
+        raise SetupError("gpu is one of: " + ", ".join(GPU_BACKENDS))
+    values = {k: v for k, v in values.items() if k in PRESET_KEYS and v not in (None, "")}
+    config_mod.set_values(cfg.path, {f"presets.{name}": values})
+    cfg.setdefault("presets", {}).setdefault(name, {}).update(values)
+
+
+def use_preset(cfg, name, ui):
+    """Make a preset the active one: builds llama.cpp for its backend if that is missing, rewrites the llama-server
+    unit and restarts it, and points the local tier at the preset's model."""
+    if name not in cfg.get("presets", {}):
+        raise SetupError(f"no preset {name!r}; known: " + (", ".join(cfg.get("presets", {})) or "none"))
+    old = cfg["llamacpp"].get("preset", "")
+    config_mod.set_values(cfg.path, {"llamacpp": {"preset": name}})
+    cfg["llamacpp"]["preset"] = name
+    try:
+        if not llama_server(cfg):
+            build_llama(cfg, ui)
+        setup_router(cfg, ui)
+    except Exception:
+        config_mod.set_values(cfg.path, {"llamacpp": {"preset": old}})
+        cfg["llamacpp"]["preset"] = old
+        raise
+    ui.say(f"preset {name} is active: " + preset_summary(name, llama_settings(cfg)).strip())
+
+
+def preset_cmd(cfg, action, name=None, opts=None, ui=None):
+    ui = ui or TerminalUI()
+    opts = opts or {}
+    active = cfg["llamacpp"].get("preset")
+    try:
+        if action == "list":
+            for n, p in cfg.get("presets", {}).items():
+                ui.say(preset_summary(n, p, n == active))
+            if not cfg.get("presets"):
+                ui.say("(no presets; mini preset add NAME --gpu cuda --device CUDA0 --model NAME --ctx N)")
+        elif action == "add":
+            if not name:
+                raise SetupError("usage: mini preset add NAME [--gpu G] [--device D] [--model M] [--ctx N] [--args ARGS]")
+            save_preset(cfg, name, {"gpu": opts.get("gpu") or "vulkan", "device": opts.get("device"),
+                                    "model": opts.get("model"), "ctx": opts.get("ctx"), "extra_args": opts.get("args")})
+            ui.say("saved: " + preset_summary(name, cfg["presets"][name]).strip() + "   (mini preset use " + name + ")")
+        elif action == "use":
+            use_preset(cfg, name or "", ui)
+        elif action == "show":
+            ui.say(json.dumps(llama_settings(cfg) if name in (None, active) else
+                              {**cfg["llamacpp"], **cfg.get("presets", {}).get(name, {})}, indent=1))
+    except (SetupError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+        ui.say(f"preset: {e}")
+        return 1
+    return 0
 
 
 def choose_model(cfg, ui):

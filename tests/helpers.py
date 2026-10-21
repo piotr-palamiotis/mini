@@ -8,13 +8,14 @@ from mini.harness.backends import Endpoint, FakeBackend
 
 def temp_config(**over):
     d = tempfile.mkdtemp(prefix="mini-test-")
-    cfg = config_mod.load()
+    cfg = config_mod.load(os.path.join(d, "no-such.toml"))      # the built-in defaults, never the user's settings
     cfg["paths"]["state"] = os.path.join(d, "state")
     cfg["paths"]["runs"] = os.path.join(d, "runs")
     cfg["approvals"]["mode"] = "auto"
     cfg["approvals"]["auto_approve"] = ["confirm", "plan", "permissions", "install", "cap"]
     cfg["local"]["backend"] = "fake"                  # never reach a real model server from a test
     cfg["local"]["use"] = []
+    cfg["llamacpp"]["preset"] = ""                    # tests set up their own llama.cpp settings, not the user's preset
     cfg["tools"]["auto_accept"] = True                # tests that check staging turn this off
     cfg["free"]["enabled"] = False
     cfg["paid"]["enabled"] = False

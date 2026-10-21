@@ -25,10 +25,19 @@ DEFAULTS = {
         "dir": "/mnt/disk_a/llama.cpp",      # source checkout and build of the pinned release
         "models_dir": "/mnt/disk_a/models",  # GGUF files: NAME.gguf, or NAME/ with the model and its mmproj-*.gguf
         "port": 8080,
-        "device": "",                        # e.g. Vulkan0; empty: setup asks (llama-server --list-devices)
+        "preset": "",                        # the active entry of [presets.*]; empty: the values below as they are
+        "gpu": "vulkan",                     # which llama.cpp build serves: vulkan | cuda | cpu
+        "device": "",                        # e.g. Vulkan0, CUDA0; empty: setup asks (llama-server --list-devices)
         "ctx": 65536,                        # context per model
         "models_max": 1,                     # models in memory at once; others load on demand
-        "extra_args": "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1",
+        "extra_args": "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024",
+    },
+    # Named ways to run llama-server, e.g. [presets.rtx3070]: gpu, device, model, ctx, models_max, extra_args.
+    # The preset named in [llamacpp] preset is laid over [llamacpp]; `mini preset use NAME` switches.
+    "presets": {},
+    "workspace": {                           # the folder mini is launched in, shared read-only as /host
+        "enabled": True,                     # edits go to out/ in the run's scratch folder; `mini apply` copies them over
+        "refuse": ["~", "/"],                # too broad to share: starting mini there shares nothing
     },
     "thinking": {                            # thinking per step
         "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,
@@ -50,6 +59,7 @@ DEFAULTS = {
         "fail_streak_restart": 3,
         "parse_error_retries": 5,
         "empty_reply_nudges": 1,
+        "swap_watch": True,                  # false: never abort a run for swap growth (it is still recorded)
         "swap_growth_mib": 250,
     },
     "sandbox": {
@@ -93,7 +103,7 @@ DEFAULTS = {
     },
     "routing": {
         "start": "local",                    # tier a task starts on: local | free | paid
-        "local_budget_s": 900,               # local model time per task; then the task moves to free
+        "local_budget_s": 900,               # local model time per task; then the task moves to free (0: no limit)
         "auto_escalate": True,               # local -> free without asking; paid is only ever the user's choice
     },
     "consult": {
@@ -142,6 +152,13 @@ def local_candidates(cfg):
     return [(n, {**cfg["local"], **cfg["backends"][n]}) for n in names]
 
 
+def llama_settings(cfg):
+    """[llamacpp] with the active preset laid over it (gpu, device, model, ctx, models_max, extra_args)."""
+    lc = dict(cfg["llamacpp"])
+    lc.update((cfg.get("presets") or {}).get(lc.get("preset") or "") or {})
+    return lc
+
+
 def secret(name):
     """A credential from the environment, else from ~/.config/mini/env (KEY=VALUE lines). Never from the repo."""
     if not name:
@@ -175,6 +192,7 @@ def load(path=None):
             data = tomllib.load(f)
     cfg = Config(_merge(DEFAULTS, data))
     cfg.path = path
+    cfg["local"] = local_candidates(cfg)[0][1]       # [local] shows the preferred backend's url and model
     return cfg
 
 

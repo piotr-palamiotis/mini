@@ -1,5 +1,6 @@
 """Every watchdog fires exactly at its configured threshold. No model, no sandbox."""
 import unittest
+from unittest import mock
 
 from mini.harness.watchdogs import Watchdogs
 from tests.helpers import temp_config
@@ -114,6 +115,16 @@ class WatchdogTest(unittest.TestCase):
         self.assertFalse(w.time_or_turns_exceeded())
         w2, _ = wd(**{"caps.task_wall_clock_s": 0})
         self.assertTrue(w2.time_or_turns_exceeded())
+
+    def test_swap_watch_can_be_turned_off(self):
+        from mini.agent.core import Agent
+        from tests.helpers import temp_config
+        for on in (True, False):
+            cfg = temp_config()
+            cfg["watchdogs"]["swap_watch"] = on
+            with mock.patch("mini.harness.hwmon.SwapWatch.begin", autospec=True, side_effect=lambda s: s) as begin:
+                Agent(cfg, label="swap").run_task("hi")
+            self.assertEqual(begin.called, on)
 
     def test_swap_watch_trips_once_above_limit(self):
         from mini.harness.hwmon import SwapWatch
