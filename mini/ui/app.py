@@ -486,8 +486,9 @@ class MiniApp(App):
 
     @work(thread=True)
     def check_tiers(self):
-        from ..setup import tier_status
+        from ..setup import ensure_local, tier_status
         try:
+            ensure_local(self.cfg, lambda m: self.call_from_thread(self.chat, f"[dim]{escape(m)}[/dim]"))
             st = tier_status(self.cfg)
         except Exception as e:   # noqa: BLE001 - a status probe must never break the UI
             st = {"status": (False, str(e))}

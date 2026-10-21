@@ -108,6 +108,34 @@ def gateway_root(url):
 
 
 # ================================================================ tier status (UI line and doctor)
+def ensure_local(cfg, say=print, wait_s=90):
+    """Start the llama-server user service when it is installed but not running, and wait until it answers.
+    True when the local endpoint is up. Only starts a unit mini wrote; anything else is left to setup/doctor."""
+    cands = local_candidates(cfg)
+    if not cands or cands[0][0] != "llamacpp" or cands[0][1].get("backend") == "fake":
+        return False
+    url = cands[0][1]["url"]
+    if http_json(url.rstrip("/") + "/models")[0] == 200:
+        return True
+    exists, active, _, ours = unit_state("llama-server")
+    if not (exists and ours):
+        return False
+    say("local llama-server is not running; starting it ...")
+    r = sh(["systemctl", "--user", "reset-failed", "llama-server"])
+    r = sh(["systemctl", "--user", "start", "llama-server"])
+    if r.returncode:
+        say("could not start llama-server: " + (r.stderr.strip() or "systemctl failed") + "; `mini doctor` has details")
+        return False
+    end = time.time() + wait_s
+    while time.time() < end:
+        if http_json(url.rstrip("/") + "/models")[0] == 200:
+            say("llama-server is up")
+            return True
+        time.sleep(1)
+    say("llama-server was started but does not answer yet; " + load_error())
+    return False
+
+
 def tier_status(cfg):
     """{tier: (ok, short text)} with quick probes."""
     out = {}

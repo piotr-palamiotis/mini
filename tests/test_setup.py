@@ -312,3 +312,28 @@ class SetupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnsureLocalTest(unittest.TestCase):
+    def cfg(self):
+        from mini.harness import config as config_mod
+        return config_mod.load(None)
+
+    def test_starts_an_installed_stopped_unit(self):
+        from unittest import mock
+        from mini import setup
+        calls, said = [], []
+        up = iter([(0, None), (200, {})])
+        with mock.patch.object(setup, "http_json", lambda *a, **k: next(up)), \
+             mock.patch.object(setup, "unit_state", lambda n: (True, False, True, True)), \
+             mock.patch.object(setup, "sh", lambda cmd, **k: calls.append(cmd) or setup.subprocess.CompletedProcess(cmd, 0, "", "")):
+            self.assertTrue(setup.ensure_local(self.cfg(), said.append, wait_s=5))
+        self.assertIn(["systemctl", "--user", "start", "llama-server"], calls)
+
+    def test_leaves_a_unit_mini_did_not_write(self):
+        from unittest import mock
+        from mini import setup
+        with mock.patch.object(setup, "http_json", lambda *a, **k: (0, None)), \
+             mock.patch.object(setup, "unit_state", lambda n: (True, False, True, False)), \
+             mock.patch.object(setup, "sh", side_effect=AssertionError("must not start")):
+            self.assertFalse(setup.ensure_local(self.cfg(), lambda m: None))

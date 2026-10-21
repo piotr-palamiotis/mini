@@ -85,6 +85,8 @@ def main(argv=None):
         from .setup import needs_setup
         if needs_setup(cfg):
             print("note: mini is not set up on this machine yet; `mini setup` helps, `mini doctor` checks", file=sys.stderr)
+        from .setup import ensure_local
+        ensure_local(cfg, lambda m: print(m, file=sys.stderr))
         if a.auto:
             cfg["approvals"]["mode"] = "auto"
             cfg["approvals"]["auto_approve"] = [k for k in a.auto_approve.split(",") if k]
