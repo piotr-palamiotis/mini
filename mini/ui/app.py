@@ -2,6 +2,11 @@
 with the prompt fixed below it, plus the attempt counter, cap indicator and the full-screen views (/registry,
 /config, /tools). A view replaces the stream on screen and Esc returns to it; the task keeps running underneath.
 
+Slash commands (commands.py) run here, never through the agent: `/` first in the prompt opens the autocomplete list
+(command names, then --field flags and enum values, then paths), core commands are cmd_<name>() methods, and a tool
+opens its form (toolform.py) or starts at once with its questions as cards (ask mode). A tool run is a tool block in
+the stream and a finished task of the conversation like any other (harness/toolrun.slash).
+
 The agent runs in a worker thread. The UI consumes the event stream (start / chunk / end, see harness/eventlog.py)
 directly: each block event drives one widget in the stream. A question block becomes a card at the bottom of the
 stream; the approval handler blocks the agent thread until the card is answered.
@@ -19,13 +24,14 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, Markdown, RichLog, Static,
+from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, Markdown, OptionList, RichLog, Static,
                              TabbedContent, TabPane, TextArea)
 
 from ..harness import checkpoint
 from ..harness import config as config_mod
 from ..harness import workspace as ws
-from . import settingsform
+from . import commands, settingsform
+from .toolform import ToolForm
 from ..harness.approvals import Decision
 from ..harness.config import TIERS
 from ..harness.registry import Registry, is_bundled
@@ -354,6 +360,17 @@ class ApprovalScreen(ModalScreen):
         self.dismiss(Decision(choice not in ("refuse", "stop", "cancel"), choice, note, "user"))
 
 
+class PromptInput(Input):
+    """The prompt. While the autocomplete list is open, Tab, Enter, the arrows and Esc go to it first."""
+
+    async def _on_key(self, event):
+        if self.app.completion_key(event.key):
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
+
+
 class MiniApp(App):
     TITLE = "mini"
     CSS = """
@@ -362,6 +379,8 @@ class MiniApp(App):
     #views { height: 1fr; }
     #stream { height: 1fr; }
     #prompt { height: 3; }
+    #complete { height: auto; max-height: 12; display: none; border: none; padding: 0 1; background: $boost; }
+    #complete.-show { display: block; }
     #views > ContentTabs { display: none; }
     #reg-table { height: 12; }
     #tools-table { height: 14; }
@@ -385,7 +404,7 @@ class MiniApp(App):
     """
     BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit"),
                 Binding("escape", "back", "Back to the stream")]
-    VIEWS = {"/registry": "tab-reg", "/config": "tab-cfg", "/tools": "tab-tools"}
+    VIEWS = {"registry": "tab-reg", "config": "tab-cfg", "tools": "tab-tools"}
 
     def __init__(self, cfg, backend_factory=None):
         super().__init__()
@@ -403,6 +422,9 @@ class MiniApp(App):
         self.blocks = {}                            # open block id -> widget
         self.card = None                            # the question card waiting for an answer
         self.last_text = ""
+        self.last_run = None                        # the newest checkpointed run of this session: /undo's default
+        self.commands = commands.Commands()         # core commands now, the registry's tools from refresh_registry()
+        self.sugg, self.sugg_i = [], None           # autocomplete: [(prompt text, label, description)], highlighted
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -433,11 +455,17 @@ class MiniApp(App):
                             yield TextArea(self.config_file_text(), language="toml", id="cfg-text")
                             yield Button("Save config", id="cfg-save", variant="primary")
                     yield Static(id="cfg-msg")
-            yield Input(placeholder="Give mini a task.  /attach PATH  /registry  /config  /tools  /help", id="prompt")
+            yield OptionList(id="complete")
+            yield PromptInput(placeholder="Give mini a task.  / for commands and tools  /help", id="prompt")
         yield Footer()
 
     def on_mount(self):
+        self.query_one("#complete", OptionList).can_focus = False       # the prompt keeps the keys
         self.update_status()
+        try:
+            Registry(self.cfg.abspath("state")).seed_bundled()     # the bundled tools are slash commands from the start
+        except Exception as e:   # noqa: BLE001 - the stream must come up; the first task seeds them again
+            self.chat(f"[yellow]bundled tools not installed: {escape(str(e))}[/yellow]")
         self.refresh_registry()
         self.refresh_tools()
         self.stream.anchor()                        # follow the newest block until the user scrolls up
@@ -528,10 +556,14 @@ class MiniApp(App):
         elif k == "run_end":
             self.busy = False
             self.close_blocks()
-            self.history.append({x: ev.get(x) for x in ("task", "status", "answer", "error", "created", "outputs")})
+            self.history.append({x: ev.get(x) for x in ("task", "status", "answer", "error", "created", "outputs", "via")})
+            if ev.get("checkpoint"):
+                self.last_run = ev.get("run_id")
             if ev["status"] == "success":
                 self.chat(f"[b green]done[/b green] in {ev['secs']} s")
                 answer = (ev.get("answer") or "").strip()
+                if ev.get("via") == "slash":                          # the tool block already shows its result
+                    answer = ""
                 if answer and answer not in self.last_text:           # the finish answer, unless it was streamed
                     block = TextBlock()
                     self.stream.mount(block)
@@ -599,61 +631,14 @@ class MiniApp(App):
     def submitted(self, ev):
         text = ev.value.strip()
         ev.input.value = ""
+        self.hide_completion()
         if not text:
             return
-        if text not in self.VIEWS:
-            self.show_view("tab-stream")
-        if text.startswith("/attach "):
-            p = os.path.expanduser(text[8:].strip())
-            if os.path.isfile(p):
-                self.attachments.append(os.path.abspath(p))
-                self.chat(f"attached {escape(p)}")
-            else:
-                self.chat(f"[red]no such file:[/red] {escape(p)}")
+        if self.commands.is_command(text):
+            self.run_command(text)
             return
-        if text == "/undo" or text.startswith("/undo "):
-            self.undo(text[5:].split())
-            return
-        if text == "/new":
-            self.history = []
-            self.chat("new conversation: earlier tasks are forgotten")
-            return
-        if text in self.VIEWS:
-            self.show_view(self.VIEWS[text])
-            return
-        if text == "/help":
-            self.chat("/attach PATH   attach a file to the next task\n/registry      open the registry browser\n"
-                      "/tools         list core capabilities and registry tools\n/config        open the settings\n"
-                      "/undo [RUN] [FILE...]   put back what the last task (or RUN) changed, or only those files\n"
-                      "/new           forget the conversation so far (each task is told about the earlier ones)\n"
-                      "/status        check the local model and the cloud tiers\n"
-                      "/model [local|free|paid]   model for the next task (paid lasts one task)\n"
-                      "Esc leaves /registry, /config and /tools; a running task keeps going.\n"
-                      "/config: switches and fields for the settings (saved in place), or the raw TOML.")
-            return
-        if text == "/status":
-            self.check_tiers()
-            return
-        if text.split()[0] == "/model":
-            arg = text[6:].strip()
-            if arg not in TIERS:
-                self.chat(f"next task: [b]{self.next_tier}[/b]. Choose: /model {'|'.join(TIERS)}")
-            elif not self.cfg[arg].get("enabled", True):
-                self.chat(f"[yellow]{arg} is disabled in the config[/yellow]")
-            else:
-                self.next_tier = arg
-                self.chat(f"next task runs on [b]{arg}[/b] ({escape(self.cfg[arg]['model'])})" +
-                          ("; after it, back to " + self.cfg["routing"]["start"] if arg == "paid" else ""))
-            self.update_status()
-            return
-        if self.busy:
-            self.chat("[yellow]a task is running[/yellow]")
-            return
-        if self.workspace_note and not self.workspace:
-            self.chat(f"[yellow]{escape(self.workspace_note)}[/yellow]")
-            return
-        if not self.git_ok:
-            self.offer_git_init()
+        self.show_view("tab-stream")
+        if not self.can_start():
             return
         self.chat(f"[b cyan]you:[/b cyan] {escape(text)}" + (f"  [dim](attached: {', '.join(os.path.basename(a) for a in self.attachments)})[/dim]" if self.attachments else ""))
         self.busy, self.cap_hit = True, ""
@@ -664,6 +649,184 @@ class MiniApp(App):
         self.update_status()
         self.run_task(text, list(self.attachments), tier)
         self.attachments = []
+
+    def can_start(self):
+        """Whether a task or a tool may start now (one at a time, in a git folder); says why not."""
+        if self.busy:
+            self.chat("[yellow]a task is running[/yellow]")
+            return False
+        if self.workspace_note and not self.workspace:
+            self.chat(f"[yellow]{escape(self.workspace_note)}[/yellow]")
+            return False
+        if not self.git_ok:
+            self.offer_git_init()
+            return False
+        return True
+
+    # ------------------------------------------------------------ slash commands
+    def run_command(self, text):
+        """A slash command, in the harness: a core command's cmd_<name>(), or a tool in its ui mode."""
+        c, args, problem = self.commands.parse(text)
+        if c is None or c.name not in self.VIEWS:
+            self.show_view("tab-stream")
+        if c is None:
+            self.chat(f"[yellow]{escape(problem)}[/yellow]")
+            return
+        if problem:
+            self.chat(f"[yellow]{escape(problem)}[/yellow]   usage: {escape(c.usage())}")
+            return
+        if not c.tool:
+            getattr(self, "cmd_" + c.name)(args)
+            return
+        if not self.can_start():
+            return
+        if c.mode == "form":
+            self.push_screen(ToolForm(c, args, self.folder()),
+                             lambda inputs: self.start_tool(c, inputs) if inputs is not None else self.chat(
+                                 f"[dim]/{c.name} cancelled[/dim]"))
+        else:
+            self.start_tool(c, args)
+
+    def start_tool(self, c, inputs):
+        if not self.can_start():                             # a task may have started while the form was open
+            return
+        line = c.line(inputs)
+        self.chat(f"[b cyan]you:[/b cyan] {escape(line)}")
+        self.busy, self.cap_hit = True, ""
+        self.update_status()
+        self.run_tool(c.tool, inputs, line)
+
+    @work(thread=True, exclusive=True)
+    def run_tool(self, name, inputs, line):
+        from ..harness import toolrun
+        cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
+        sink = lambda ev: self.call_from_thread(self.on_agent_event, ev)
+        m = Registry(cfg.abspath("state")).get(name)
+        if not m:
+            sink({"kind": "run_end", "task": line, "status": "failed", "error": f"no accepted tool named {name}",
+                  "secs": 0, "via": "slash"})
+            return
+        toolrun.slash(cfg, self.workspace, m, inputs, line, self.approval_handler, sinks=[sink])
+
+    def folder(self):
+        """The project folder: where paths complete from and relative paths point."""
+        return self.workspace or os.getcwd()
+
+    def cmd_model(self, args):
+        tier = args.get("tier")
+        if tier is None:
+            self.chat(f"next task: [b]{self.next_tier}[/b]. Choose: /model {'|'.join(TIERS)}")
+        elif not self.cfg[tier].get("enabled", True):
+            self.chat(f"[yellow]{tier} is disabled in the config[/yellow]")
+        else:
+            self.next_tier = tier
+            self.chat(f"next task runs on [b]{tier}[/b] ({escape(self.cfg[tier]['model'])})" +
+                      ("; after it, back to " + self.cfg["routing"]["start"] if tier == "paid" else ""))
+        self.update_status()
+
+    def cmd_new(self, args):
+        self.history = []
+        self.chat("new conversation: earlier tasks are forgotten")
+
+    def cmd_attach(self, args):
+        p = os.path.join(self.folder(), os.path.expanduser(args["path"]))     # an absolute path stays as it is
+        if os.path.isfile(p):
+            self.attachments.append(os.path.abspath(p))
+            self.chat(f"attached {escape(args['path'])}")
+        else:
+            self.chat(f"[red]no such file:[/red] {escape(args['path'])}")
+
+    def cmd_status(self, args):
+        self.check_tiers()
+
+    def cmd_undo(self, args):
+        self.undo(args.get("target") or [])
+
+    def cmd_registry(self, args):
+        self.show_view("tab-reg")
+
+    def cmd_config(self, args):
+        self.show_view("tab-cfg")
+
+    def cmd_tools(self, args):
+        self.show_view("tab-tools")
+
+    def cmd_help(self, args):
+        self.chat(escape(self.commands.help_text()) + "\n/config: switches and fields for the settings (saved in "
+                  "place), or the raw TOML.")
+
+    # ------------------------------------------------------------ autocomplete
+    @on(Input.Changed, "#prompt")
+    def prompt_changed(self, ev):
+        self.update_completion(ev.value)
+
+    def update_completion(self, value):
+        """Suggestions for the prompt text while it is a command being typed. The first is highlighted while a name
+        or a word is being typed; on an empty argument nothing is, so Enter runs the command (Tab picks)."""
+        self.sugg = self.commands.complete(value, self.folder()) if value.startswith("/") else []
+        if self.sugg and len(self.sugg) == 1 and self.sugg[0][0].rstrip() == value.rstrip() and value.endswith(" "):
+            self.sugg = []                                   # nothing left to offer
+        ol = self.query_one("#complete", OptionList)
+        ol.clear_options()
+        if not self.sugg:
+            self.sugg_i = None
+            ol.remove_class("-show")
+            return
+        for _, label, desc in self.sugg:
+            t = Text(label, style="bold")
+            if desc:
+                t.append("  " + clip(desc, 100), style="dim")
+            ol.add_option(t)
+        ol.add_class("-show")
+        self.set_highlight(0 if " " not in value or value.rpartition(" ")[2] else None)
+
+    def set_highlight(self, i):
+        self.sugg_i = i
+        ol = self.query_one("#complete", OptionList)
+        ol.highlighted = i
+        if i is not None:
+            ol.scroll_to_highlight()
+
+    def hide_completion(self):
+        self.sugg, self.sugg_i = [], None
+        ol = self.query_one("#complete", OptionList)
+        ol.clear_options()
+        ol.remove_class("-show")
+
+    def pick(self, i):
+        prompt = self.query_one("#prompt", Input)
+        prompt.value = self.sugg[i][0]
+        prompt.cursor_position = len(prompt.value)
+        self.update_completion(prompt.value)               # the next step: flags, values, the folder's entries
+
+    def completion_key(self, key):
+        """A key for the open autocomplete list. True when it was used: arrows move, Tab picks (the first when none
+        is highlighted), Enter picks the highlighted one unless the prompt already says it, Esc closes the list."""
+        if not self.sugg:
+            return False
+        n = len(self.sugg)
+        if key in ("down", "up"):
+            i = self.sugg_i
+            self.set_highlight(0 if i is None and key == "down" else n - 1 if i is None else (i + (1 if key == "down" else -1)) % n)
+            return True
+        if key == "tab":
+            self.pick(self.sugg_i or 0)
+            return True
+        if key == "enter":
+            value = self.query_one("#prompt", Input).value
+            if self.sugg_i is None or self.sugg[self.sugg_i][0].rstrip() == value.rstrip():
+                return False                                 # the prompt is complete: Enter runs it
+            self.pick(self.sugg_i)
+            return True
+        if key == "escape":
+            self.hide_completion()
+            return True
+        return False
+
+    @on(OptionList.OptionSelected, "#complete")
+    def clicked_suggestion(self, ev):
+        self.pick(ev.option_index)
+        self.query_one("#prompt", Input).focus()
 
     @work(thread=True, exclusive=True)
     def run_task(self, text, attachments, tier):
@@ -699,8 +862,8 @@ class MiniApp(App):
             return
         try:
             run, files = checkpoint.undo_args(self.workspace, args)
-            if run is None and not args and self.agent and self.agent.checkpoint:
-                run = self.agent.checkpoint.run_id           # default: this session's last task
+            if run is None and not args and self.last_run:
+                run = self.last_run                          # default: this session's last task or tool run
             run, done = checkpoint.undo(self.workspace, run, files)
         except checkpoint.GitError as e:
             self.chat(f"[red]undo:[/red] {escape(str(e))}")
@@ -763,6 +926,7 @@ class MiniApp(App):
 
     def refresh_registry(self):
         reg = Registry(self.cfg.abspath("state"))
+        self.commands = commands.Commands.load(reg)          # every accepted tool is a slash command
         t = self.query_one("#reg-table", DataTable)
         t.clear(columns=True)
         t.add_columns("tool", "active", "versions", "built by", "tests", "attempts")

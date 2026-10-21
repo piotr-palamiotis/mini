@@ -70,6 +70,24 @@ def wid(section, key):
     return f"f-{section}-{key}"
 
 
+def control(kind, value, id, options=None, allow_blank=False, **kw):
+    """One field's widget: switch -> Switch, select -> Select of options, anything else -> Input (int and float get
+    the num class). The tool forms (toolform.py) build their fields with it too."""
+    if kind == "switch":
+        return Switch(bool(value), id=id)
+    if kind == "select":
+        options = list(options or [])
+        if value is not None and value not in options:
+            options.append(value)
+        return Select([(o, o) for o in options], value=Select.NULL if value is None else value,
+                      allow_blank=allow_blank, id=id)
+    return Input("" if value is None else str(value), id=id, classes="num" if kind in ("int", "float") else "", **kw)
+
+
+def row(label, widget):
+    return Horizontal(Label(label, classes="lbl"), widget, classes="row")
+
+
 def widgets(cfg):
     """The form, as one scrollable column of widgets."""
     rows, advanced = [], []
@@ -77,17 +95,7 @@ def widgets(cfg):
         group = advanced if title in ADVANCED else rows
         group.append(Label(title, classes="grp"))
         for section, key, label, kind, *opt in fields:
-            value = cfg[section][key]
-            if kind == "switch":
-                control = Switch(bool(value), id=wid(section, key))
-            elif kind == "select":
-                options = list(opt[0])
-                if value not in options:
-                    options.append(value)
-                control = Select([(o, o) for o in options], value=value, allow_blank=False, id=wid(section, key))
-            else:
-                control = Input(str(value), id=wid(section, key), classes="num" if kind in ("int", "float") else "")
-            group.append(Horizontal(Label(label, classes="lbl"), control, classes="row"))
+            group.append(row(label, control(kind, cfg[section][key], wid(section, key), *opt)))
     rows.append(Collapsible(*advanced, title="Advanced: thinking, limits, watchdogs", collapsed=True,
                             id="cfg-advanced"))
     rows.append(Static("Backends and presets: `mini preset list|use`, `mini setup`. Anything else: the Raw TOML tab.",

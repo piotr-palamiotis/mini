@@ -2,6 +2,7 @@
   "name": "xlsx_edit",
   "description": "Set cell values in an existing Excel .xlsx workbook, keeping the other cells, styles and sheets. Strings starting with '=' become formulas; null clears a cell.",
   "kind": "code",
+  "ui": {"mode": "form", "fields": {"path": {"label": "Excel file", "filter": "*.xlsx"}}},
   "input_schema": {"type": "object", "required": ["path", "cells"], "properties": {
     "path": {"type": "string", "description": ".xlsx file in the working folder"},
     "cells": {"type": "object", "description": "{cell reference: value}, e.g. {\"B2\": 5, \"C2\": \"=B2*2\", \"A9\": \"note\"}; a value is a string, number, boolean or null"},

@@ -15,12 +15,12 @@ import os
 import shutil
 import sys
 
-from .harness import checkpoint, workspace as ws
+from .harness import checkpoint, toolrun, workspace as ws
 from .harness.ask import TerminalAsker
 from .harness.config import ROOT
 from .harness.eventlog import RunLog
 from .harness.registry import Registry
-from .harness.sandbox import PolicyError, Sandbox
+from .harness.sandbox import PolicyError
 from .harness.settings import MissingSetting, SettingsStore
 
 SHIM_MARK = "# mini tool shim"
@@ -46,15 +46,6 @@ def _parser(m):
     ap.add_argument("--json", dest="_json", action="store_true", help="print the raw JSON result")
     ap.add_argument("--inputs", dest="_inputs", type=json.loads, default=None, help="all inputs as one JSON object")
     return ap
-
-
-def _show(out, written):
-    for k, v in out.items():
-        text = v if isinstance(v, str) else json.dumps(v, indent=1, default=str)
-        print(f"{k}:" + ("\n" + text if "\n" in text else " " + text))
-    extra = [p for p in written if p not in {x for x in out.values() if isinstance(x, str)}]
-    if extra:
-        print("files: " + ", ".join(extra))
 
 
 def run_tool(cfg, name, argv):
@@ -91,41 +82,26 @@ def _run(cfg, m, name, a, folder, log, work):
         print(f"{name}: {e}", file=sys.stderr)
         return 2
     asker = TerminalAsker(work, folder=folder)
-    store = SettingsStore(cfg.abspath("state"))
     try:
-        settings = store.resolve(m, asker)
-        network = store.network(m, settings)
+        out, _res, written, refused, problem = toolrun.invoke(cfg, m, folder, work, inputs, log, asker,
+                                                              f"mini tool {name}", "terminal")
     except MissingSetting as e:
         print(f"{name}: {e}. Save it with: mini settings set KEY (or run {name} in a terminal)", file=sys.stderr)
         return 2
-    log.emit("invoke", tool=name, version=m["version"], inputs=inputs, settings=sorted(settings) or None, via="terminal")
-    try:
-        out, res = Sandbox(cfg, log).invoke_tool(m, m["_dir"], work, inputs, on_message=asker, settings=settings,
-                                                 network=network)
     except PolicyError as e:
         print(f"{name}: {e}", file=sys.stderr)
         return 1
-    items, refused = ws.changes(folder, work)
-    written = []
-    if items:
-        try:
-            cp = checkpoint.Checkpoint(folder, log.run_id, f"mini tool {name}")
-            cp.before_change([rel for rel, _ in items])
-            written = ws.export(folder, items)
-            cp.after_change(written)
-        except (checkpoint.GitError, PolicyError, OSError) as e:
-            print(f"{name}: files not written: {e}", file=sys.stderr)
+    if problem:
+        print(f"{name}: files not written: {problem}", file=sys.stderr)
     for rel, why in refused:
         print(f"not written: {rel} ({why})", file=sys.stderr)
-    log.emit("files_changed", paths=written, refused=refused or None)
-    log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
     if "error" in out:
         print(f"{name} failed: {out.get('message') or out['error']}", file=sys.stderr)
         return 1
     if a._json:
         print(json.dumps(out, indent=1, default=str))
-    else:
-        _show(out, written)
+    elif out or written:
+        print(toolrun.result_text(out, written))
     return 0
 
 

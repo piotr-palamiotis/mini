@@ -2,6 +2,7 @@
   "name": "docx_write",
   "description": "Create a Word .docx file from headings, paragraphs and tables. No images or custom styling.",
   "kind": "code",
+  "ui": {"mode": "form", "fields": {"path": {"label": "Word file to write"}, "blocks": {"label": "paragraphs"}}},
   "input_schema": {"type": "object", "required": ["path", "blocks"], "properties": {
     "path": {"type": "string", "description": ".docx file to write, relative to the working folder"},
     "blocks": {"type": "array", "description": "in order: a string (paragraph), {type: heading, text, level 1-3}, {type: paragraph, text} or {type: table, rows: [[cell]]} (first row is the header)"},

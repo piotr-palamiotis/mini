@@ -2,6 +2,7 @@
   "name": "pdf_read",
   "description": "Read a PDF file and return its text page by page. Plain-text PDFs only: scanned pages, encrypted files and exotic fonts are not supported.",
   "kind": "code",
+  "ui": {"mode": "form", "fields": {"path": {"label": "PDF file", "filter": "*.pdf"}}},
   "input_schema": {"type": "object", "required": ["path"], "properties": {
     "path": {"type": "string", "description": "PDF file in the working folder"},
     "first_page": {"type": "integer", "description": "first page to read, from 1 (default 1)"},

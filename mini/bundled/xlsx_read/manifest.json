@@ -2,6 +2,7 @@
   "name": "xlsx_read",
   "description": "Read an Excel .xlsx workbook and return each sheet as rows of values (numbers, text, booleans; formulas as their last calculated value). Charts, images and styles are ignored.",
   "kind": "code",
+  "ui": {"mode": "form", "fields": {"path": {"label": "Excel file", "filter": "*.xlsx"}}},
   "input_schema": {"type": "object", "required": ["path"], "properties": {
     "path": {"type": "string", "description": ".xlsx file in the working folder"},
     "sheet": {"type": "string", "description": "read only this sheet (default: all sheets)"},

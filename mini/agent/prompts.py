@@ -115,8 +115,17 @@ properties and descriptions; every value the tool may ask for is an input proper
 {{key, description, schema, secret}} for values saved once: schema is a JSON Schema object, secret lists its
 secret fields; empty list if none), interaction (the steps of the tool as the user experiences them, in
 order: which settings it needs and what happens when one is missing, which questions it asks and when,
-confirmations, the action, the result), permissions (network: list of "host:port" or "setting:<key>";
-packages: {{"apt": [...], "pip": [...]}}), edge_cases (list of short strings). The user reviews this plan."""
+confirmations, the action, the result), ui (how the user runs it as a slash command in mini, see below),
+permissions (network: list of "host:port" or "setting:<key>"; packages: {{"apt": [...], "pip": [...]}}),
+edge_cases (list of short strings). The user reviews this plan.
+
+In input_schema, give a file input "format": "file" and a password or token "format": "password". ui is
+{{"mode": "form" or "ask", "order": [property, ...], "fields": {{property: {{"label": "...", "multiline": true,
+"filter": "*.csv"}}}}}}, every part optional: "form" when the inputs are independent fields filled in at once (a
+title, a recipient, a message, attachments), "ask" when the tool drives a dialogue (questions that depend on
+earlier answers, or no fixed set of inputs). order lists the fields shown first; label is a short field name;
+multiline is for long text such as a message body; filter limits a file picker. Hints may only name input_schema
+properties."""
 
 CODE_FILE = """{intro}Write {path} now: {what}
 Reply with only the complete file as one fenced code block, no tool call:

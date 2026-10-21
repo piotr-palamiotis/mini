@@ -19,6 +19,7 @@ from . import codeblocks, prompts
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE, is_bundled
 from ..harness.sandbox import PolicyError, validate_packages, validate_targets
+from ..harness import toolui
 from ..harness.settings import KEY_RE, validate_declarations
 from ..harness.lessons import format_lessons
 
@@ -28,7 +29,7 @@ T_SPEC = fn("write_spec", "Write the spec of the new tool.", {
     "name": S, "description": S, "input_schema": OBJ, "output_schema": OBJ,
     "settings": {"type": "array", "items": {"type": "object", "properties": {
         "key": S, "description": S, "schema": OBJ, "secret": {"type": "array", "items": S}}}},
-    "interaction": {"type": "array", "items": S},
+    "interaction": {"type": "array", "items": S}, "ui": OBJ,
     "permissions": {"type": "object", "properties": {"network": {"type": "array", "items": S},
                                                      "packages": {"type": "object"}}},
     "edge_cases": {"type": "array", "items": S}}, ["name", "description", "input_schema", "output_schema", "edge_cases"])
@@ -41,10 +42,10 @@ T_REPLACE_LINES = fn("replace_lines", "Replace lines start..end (inclusive, numb
                      ["path", "start", "end", "new"])
 T_REWRITE = fn("rewrite_file", "Replace a whole file. The harness then asks you for the new content.", {"path": S}, ["path"])
 T_RUN_TESTS = fn("run_tests", "Run the tests in the sandbox.", {})
-T_UPDATE_SPEC = fn("update_spec", "Change the spec: description, schemas, settings, interaction, permissions (network, "
-                   "packages) or edge cases. Permission or package increases need the user's approval.",
+T_UPDATE_SPEC = fn("update_spec", "Change the spec: description, schemas, settings, interaction, ui hints, permissions "
+                   "(network, packages) or edge cases. Permission or package increases need the user's approval.",
                    {"description": S, "input_schema": OBJ, "output_schema": OBJ, "settings": {"type": "array"},
-                    "interaction": {"type": "array", "items": S},
+                    "interaction": {"type": "array", "items": S}, "ui": OBJ,
                     "permissions": {"type": "object"}, "edge_cases": {"type": "array", "items": S}})
 T_SANDBOX = fn("run_in_sandbox", "Run one inspection command in the tool's sandbox: an argv list, no shell, "
                "e.g. [\"python\", \"-c\", \"import x; print(x.__version__)\"]. Tool files are in /tool (read-only), "
@@ -105,7 +106,8 @@ class Creator:
         shutil.rmtree(self.build, ignore_errors=True)
         shutil.copytree(manifest["_dir"], os.path.join(self.build, "files"))
         self.files_dir = os.path.join(self.build, "files")
-        keys = ("name", "description", "input_schema", "output_schema", "settings", "interaction", "permissions", "edge_cases")
+        keys = ("name", "description", "input_schema", "output_schema", "settings", "interaction", "ui", "permissions",
+                "edge_cases")
         self.spec = {k: manifest.get(k) for k in keys}
         self.approved_perms = self._norm_perms(manifest.get("permissions"))
         self.image = a.sandbox.ensure_image(self.approved_perms["packages"])
@@ -212,7 +214,7 @@ class Creator:
                      "secret": list(d.get("secret") or [])} for d in s.get("settings") or []]
         return {"name": s["name"], "description": s["description"].strip(), "input_schema": s["input_schema"],
                 "output_schema": s["output_schema"], "settings": settings,
-                "interaction": [str(x) for x in s.get("interaction") or []],
+                "interaction": [str(x) for x in s.get("interaction") or []], "ui": s.get("ui") or {},
                 "permissions": self._norm_perms(s.get("permissions"), settings),
                 "edge_cases": [str(e) for e in s.get("edge_cases") or []]}
 
@@ -241,6 +243,9 @@ class Creator:
             return problem
         if not isinstance(s.get("interaction") or [], list):
             return "interaction must be a list of short steps."
+        problem = toolui.validate(s.get("ui"), s["input_schema"])     # hints name only input_schema properties
+        if problem:
+            return problem
         try:
             self._norm_perms(s.get("permissions"), s.get("settings") or [])
         except PolicyError as e:
@@ -562,9 +567,12 @@ class Creator:
             return f"{path} updated. Current content:\n{codeblocks.numbered(cur)}", None
         if name == "update_spec":
             spec = dict(self.spec)
-            for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction"):
+            for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction", "ui"):
                 if args.get(k):
                     spec[k] = args[k]
+            problem = toolui.validate(spec.get("ui"), spec["input_schema"])
+            if problem:
+                return f"Spec change rejected: {problem}", None
             if "settings" in args:
                 problem = validate_declarations(args["settings"] or [])
                 if problem:

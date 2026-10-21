@@ -206,6 +206,15 @@ class Agent:
     @staticmethod
     def _past(h):
         cut = lambda v, n: (str(v) if v else "").replace("\n", " ")[:n]
+        if h.get("via") == "slash":                        # the user ran a tool directly, from a slash command
+            line = f"- the user ran the tool {cut(h.get('task'), 300)} themselves (not you) -> {h.get('status')}"
+            if h.get("error"):
+                line += f"; error: {cut(h['error'], 300)}"
+            if h.get("answer"):
+                line += f"; its result: {cut(h['answer'], 600)}"
+            if h.get("outputs"):
+                line += f"; files written: {cut(h['outputs'], 150)}"
+            return line
         line = f"- the user asked: {cut(h.get('task'), 300)} -> {h.get('status')}"
         if h.get("error"):
             line += f"; error: {cut(h['error'], 300)}"

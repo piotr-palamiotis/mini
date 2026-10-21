@@ -2,6 +2,7 @@
   "name": "pdf_create",
   "description": "Create a simple text-only PDF (A4, wrapped lines, several pages if needed) from a string. No images, tables or styling.",
   "kind": "code",
+  "ui": {"mode": "form", "order": ["path", "title", "text"], "fields": {"path": {"label": "PDF file to write"}, "text": {"multiline": true}}},
   "input_schema": {"type": "object", "required": ["path", "text"], "properties": {
     "path": {"type": "string", "description": "PDF file to write, relative to the working folder"},
     "text": {"type": "string", "description": "the body; a newline starts a new line"},

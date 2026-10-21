@@ -14,8 +14,9 @@ Bundled tools (mini/bundled, the document tools) are seeded into the same layout
 reserved: install() refuses a manifest that does not carry the digest of the bundled files, so a task can neither
 shadow nor overwrite them.
 
-Manifest: name, version, kind, description, input_schema, output_schema, permissions, edge_cases, files,
-test_file, test_results, created_by {provider, model}, attempts_used, created_at, image, parent_version, approvals.
+Manifest: name, version, kind, description, input_schema, output_schema, ui (slash-command hints, harness/toolui.py),
+permissions, edge_cases, files, test_file, test_results, created_by {provider, model}, attempts_used, created_at,
+image, parent_version, approvals.
 
 search() is a plain token-overlap ranking over name, description and schema field names. Anything smarter
 (semantic matching, composition planning) is the agent's job.

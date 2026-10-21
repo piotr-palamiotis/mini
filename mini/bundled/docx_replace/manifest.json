@@ -2,6 +2,7 @@
   "name": "docx_replace",
   "description": "Find and replace text in a Word .docx file, keeping its formatting. Matches text even when it is split over formatting runs. Body text only (not headers or footers).",
   "kind": "code",
+  "ui": {"mode": "form", "order": ["path", "find", "replace"], "fields": {"path": {"label": "Word file", "filter": "*.docx"}}},
   "input_schema": {"type": "object", "required": ["path", "find", "replace"], "properties": {
     "path": {"type": "string", "description": ".docx file in the working folder"},
     "find": {"type": "string", "description": "text to find (one line, case sensitive)"},

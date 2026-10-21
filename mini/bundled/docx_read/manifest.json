@@ -2,6 +2,7 @@
   "name": "docx_read",
   "description": "Read a Word .docx file and return its paragraphs (with style names) and tables in document order, plus the plain text. Headers, footers, comments and images are not read.",
   "kind": "code",
+  "ui": {"mode": "form", "fields": {"path": {"label": "Word file", "filter": "*.docx"}}},
   "input_schema": {"type": "object", "required": ["path"], "properties": {
     "path": {"type": "string", "description": ".docx file in the working folder"}}},
   "output_schema": {"type": "object", "properties": {
