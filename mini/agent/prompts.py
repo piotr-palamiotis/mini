@@ -90,8 +90,8 @@ command: with all values as arguments in one line, or with none and the tool ask
   current task except as documented defaults.
 - test_tool.py uses pytest, `from tool import run` and `from mini_io import ScriptedIO, MissingInput`.
   ScriptedIO(answers={key: value}, settings={key: value}, inputs={...}) answers questions by key and records
-  them in .asked; a missing answer raises MissingInput. Call run(inputs, io) with it. Write at least one
-  test per edge case in the spec, including the questions asked when inputs are missing. Test only behaviour
+  them in .asked; a missing answer raises MissingInput. Call run(inputs, io) with it. Write one test of the
+  normal use, then one test per edge case in the spec, including the questions asked when inputs are missing. Test only behaviour
   the task or the spec states. For input the task does not define (malformed or ambiguous input, what a
   library does with it), write no test: you would be guessing, and a wrong guess costs attempts.
 - Tests build their own inputs with known content (deterministic, fixed seeds) under pytest's tmp_path, and
@@ -122,7 +122,11 @@ secret fields; empty list if none), interaction (the steps of the tool as the us
 order: which settings it needs and what happens when one is missing, which questions it asks and when,
 confirmations, the action, the result), ui (how the user runs it as a slash command in mini, see below),
 permissions (network: list of "host:port" or "setting:<key>"; packages: {{"apt": [...], "pip": [...]}}),
-edge_cases (list of short strings). The user reviews this plan.
+edge_cases (list of short strings, each "situation -> expected result"). List only situations whose result the
+task states or the tool's job settles (a required input missing, a file that does not exist, a value outside an
+allowed set). Do not list input whose handling the task leaves open (malformed, empty or unusual input, how a
+library treats it, permissions): the tool lets the library's own error or behaviour stand, and nothing is tested
+for it. Every edge case becomes a test, so a guessed one costs attempts. The user reviews this plan.
 
 In input_schema, give a file input "format": "file" and a password or token "format": "password". ui is
 {{"mode": "form" or "ask", "order": [property, ...], "fields": {{property: {{"label": "...", "multiline": true,
@@ -140,8 +144,10 @@ Reply with only the complete file as one fenced code block, no tool call:
 ```"""
 
 WHAT_TOOL = "the tool, with `def run(inputs: dict, io) -> dict`, following the interaction steps in the spec."
-WHAT_TESTS = ("pytest tests with `from tool import run` and `from mini_io import ScriptedIO, MissingInput`, at least "
-              "one test per edge case: {edge_cases}")
+WHAT_TESTS = ("pytest tests with `from tool import run` and `from mini_io import ScriptedIO, MissingInput`: first "
+              "one test of the normal use the task describes, asserting the exact expected output; then one test per "
+              "edge case, asserting its stated result: {edge_cases}. No other tests: behaviour the task and the spec "
+              "do not state is not tested.")
 
 REWRITE = """Send the complete new {path} now as one fenced code block, no tool call:
 

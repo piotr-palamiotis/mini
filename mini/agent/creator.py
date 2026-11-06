@@ -321,11 +321,21 @@ class Creator:
         return self._after_test(verdict) or self._fix_loop()
 
     def _edge_case_gap(self):
+        gaps = []
         tests = open(os.path.join(self.files_dir, "test_tool.py")).read().count("def test_")
         need = len(self.spec["edge_cases"])
         if tests < need:
-            return (f"Saved, but test_tool.py has {tests} tests for {need} edge cases. Add tests so that every edge "
-                    f"case in the spec is covered, then call `run_tests`.")
+            gaps.append(f"test_tool.py has {tests} tests for {need} edge cases. Add tests so that every edge case in "
+                        f"the spec is covered.")
+        unknown = ask_keys_outside_schema(open(os.path.join(self.files_dir, "tool.py")).read(), self.spec)
+        if unknown:
+            props = sorted((self.spec.get("input_schema") or {}).get("properties") or {})
+            gaps.append(f"tool.py calls io.ask with keys that are not input_schema properties: {', '.join(unknown)}. "
+                        f"A caller answers a question by passing its key in the inputs, so every io.ask key must be an "
+                        f"input property (now: {', '.join(props) or 'none'}). Use a property name as the key, or add "
+                        f"the property with `update_spec`.")
+        if gaps:
+            return "Saved, but " + " ".join(gaps) + " Then call `run_tests`."
         return ""
 
     def _hash(self):
@@ -728,3 +738,21 @@ class Creator:
         a.created.append({"name": manifest["name"], "version": v, "created_by": created_by,
                           "attempts": manifest["attempts_used"], "restarts": self.restarts})
         return a.registry.get(manifest["name"])
+
+
+def ask_keys_outside_schema(source, spec):
+    """Literal keys of io.ask(...) calls in tool source that the spec's input_schema does not declare."""
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    props = set((spec.get("input_schema") or {}).get("properties") or {})
+    keys = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "ask":
+            arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "key"), None)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value not in props \
+                    and arg.value not in keys:
+                keys.append(arg.value)
+    return keys
