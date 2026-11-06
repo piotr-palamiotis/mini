@@ -18,7 +18,7 @@ import time
 from . import codeblocks, prompts
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE, is_bundled
-from ..harness.sandbox import PolicyError, validate_packages, validate_targets
+from ..harness.sandbox import PolicyError, repair_argv, validate_packages, validate_targets
 from ..harness import toolui
 from ..harness.settings import KEY_RE, validate_declarations
 from ..harness.lessons import format_lessons
@@ -476,8 +476,11 @@ class Creator:
                 name, args = call["name"], call["arguments"] or {}
                 guard = a.wd.on_call(name, args)
                 if guard == "block":
-                    t.result(name, f"BLOCKED: you made this exact call {a.wd.call_streak} times in a row. "
-                                   "It will not run again. Do something different.")
+                    if a.wd.call_streak >= 3 * a.wd.w["identical_call_repeat"]:
+                        raise AgentStop(f"stuck repeating {name} with the same arguments")
+                    t.result(name, f"BLOCKED: you made this exact call {a.wd.call_streak} times in a row, and it gave: "
+                                   f"{trim(a.wd.last_text, 300)}\nIt will not run again. Change the arguments or use "
+                                   "a different tool.")
                     continue
                 note = "\nWarning: you just made this same call. A third identical call in a row will be blocked." \
                     if guard == "warn" else ""
@@ -590,7 +593,7 @@ class Creator:
             a.log.emit("spec", spec=spec, updated=True)
             return "Spec updated. " + msg, None
         if name == "run_in_sandbox":
-            argv = args.get("argv")
+            argv = repair_argv(args.get("argv"))
             try:
                 work = os.path.join(self.build, "testwork")
                 os.makedirs(work, exist_ok=True)
@@ -674,9 +677,6 @@ class Creator:
     def _budget_exhausted(self):
         a = self.a
         self._record_lesson("failed")
-        if a.auto_escalate(f"{a.wd.attempts} attempts on {self.spec['name']} failed on the local model"):
-            self._handover()
-            return None
         choice = self._consult_user()
         if choice == "advice":
             return None

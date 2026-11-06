@@ -48,8 +48,7 @@ def main(argv=None):
     r.add_argument("--auto", action="store_true")
     r.add_argument("--auto-approve", default="confirm,plan,permissions,install,cap")
     r.add_argument("--no-confirm", action="store_true")
-    r.add_argument("--model", choices=["local", "free", "paid"], help="tier to start on (default: routing.start)")
-    r.add_argument("--no-escalate", action="store_true", help="stay on the start tier")
+    r.add_argument("--model", choices=["local", "free", "paid"], help="tier to run on (default: local)")
     r.add_argument("--label", default="")
     r.add_argument("--quiet", action="store_true")
     g = sub.add_parser("tools", aliases=["registry"])
@@ -92,8 +91,6 @@ def main(argv=None):
             cfg["approvals"]["auto_approve"] = [k for k in a.auto_approve.split(",") if k]
         if a.no_confirm:
             cfg["approvals"]["confirm_first"] = False
-        if a.no_escalate:
-            cfg["routing"]["auto_escalate"] = False
         from .harness import checkpoint, workspace as ws
         folder, why = ws.resolve(cfg)
         if why:

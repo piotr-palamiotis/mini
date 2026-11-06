@@ -11,7 +11,7 @@ import os
 import shutil
 import time
 
-from . import checkpoint, journal, toolui, workspace as ws
+from . import checkpoint, gates, journal, toolui, workspace as ws
 from .approvals import ApprovalGate
 from .ask import GateAsker
 from .eventlog import JournalSink, RunLog
@@ -40,12 +40,13 @@ def invoke(cfg, m, folder, work, inputs, log, asker, task, via, checkpointed=Tru
     written, problem = [], ""
     if items:
         try:
-            cp = checkpoint.Checkpoint(folder, log.run_id, task) if checkpointed else None
-            if cp:
-                cp.before_change([rel for rel, _ in items])
-            written = ws.export(folder, items)
-            if cp:
-                cp.after_change(written)
+            with gates.FOLDER.hold(on_wait=lambda: log.emit("gate", gate="folder", state="waiting")):
+                cp = checkpoint.Checkpoint(folder, log.run_id, task) if checkpointed else None
+                if cp:
+                    cp.before_change([rel for rel, _ in items])
+                written = ws.export(folder, items)
+                if cp:
+                    cp.after_change(written)
         except (checkpoint.GitError, PolicyError, OSError) as e:
             problem = str(e)
     log.emit("files_changed", paths=written, refused=refused or None)

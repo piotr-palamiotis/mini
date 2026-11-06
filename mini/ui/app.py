@@ -31,6 +31,8 @@ from ..harness import checkpoint
 from ..harness import config as config_mod
 from ..harness import workspace as ws
 from . import commands, settingsform
+from . import session as session_mod
+from .session import Session
 from .toolform import ToolForm
 from ..harness.approvals import Decision
 from ..harness.config import TIERS
@@ -377,7 +379,8 @@ class MiniApp(App):
     #status { height: 1; background: $boost; padding: 0 1; }
     #col { height: 1fr; }
     #views { height: 1fr; }
-    #stream { height: 1fr; }
+    #sessions { height: 1fr; }
+    .stream { height: 1fr; }
     #prompt { height: 3; }
     #complete { height: auto; max-height: 12; display: none; border: none; padding: 0 1; background: $boost; }
     #complete.-show { display: block; }
@@ -403,28 +406,121 @@ class MiniApp(App):
     #cfg-buttons Button { margin-right: 1; }
     """
     BINDINGS = [Binding("ctrl+r", "refresh_registry", "Refresh registry"), Binding("ctrl+c", "quit", "Quit"),
-                Binding("escape", "back", "Back to the stream")]
+                Binding("escape", "back", "Back to the stream"), Binding("ctrl+t", "new_session", "New session"),
+                Binding("alt+w", "close_session", "Close session")] + [
+        Binding(f"alt+{i}", f"goto_session({i})", show=False) for i in range(1, 10)]
     VIEWS = {"registry": "tab-reg", "config": "tab-cfg", "tools": "tab-tools"}
 
-    def __init__(self, cfg, backend_factory=None):
+    def __init__(self, cfg, backend_factory=None, sessions_file=None):
         super().__init__()
         self.cfg = cfg
         self.backend_factory = backend_factory      # tests inject a scripted model
-        self.agent = None
         self.workspace, self.workspace_note = (None, "") if backend_factory else ws.resolve(cfg)   # the launch folder
         self.git_ok = self.workspace is None or checkpoint.is_repo(self.workspace)     # tasks wait for a repository
-        self.history = []                           # finished tasks of this conversation; every new task is told about them
-        self.attachments = []
-        self.next_tier = cfg["routing"]["start"]
-        self.attempt = (0, cfg["caps"]["attempts_per_tool"], self.next_tier)
-        self.cap_hit = ""
-        self.busy = False
-        self.blocks = {}                            # open block id -> widget
-        self.card = None                            # the question card waiting for an answer
-        self.last_text = ""
-        self.last_run = None                        # the newest checkpointed run of this session: /undo's default
+        self.sessions_file = sessions_file or session_mod.sessions_path(self.workspace)    # None: nothing is kept
+        saved, active = session_mod.load(self.sessions_file, cfg["caps"]["attempts_per_tool"]) if self.sessions_file else ([], None)
+        self.sessions = saved or [Session(1, "1", "local", cfg["caps"]["attempts_per_tool"])]
+        self.active = next((x for x in self.sessions if x.n == active), self.sessions[0])
+        for x in self.sessions:
+            if not self.tier_on(x.tier):
+                x.tier = "local"                         # a cloud tier switched off since
+        self._ctx = None                            # the session an agent event belongs to, while it is handled
+        self.session_n = max(x.n for x in self.sessions)
         self.commands = commands.Commands()         # core commands now, the registry's tools from refresh_registry()
         self.sugg, self.sugg_i = [], None           # autocomplete: [(prompt text, label, description)], highlighted
+
+    @property
+    def s(self):
+        """The session the code is working for: the one an event belongs to, else the one on screen."""
+        return self._ctx or self.active
+
+    @property
+    def agent(self):
+        return self.s.agent
+
+    @agent.setter
+    def agent(self, v):
+        self.s.agent = v
+
+    @property
+    def history(self):
+        return self.s.history
+
+    @history.setter
+    def history(self, v):
+        self.s.history = v
+
+    @property
+    def attachments(self):
+        return self.s.attachments
+
+    @attachments.setter
+    def attachments(self, v):
+        self.s.attachments = v
+
+    @property
+    def attempt(self):
+        return self.s.attempt
+
+    @attempt.setter
+    def attempt(self, v):
+        self.s.attempt = v
+
+    @property
+    def cap_hit(self):
+        return self.s.cap_hit
+
+    @cap_hit.setter
+    def cap_hit(self, v):
+        self.s.cap_hit = v
+
+    @property
+    def busy(self):
+        return self.s.busy
+
+    @busy.setter
+    def busy(self, v):
+        self.s.busy = v
+
+    @property
+    def blocks(self):
+        return self.s.blocks
+
+    @blocks.setter
+    def blocks(self, v):
+        self.s.blocks = v
+
+    @property
+    def card(self):
+        return self.s.card
+
+    @card.setter
+    def card(self, v):
+        self.s.card = v
+
+    @property
+    def last_text(self):
+        return self.s.last_text
+
+    @last_text.setter
+    def last_text(self, v):
+        self.s.last_text = v
+
+    @property
+    def last_run(self):
+        return self.s.last_run
+
+    @last_run.setter
+    def last_run(self, v):
+        self.s.last_run = v
+
+    @property
+    def next_tier(self):
+        return self.s.tier
+
+    @next_tier.setter
+    def next_tier(self, v):
+        self.s.tier = v
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -432,7 +528,10 @@ class MiniApp(App):
         with Vertical(id="col"):
             with TabbedContent(initial="tab-stream", id="views"):
                 with TabPane("Stream", id="tab-stream"):
-                    yield VerticalScroll(id="stream")
+                    with TabbedContent(initial=self.active.pane_id, id="sessions"):
+                        for x in self.sessions:
+                            with TabPane(x.label(), id=x.pane_id):
+                                yield VerticalScroll(id=x.stream_id, classes="stream")
                 with TabPane("Registry", id="tab-reg"):
                     yield DataTable(id="reg-table", cursor_type="row")
                     with Horizontal(id="reg-buttons"):
@@ -468,14 +567,18 @@ class MiniApp(App):
             self.chat(f"[yellow]bundled tools not installed: {escape(str(e))}[/yellow]")
         self.refresh_registry()
         self.refresh_tools()
+        for x in self.sessions:
+            self.replay(x)
+            self.stream_of(x).anchor()
+        self.persist()
         self.stream.anchor()                        # follow the newest block until the user scrolls up
         self.set_interval(0.1, self.tick)
-        budget = self.cfg["routing"]["local_budget_s"]
+        if len(self.sessions) > 1 or self.history:
+            self.chat(f"[dim]restored {len(self.sessions)} session(s) from the last time[/dim]")
         self.chat("[b]mini[/b] ready. " + "  ".join(
-            f"{t}: {self.cfg[t]['model']}" + ("" if self.cfg[t].get("enabled", True) else " (off)") for t in TIERS) +
-            f"\nTasks start on {self.cfg['routing']['start']}"
-            + (f"; local moves to free after {budget // 60} min" if budget and self.cfg["free"].get("enabled", True) else "")
-            + ". /model to choose the next task's model.")
+            f"{t}: {self.cfg[t]['model']}" for t in TIERS if self.tier_on(t)) +
+            "\nEvery session starts on local; /model changes the current session's model (only configured tiers)."
+            " /new opens another session (ctrl+t), /exit quits.")
         self.chat(f"working in [b]{escape(self.workspace)}[/b]: files change in place; every task is checkpointed in "
                   f"git, /undo puts it back." if self.workspace else escape(self.workspace_note) if self.workspace_note else
                   "no folder: tasks work in an empty folder of their run.")
@@ -500,30 +603,94 @@ class MiniApp(App):
 
     # ------------------------------------------------------------ status
     def update_status(self):
-        n, budget, who = self.attempt
-        tier = who if self.busy else self.next_tier
-        parts = [f"[b]{tier}[/b] {self.cfg[tier]['model']}" + ("" if self.busy else " (next task)"),
+        s = self.active
+        n, budget, who = s.attempt
+        tier = who if s.busy else s.tier
+        parts = [f"session [b]{escape(s.name)}[/b]",
+                 f"[b]{tier}[/b] {self.cfg[tier]['model']}" + ("" if s.busy else " (next task)"),
                  f"[b]attempt {n}/{budget}[/b]",
-                 "[b yellow]running[/b yellow]" if self.busy else "idle"]
-        if self.cap_hit:
-            parts.append(f"[b white on red] CAP: {escape(self.cap_hit)} [/]")
+                 ("[b yellow]waiting for the " + ("local model" if s.waiting == "local" else "folder") + "[/b yellow]")
+                 if s.waiting else "[b yellow]running[/b yellow]" if s.busy else "idle"]
+        if s.cap_hit:
+            parts.append(f"[b white on red] CAP: {escape(s.cap_hit)} [/]")
         self.query_one("#status", Static).update("  |  ".join(parts))
+        for t in self.sessions:
+            self.relabel(t)
+
+    def persist(self):
+        """Keep the tabs on disk (<folder>/.mini/sessions.json) so they outlive the app."""
+        if self.sessions_file:
+            session_mod.save(self.sessions_file, self.sessions, self.active)
+
+    def replay(self, s):
+        """Show a restored session's earlier tasks in its stream; a task that was running when the app closed is
+        reported as interrupted."""
+        for h in s.history:
+            self.stream_of(s).mount(Static(f"[b cyan]you:[/b cyan] {escape(str(h.get('task') or ''))}", classes="note"))
+            if h.get("status") == "success":
+                if h.get("answer") and h.get("via") != "slash":
+                    block = TextBlock()
+                    self.stream_of(s).mount(block)
+                    block.add(h["answer"])
+            else:
+                self.stream_of(s).mount(Static(f"[b red]{escape(str(h.get('status')))}[/b red]: "
+                                               f"{escape(str(h.get('error') or ''))}", classes="note"))
+        if s.pending:
+            self.stream_of(s).mount(Static(f"[b cyan]you:[/b cyan] {escape(s.pending)}\n[yellow]interrupted: mini was closed "
+                                           f"while this task ran. Files it changed stay; /undo puts them back.[/yellow]",
+                                           classes="note"))
+            s.history.append({"task": s.pending, "status": "interrupted", "error": "mini was closed while it ran"})
+            s.pending = None
+
+    def stream_of(self, s):
+        if s.stream is None:
+            s.stream = self.query_one("#" + s.stream_id, VerticalScroll)
+        return s.stream
+
+    def relabel(self, s):
+        try:
+            self.query_one("#sessions", TabbedContent).get_tab(s.pane_id).label = s.label()
+        except Exception:   # noqa: BLE001 - the tab may not be mounted yet
+            pass
+
+    def tier_on(self, tier):
+        return tier == "local" or bool(self.cfg[tier].get("enabled", True))
 
     @property
     def stream(self):
-        return self.query_one("#stream", VerticalScroll)
+        s = self.s
+        if s.stream is None:
+            s.stream = self.query_one("#" + s.stream_id, VerticalScroll)
+        return s.stream
 
     def chat(self, text):
         self.stream.mount(Static(text, classes="note"))
 
     def tick(self):
         """Spinners and elapsed times of the running blocks."""
-        for w in self.blocks.values():
-            if isinstance(w, Block):
-                w.paint()
+        for s in self.sessions:
+            for w in s.blocks.values():
+                if isinstance(w, Block):
+                    w.paint()
 
     # ------------------------------------------------------------ events from the agent thread
-    def on_agent_event(self, ev):
+    def on_agent_event(self, session, ev):
+        """An event of one session's agent: handled with that session as the one the code works for."""
+        self._ctx = session
+        try:
+            self.handle_event(ev)
+            if session is not self.active and ev["kind"] in ("run_end", "start") and (
+                    ev["kind"] == "run_end" or ev.get("block") == "question"):
+                session.attention = True
+            if ev["kind"] == "gate":
+                session.waiting = ev["gate"] if ev["state"] == "waiting" else ""
+            elif ev["kind"] in ("model_reply", "files_changed", "run_end"):
+                session.waiting = ""
+        finally:
+            self._ctx = None
+        self.update_status()
+
+    def handle_event(self, ev):
         """The event stream: block events drive the stream widgets, the other kinds update the counters and add a
         note line for what the user should see."""
         k = ev["kind"]
@@ -552,12 +719,17 @@ class MiniApp(App):
         elif k == "install":
             self.chat(f"[b green]installed[/b green] {ev['tool']} v{ev['version']} (built by {ev['created_by']['provider']})")
             self.refresh_registry()
+        elif k == "gate":
+            self.chat("[dim]waiting for the local model: another session is using it[/dim]" if ev["gate"] == "local" else
+                      "[dim]waiting for another session's file change to finish[/dim]")
         elif k == "watchdog":
             self.chat(f"[yellow]watchdog[/yellow] {escape(ev.get('name', ''))}")
         elif k == "run_end":
             self.busy = False
             self.close_blocks()
             self.history.append({x: ev.get(x) for x in ("task", "status", "answer", "error", "created", "outputs", "via")})
+            self.s.pending = None
+            self.persist()
             if ev.get("checkpoint"):
                 self.last_run = ev.get("run_id")
             if ev["status"] == "success":
@@ -610,17 +782,18 @@ class MiniApp(App):
             self.on_block({"kind": "end", "id": bid, "block": w.ev["block"] if hasattr(w, "ev") else "text",
                            "status": "stopped", "secs": round(time.monotonic() - getattr(w, "t0", time.monotonic()), 1)})
 
-    def approval_handler(self, kind, title, details, options):
+    def approval_handler(self, kind, title, details, options, session=None):
         """Called from the agent thread; blocks it until the user answers the card the question block opened."""
         done, box = threading.Event(), {}
+        session = session or self.active
 
         def got(decision):
             box["d"] = decision
             done.set()
 
         def show():
-            if self.card is not None:
-                self.card.ask(got)
+            if session.card is not None:
+                session.card.ask(got)
             else:                                           # no card (should not happen): the old dialog
                 self.push_screen(ApprovalScreen(kind, title, details, options), got)
         self.call_from_thread(show)
@@ -643,12 +816,12 @@ class MiniApp(App):
             return
         self.chat(f"[b cyan]you:[/b cyan] {escape(text)}" + (f"  [dim](attached: {', '.join(os.path.basename(a) for a in self.attachments)})[/dim]" if self.attachments else ""))
         self.busy, self.cap_hit = True, ""
+        self.s.pending = text
+        self.persist()
         tier = self.next_tier
-        if tier == "paid":                                   # paid lasts one task
-            self.next_tier = self.cfg["routing"]["start"]
         self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], tier)
         self.update_status()
-        self.run_task(text, list(self.attachments), tier)
+        self.run_task(self.s, text, list(self.attachments), tier)
         self.attachments = []
 
     def can_start(self):
@@ -694,20 +867,26 @@ class MiniApp(App):
         line = c.line(inputs)
         self.chat(f"[b cyan]you:[/b cyan] {escape(line)}")
         self.busy, self.cap_hit = True, ""
+        self.s.pending = line
+        self.persist()
         self.update_status()
-        self.run_tool(c.tool, inputs, line)
+        self.run_tool(self.s, c.tool, inputs, line)
 
-    @work(thread=True, exclusive=True)
-    def run_tool(self, name, inputs, line):
+    def run_tool(self, session, name, inputs, line):
+        self.run_worker(lambda: self._run_tool(session, name, inputs, line), thread=True, group=f"run-{session.n}",
+                        exclusive=True)
+
+    def _run_tool(self, session, name, inputs, line):
         from ..harness import toolrun
         cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
-        sink = lambda ev: self.call_from_thread(self.on_agent_event, ev)
+        sink = lambda ev: self.call_from_thread(self.on_agent_event, session, ev)
         m = Registry(cfg.abspath("state")).get(name)
         if not m:
             sink({"kind": "run_end", "task": line, "status": "failed", "error": f"no accepted tool named {name}",
                   "secs": 0, "via": "slash"})
             return
-        toolrun.slash(cfg, self.workspace, m, inputs, line, self.approval_handler, sinks=[sink])
+        toolrun.slash(cfg, self.workspace, m, inputs, line, lambda *a: self.approval_handler(*a, session=session),
+                      sinks=[sink])
 
     def folder(self):
         """The project folder: where paths complete from and relative paths point."""
@@ -715,19 +894,115 @@ class MiniApp(App):
 
     def cmd_model(self, args):
         tier = args.get("tier")
+        on = [t for t in TIERS if self.tier_on(t)]
         if tier is None:
-            self.chat(f"next task: [b]{self.next_tier}[/b]. Choose: /model {'|'.join(TIERS)}")
-        elif not self.cfg[tier].get("enabled", True):
-            self.chat(f"[yellow]{tier} is disabled in the config[/yellow]")
+            self.chat(f"this session's model: [b]{self.next_tier}[/b]. Choose: /model {'|'.join(on)}")
+        elif not self.tier_on(tier):
+            self.chat(f"[yellow]{tier} is not configured[/yellow] (only {', '.join(on)}); `mini setup` adds a cloud tier")
         else:
             self.next_tier = tier
-            self.chat(f"next task runs on [b]{tier}[/b] ({escape(self.cfg[tier]['model'])})" +
-                      ("; after it, back to " + self.cfg["routing"]["start"] if tier == "paid" else ""))
+            self.persist()
+            self.chat(f"this session's tasks run on [b]{tier}[/b] ({escape(self.cfg[tier]['model'])})"
+                      + ("\n[dim]task data leaves this machine[/dim]" if tier != "local" else ""))
         self.update_status()
 
-    def cmd_new(self, args):
+    def cmd_clear(self, args):
         self.history = []
-        self.chat("new conversation: earlier tasks are forgotten")
+        self.persist()
+        self.chat("conversation cleared: earlier tasks of this session are forgotten")
+
+    def cmd_new(self, args):
+        self.run_worker(self.add_session(args.get("name")), exclusive=False)
+
+    async def add_session(self, name=None):
+        self.session_n += 1
+        s = Session(self.session_n, name or str(self.session_n), "local", self.cfg["caps"]["attempts_per_tool"])
+        s.stream = VerticalScroll(id=s.stream_id, classes="stream")
+        self.sessions.append(s)
+        self.persist()
+        tabs = self.query_one("#sessions", TabbedContent)
+        await tabs.add_pane(TabPane(s.label(), s.stream, id=s.pane_id))
+        tabs.active = s.pane_id
+        self.switch_to(s)
+        s.stream.anchor()
+        self.chat(f"session [b]{escape(s.name)}[/b]: runs on local; /model changes it; alt+1..9 or /session switches")
+
+    def switch_to(self, s):
+        self.active = s
+        self.persist()
+        s.attention = False
+        self.show_view("tab-stream")
+        self.update_status()
+
+    @on(TabbedContent.TabActivated, "#sessions")
+    def session_tab_activated(self, ev):
+        for s in self.sessions:
+            if s.pane_id == ev.pane.id and s is not self.active:
+                self.switch_to(s)
+
+    def find_session(self, ref):
+        ref = str(ref or "").strip()
+        for s in self.sessions:
+            if ref == s.name or ref == str(s.n):
+                return s
+        if ref.isdigit() and 1 <= int(ref) <= len(self.sessions):
+            return self.sessions[int(ref) - 1]
+        return None
+
+    def cmd_session(self, args):
+        ref = args.get("target")
+        if ref is None:
+            self.chat("sessions: " + ", ".join(f"{i}:{escape(s.name)} ({s.tier}{', running' if s.busy else ''})"
+                                               for i, s in enumerate(self.sessions, 1)))
+            return
+        s = self.find_session(ref)
+        if s is None:
+            self.chat(f"[yellow]no session {escape(str(ref))}[/yellow]")
+            return
+        self.query_one("#sessions", TabbedContent).active = s.pane_id
+
+    def cmd_rename(self, args):
+        self.active.name = args["name"]
+        self.persist()
+        self.update_status()
+
+    def cmd_close(self, args):
+        s = self.find_session(args["target"]) if args.get("target") else self.active
+        if s is None:
+            self.chat(f"[yellow]no session {escape(str(args.get('target')))}[/yellow]")
+        elif s.busy:
+            self.chat(f"[yellow]session {escape(s.name)} is running a task[/yellow]")
+        elif len(self.sessions) == 1:
+            if self.sessions_file:                           # closing the last session ends mini and forgets it
+                try:
+                    os.remove(self.sessions_file)
+                except OSError:
+                    pass
+                self.sessions_file = None
+            self.exit()
+        else:
+            self.run_worker(self.remove_session(s), exclusive=False)
+
+    async def remove_session(self, s):
+        i = self.sessions.index(s)
+        self.sessions.remove(s)
+        self.persist()
+        tabs = self.query_one("#sessions", TabbedContent)
+        if s is self.active:
+            nxt = self.sessions[min(i, len(self.sessions) - 1)]
+            tabs.active = nxt.pane_id
+            self.switch_to(nxt)
+        await tabs.remove_pane(s.pane_id)
+
+    def action_new_session(self):
+        self.run_command("/new")
+
+    def action_close_session(self):
+        self.run_command("/close")
+
+    def action_goto_session(self, i):
+        if 1 <= i <= len(self.sessions):
+            self.query_one("#sessions", TabbedContent).active = self.sessions[i - 1].pane_id
 
     def cmd_attach(self, args):
         p = os.path.join(self.folder(), os.path.expanduser(args["path"]))     # an absolute path stays as it is
@@ -751,6 +1026,9 @@ class MiniApp(App):
 
     def cmd_tools(self, args):
         self.show_view("tab-tools")
+
+    def cmd_exit(self, args):
+        self.exit()
 
     def cmd_help(self, args):
         self.chat(escape(self.commands.help_text()) + "\n/config: switches and fields for the settings (saved in "
@@ -829,14 +1107,18 @@ class MiniApp(App):
         self.pick(ev.option_index)
         self.query_one("#prompt", Input).focus()
 
-    @work(thread=True, exclusive=True)
-    def run_task(self, text, attachments, tier):
+    def run_task(self, session, text, attachments, tier):
+        self.run_worker(lambda: self._run_task(session, text, attachments, tier), thread=True, group=f"run-{session.n}",
+                        exclusive=True)
+
+    def _run_task(self, session, text, attachments, tier):
         from ..agent.core import Agent
         cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
-        self.agent = Agent(cfg, approval_handler=self.approval_handler, start_tier=tier, history=self.history, workspace=self.workspace,
-                           tier_backends={tier: self.backend_factory()} if self.backend_factory else None)
-        self.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, ev))
-        self.agent.run_task(text, attachments)
+        session.agent = Agent(cfg, approval_handler=lambda *a: self.approval_handler(*a, session=session), start_tier=tier,
+                              history=session.history, workspace=self.workspace,
+                              tier_backends={tier: self.backend_factory()} if self.backend_factory else None)
+        session.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, session, ev))
+        session.agent.run_task(text, attachments)
 
     def offer_git_init(self):
         """The git-required guard: say so and offer `git init`; no task runs until the user agrees."""
@@ -1022,8 +1304,9 @@ class MiniApp(App):
     def reload_config(self):
         """Take the file's values into the running UI; the next task uses them."""
         self.cfg = config_mod.load(self.cfg.path)
-        if not self.cfg.get(self.next_tier, {}).get("enabled", True) or self.next_tier not in TIERS:
-            self.next_tier = self.cfg["routing"]["start"]
+        for s in self.sessions:                              # a tier that is no longer configured falls back to local
+            if s.tier not in TIERS or not self.tier_on(s.tier):
+                s.tier = "local"
         settingsform.refresh(self, self.cfg)
         self.query_one("#cfg-text", TextArea).text = self.config_file_text()
         self.update_status()

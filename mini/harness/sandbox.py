@@ -27,6 +27,19 @@ TARGET_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?:\d{1,5}$")
 PKG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*([<>=!~]=?[A-Za-z0-9.*+-]+)?$")
 
 
+def repair_argv(argv):
+    """A model sometimes sends the whole command as one string with the list quoting inside it (python3", "-c", "code).
+    Returns the list it meant, or argv unchanged when that does not parse."""
+    if isinstance(argv, list) and len(argv) == 1 and isinstance(argv[0], str) and '", "' in argv[0]:
+        try:
+            fixed = json.loads('["' + argv[0].rstrip().rstrip('"') + '"]')
+        except ValueError:
+            return argv
+        if isinstance(fixed, list) and len(fixed) > 1 and all(isinstance(x, str) for x in fixed):
+            return fixed
+    return argv
+
+
 class PolicyError(Exception):
     pass
 

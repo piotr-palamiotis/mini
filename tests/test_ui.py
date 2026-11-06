@@ -57,7 +57,7 @@ class UITest(unittest.TestCase):
         asyncio.run(go())
         self.assertEqual(seen, ["confirm", "plan", "install"])
 
-    def test_model_command_paid_lasts_one_task(self):
+    def test_model_command_sticks_to_the_session(self):
         cfg = temp_config(**{"approvals.confirm_first": False, "paid.enabled": True})
         cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")
         quick = lambda: fake_backend([step(call("understand", goal="g", inputs=[], outputs=["n"], plan="1")),
@@ -79,9 +79,9 @@ class UITest(unittest.TestCase):
                         if not app.busy:
                             break
                     used.append(app.agent.start_tier)
-                self.assertIn("local", str(app.query_one("#status").render()))
+                self.assertIn("paid", str(app.query_one("#status").render()))
         asyncio.run(go())
-        self.assertEqual(used, ["paid", "local"])
+        self.assertEqual(used, ["paid", "paid"])           # /model is the session's model until changed
 
 
 class ViewsTest(unittest.TestCase):

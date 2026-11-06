@@ -825,11 +825,13 @@ def doctor(cfg, ui=None):
 def wizard(cfg, ui=None):
     ui = ui or TerminalUI()
     ui.say("mini setup: checks what mini needs and helps you set up what is missing. Nothing changes without a yes.\n")
-    if any(cfg[t].get("enabled", True) for t in ("free", "paid")) and needs_setup(cfg):
-        if not ui.yes("Use cloud models (through OmniRoute) when the local model gets stuck? "
-                      "Free ones are used automatically, paid ones only when you pick them.", True):
-            config_mod.set_values(cfg.path, {"free": {"enabled": False}, "paid": {"enabled": False}})
-            cfg["free"]["enabled"] = cfg["paid"]["enabled"] = False
+    if not any(cfg[t].get("enabled", True) for t in ("free", "paid")):
+        if ui.yes("Add cloud models (through OmniRoute) that you can pick per session with /model? "
+                  "mini never switches to them by itself.", False):
+            for t in ("free", "paid"):
+                tc = cfg[t]
+                config_mod.set_values(cfg.path, {t: {k: tc[k] for k in ("backend", "url", "model", "api_key_env")}})
+                tc["enabled"] = True
     choose_backends(cfg, ui)
     skipped, done = set(), False
     while not done:

@@ -48,6 +48,7 @@ DEFAULTS = {
         "run_hard_wall_clock_s": 3600,       # hard stop for a whole run, no question asked
         "reply_max_tokens": 8192,
         "reply_max_s": 300,
+        "reply_think_max_chars": 14000,      # thinking this long with no answer or call is a loop (about 3.5k tokens)
         "tokens_per_run": 1500000,           # local tokens per run, prompt + output summed over every model call
         "max_repairs_per_task": 2,           # new versions after a failed real run
     },
@@ -81,7 +82,7 @@ DEFAULTS = {
     # Cloud tiers through an OpenAI-compatible gateway (OmniRoute). The model names are gateway combos, so the
     # actual models are chosen in the gateway's dashboard, not here. The key comes from api_key_env or ~/.config/mini/env.
     "free": {
-        "enabled": True,
+        "enabled": False,                    # computed by load(): on when the config file has a [free] section
         "backend": "openai",
         "url": "http://127.0.0.1:20128/v1",
         "model": "mini-free",
@@ -91,7 +92,7 @@ DEFAULTS = {
         "tokens_per_run": 3000000,
     },
     "paid": {
-        "enabled": True,
+        "enabled": False,                    # computed by load(): on when the config file has a [paid] section
         "backend": "openai",
         "url": "http://127.0.0.1:20128/v1",
         "model": "mini-paid",
@@ -99,11 +100,6 @@ DEFAULTS = {
         "temperature": 0.4,
         "thinking_controls": False,
         "tokens_per_run": 2000000,
-    },
-    "routing": {
-        "start": "local",                    # tier a task starts on: local | free | paid
-        "local_budget_s": 900,               # local model time per task; then the task moves to free (0: no limit)
-        "auto_escalate": True,               # local -> free without asking; paid is only ever the user's choice
     },
     "consult": {
         "enabled": True,                     # when the attempt budget runs out, ask the user for advice first
@@ -193,6 +189,8 @@ def load(path=None):
         with open(path, "rb") as f:
             data = tomllib.load(f)
     cfg = Config(_merge(DEFAULTS, data))
+    for t in ("free", "paid"):         # a cloud tier is on when it is configured (its section exists), unless switched off
+        cfg[t]["enabled"] = isinstance(data.get(t), dict) and data[t].get("enabled", True) is not False
     cfg.path = path
     cfg["local"] = local_candidates(cfg)[0][1]       # [local] shows the preferred backend's url and model
     return cfg

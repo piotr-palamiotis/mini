@@ -84,6 +84,8 @@ def _check(key, spec, v):
         v = v.lower() == "true"
     elif t == "array" and isinstance(v, str):
         v = [v]                                   # one value where a list is expected
+    elif t == "string" and isinstance(v, list) and len(v) <= 1 and all(isinstance(x, str) for x in v):
+        v = v[0] if v else ""                     # a list of one (or none) where a string is expected
     if t in TYPES and (not isinstance(v, TYPES[t]) or (t in ("integer", "number") and isinstance(v, bool))):
         return v, f"{key} must be {'an' if t[0] in 'aeio' else 'a'} {t}"
     if "enum" in spec and v not in spec["enum"]:

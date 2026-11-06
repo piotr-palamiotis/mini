@@ -43,6 +43,7 @@ class Watchdogs:
         self.last_call, self.call_streak = None, 0
         self.parse_errors = 0
         self.empty_nudged = False
+        self.last_text = ""
 
     def trigger(self, name, **kw):
         self.log.emit("watchdog", name=name, **kw)

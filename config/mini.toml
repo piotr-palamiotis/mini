@@ -37,6 +37,7 @@ task_turns = 30
 run_hard_wall_clock_s = 99999999
 reply_max_tokens = 8192
 reply_max_s = 300
+reply_think_max_chars = 14000
 tokens_per_run = 1500000
 max_repairs_per_task = 2
 
@@ -90,11 +91,6 @@ api_key_env = "OMNIROUTE_API_KEY"
 temperature = 0.4
 thinking_controls = false
 tokens_per_run = 2000000
-
-[routing]
-start = "local"          # local | free | paid
-local_budget_s = 0     # local model time per task, then the task moves to free (seconds; 0 = no limit)
-auto_escalate = true     # local -> free without asking; paid is only used when you pick it
 
 [consult]
 enabled = true

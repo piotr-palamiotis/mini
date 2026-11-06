@@ -96,10 +96,18 @@ class Command:
 
 
 CORE = [
-    Command("model", "model for the next task (paid lasts one task)",
+    Command("model", "model of this session (only configured tiers)",
             {"properties": {"tier": {"type": "string", "enum": list(TIERS), "description": "the tier"}}},
             positional="tier"),
-    Command("new", "forget the conversation so far (each task is told about the earlier ones)"),
+    Command("new", "open another session (a tab with its own conversation and model; they run in parallel)",
+            {"properties": {"name": {"type": "string"}}}, positional="name"),
+    Command("clear", "forget this session's conversation so far (each task is told about the earlier ones)"),
+    Command("session", "switch to a session by number or name (none: list them)",
+            {"properties": {"target": {"type": "string"}}}, positional="target"),
+    Command("rename", "rename this session",
+            {"required": ["name"], "properties": {"name": {"type": "string"}}}, positional="name"),
+    Command("close", "close this session (or the one named); a running one cannot be closed",
+            {"properties": {"target": {"type": "string"}}}, positional="target"),
     Command("attach", "attach a file to the next task",
             {"required": ["path"], "properties": {"path": {"type": "string", "format": "file"}}}, positional="path"),
     Command("status", "check the local model and the cloud tiers"),
@@ -111,6 +119,7 @@ CORE = [
     Command("config", "open the settings"),
     Command("tools", "list core capabilities and registry tools"),
     Command("help", "list the commands"),
+    Command("exit", "quit mini"),
 ]
 
 

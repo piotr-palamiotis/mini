@@ -65,16 +65,5 @@ class ContextTest(unittest.TestCase):
         self.assertEqual(a.backend.calls, 1, "no pointless retries")
 
 
-class LocalBudgetTest(unittest.TestCase):
-    def test_zero_means_no_limit_on_local_model_time(self):
-        cfg = temp_config()
-        a = Agent(cfg, label="budget")
-        a.tier, a.local_t0 = "local", 0.0                   # the local model has been going since 1970
-        a.cfg["routing"]["local_budget_s"] = 900
-        self.assertTrue(a.local_time_up())
-        a.cfg["routing"]["local_budget_s"] = 0
-        self.assertFalse(a.local_time_up())
-
-
 if __name__ == "__main__":
     unittest.main()

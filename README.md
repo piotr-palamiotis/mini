@@ -218,14 +218,15 @@ one is missing, which **questions** it asks and in what order, what it confirms 
 
 | Tier | What | When |
 |---|---|---|
-| `local` | llama.cpp `llama-server` (router over your models folder) on this machine | Every task starts here (`routing.start`) |
-| `free` | OmniRoute combo `mini-free`: free cloud models with failover | Automatically, when local has used its 15 min or its attempt budget. Stays for the rest of the task |
-| `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Lasts one task |
+| `local` | llama.cpp `llama-server` (router over your models folder) on this machine | Every session starts here; `/model` changes it |
+| `free` | OmniRoute combo `mini-free`: free cloud models with failover | Only when you pick it (`/model free`). Exists only when `[free]` is in the config |
+| `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Exists only when `[paid]` is in the config |
 
-- Local only: set `[free] enabled = false`, `[paid] enabled = false` (Config tab: the two cloud switches). Then
-  nothing leaves the machine. `[routing] local_budget_s = 0` removes the local time limit per task (the default
-  900 s moves a task to free); `auto_escalate = false` stops the automatic move to free.
-- Config: `[local]`, `[free]`, `[paid]`, `[routing]` in `config/mini.toml`. Free and paid are OpenAI-compatible
+- A cloud tier is on only when its section (`[free]`, `[paid]`) is in `config/mini.toml` (`mini setup` writes it;
+  `enabled = false` in a section switches it off again). With neither, nothing leaves the machine. mini never
+  moves a task to another model by itself: a task that fails on its tier fails. `/model` changes the tier of the
+  current session.
+- Config: `[local]`, `[free]`, `[paid]` in `config/mini.toml`. Free and paid are OpenAI-compatible
   endpoints; the actual models behind `mini-free` and `mini-paid` are chosen in OmniRoute's dashboard.
 - The OmniRoute API key is read from `$OMNIROUTE_API_KEY` or `~/.config/mini/env` (`OMNIROUTE_API_KEY=...`). It is
   never in the repo and never reaches a sandbox.
@@ -233,4 +234,4 @@ one is missing, which **questions** it asks and in what order, what it confirms 
   attempt budget it gets a fresh conversation with the spec, the files and the last failure instead.
 - Every switch is logged as a `tier` event and shown in the UI, including that task data now leaves the machine.
   Tools record which tier built them (`created_by.provider`, `escalated_from`) and attempts per tier.
-- `mini run --model free` starts on another tier; `--no-escalate` stays on the start tier.
+- `mini run --model free` runs on another tier.

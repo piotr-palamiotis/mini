@@ -45,6 +45,18 @@ class CatalogTest(unittest.TestCase):
         self.assertIn("must be an object", core.validate(schema, ["x"])[1])
         self.assertIn("on must be a boolean", core.validate(schema, {"path": "x", "on": 1})[1])
 
+    def test_a_list_where_a_string_is_expected_is_unwrapped(self):
+        schema = {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}
+        self.assertEqual(core.validate(schema, {"path": ["src"]}), ({"path": "src"}, ""))
+        self.assertEqual(core.validate(schema, {"path": []}), ({"path": ""}, ""))
+        self.assertIn("path must be a string", core.validate(schema, {"path": ["a", "b"]})[1])
+
+    def test_a_command_merged_into_one_string_is_split_back_into_argv(self):
+        from mini.harness.sandbox import repair_argv
+        self.assertEqual(repair_argv(['python3", "-c", "print(1)"']), ["python3", "-c", "print(1)"])
+        self.assertEqual(repair_argv(["python", "-c", "x"]), ["python", "-c", "x"])
+        self.assertEqual(repair_argv(["ls -la"]), ["ls -la"])
+
     def test_an_invalid_call_is_not_run(self):
         a = Agent(temp_config(), label="valid")
         with mock.patch.object(core.load().get("write_file"), "handler") as h:
@@ -147,6 +159,22 @@ class RunCodeTest(unittest.TestCase):
     def setUp(self):
         self.root = git_folder({"data.txt": "3\n4\n"})
         self.a = Agent(temp_config(), label="run", workspace=self.root)
+
+    def test_a_silent_script_that_wrote_nothing_is_called_out(self):
+        reply = "Go.\n```python\ndef f(): print(1)\n```\n"
+        with mock.patch.object(Sandbox, "run", return_value={"exit_code": 0, "output": ""}):
+            text, _ = self.a.act("run_code", {}, reply)
+        self.assertIn("printed nothing and wrote no file", text)
+
+    def test_a_call_naming_no_files_gets_the_small_project_copied_in(self):
+        seen = {}
+
+        def fake_run(argv, box, **kw):
+            seen["listing"] = sorted(os.listdir(box))
+            return {"exit_code": 0, "output": "ok\n"}
+        with mock.patch.object(Sandbox, "run", side_effect=fake_run):
+            self.a.act("run_code", {"command": ["wc", "-l", "data.txt"]})
+        self.assertIn("data.txt", seen["listing"])
 
     def test_a_script_runs_against_the_named_files_and_its_output_lands_in_the_folder(self):
         seen = {}

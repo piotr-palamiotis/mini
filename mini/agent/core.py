@@ -4,10 +4,12 @@ The harness objects (backends, sandbox, registry, gate, watchdogs, log) are hand
 gets more authority than they allow. Its own actions are the core capabilities (mini/core): typed calls,
 validated against their schema before they run; gap detection and need_tool never build what core already does.
 
-Model tiers (config [local], [free], [paid], [routing]): a task starts on routing.start (local by default). When
-the local model runs out of time (routing.local_budget_s) or attempts, the task moves to free by itself and stays
-there. Paid is only used when the user picks it; it lasts for the task. The conversation carries over on a switch.
+Model tiers (config [local], [free], [paid]): a task runs on the tier it is started on (a session's tier, local by
+default; the user changes it with /model). A cloud tier exists only when its section is in the config. mini never
+moves a task to another model by itself: a task that fails on its tier fails. The only switch is the user's own pick
+("use paid") in a dialog; the conversation carries over.
 """
+import contextlib
 import copy
 import json
 import os
@@ -20,7 +22,7 @@ from .creator import Creator, ToolFailed, trim
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..core import Call, load as load_catalog
 from ..core._tools import describe_tool
-from ..harness import checkpoint as ckpt, hwmon, journal, workspace as ws
+from ..harness import checkpoint as ckpt, gates, hwmon, journal, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.backends import Endpoint, has_model, make_backend
 from ..harness.config import llama_settings, local_candidates
@@ -33,6 +35,26 @@ from ..harness.watchdogs import Watchdogs
 
 S = {"type": "string"}
 ARR = {"type": "array", "items": S}
+MIN_IMPLICIT_ANSWER = 200
+
+
+def as_list(v):
+    """A list field a model may send as a string ("-", "none", "a; b") or null."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    v = str(v).strip()
+    return [] if v.lower() in ("", "-", "none", "n/a", "no", "null") else [v]
+
+
+def normalize_understanding(u):
+    u = dict(u)
+    for k in ("inputs", "outputs", "side_effects", "ambiguities"):
+        u[k] = as_list(u.get(k))
+    return u
+
+
 T_UNDERSTAND = fn("understand", "State your understanding of the task.", {
     "goal": S, "inputs": ARR, "outputs": ARR, "side_effects": ARR, "ambiguities": ARR, "plan": S},
     ["goal", "inputs", "outputs", "plan"])
@@ -68,23 +90,22 @@ class Agent:
         self.attachments, self.changed, self.checkpoint, self.calls = [], [], None, 0
         self.core = load_catalog()                         # core capabilities (mini/core): the agent's own actions
         self.last_invoke, self.last_script, self.web_hosts = {}, None, set()
+        self.built_names, self.need_reminded = [], False
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
             self.tier_backends["local"] = backend
         self.local_backend = self._pick_local()
-        self.start_tier = start_tier or cfg["routing"]["start"]
+        self.start_tier = start_tier or "local"
         self.tier_tokens, self.tiers_used, self.escalated_from = {}, [], None
         self._use_tier(self.start_tier)
-        self.local_t0 = time.time()
         self.registry = Registry(cfg.abspath("state"), run_id=self.log.run_id, auto_accept=cfg["tools"]["auto_accept"])
         self.registry.seed_bundled()                       # bundled document tools: installed on first run
         self.settings = SettingsStore(cfg.abspath("state"))
         self.lessons = LessonStore(cfg.abspath("state"))
         self.sandbox = Sandbox(cfg, self.log)
-        self.gate = ApprovalGate(cfg, self.log, approval_handler)
         self.wd = Watchdogs(cfg, self.log)
+        self.gate = ApprovalGate(cfg, self.log, self._unclocked(approval_handler) if approval_handler else None)
         self.wd.tier = self.tier
-        self.local_budget_noted = False
         self.stop_event = threading.Event()
         self.abort_reason = None
         self.tokens = 0
@@ -118,7 +139,8 @@ class Agent:
             tc = self.cfg[tier]
             self.tier_backends[tier] = make_backend(Endpoint(
                 tc["backend"], tc["url"], options={}, api_key_env=tc.get("api_key_env", ""),
-                max_tokens=self.cfg["caps"]["reply_max_tokens"], timeout_s=self.cfg["caps"]["reply_max_s"]))
+                max_tokens=self.cfg["caps"]["reply_max_tokens"], timeout_s=self.cfg["caps"]["reply_max_s"],
+                think_max_chars=self.cfg["caps"].get("reply_think_max_chars", 0)))
         return self.tier_backends[tier]
 
     def _use_tier(self, tier):
@@ -150,17 +172,6 @@ class Agent:
         self.escalations += 1
         self.log.emit("tier", previous=prev, tier=tier, model=self.model, why=why, decided_by=decided_by,
                       leaves_machine=tier != "local")
-
-    def local_time_up(self):
-        budget = self.cfg["routing"]["local_budget_s"]          # 0: no limit on local model time
-        return bool(budget) and self.tier == "local" and time.time() - self.local_t0 > budget
-
-    def auto_escalate(self, why):
-        """local -> free without asking (routing.auto_escalate). False when free is off or unreachable."""
-        if self.tier != "local" or not self.cfg["routing"]["auto_escalate"] or not self.tier_available("free"):
-            return False
-        self.switch_tier("free", why, "auto")
-        return True
 
     def offer_paid(self):
         """Paid is an option in a dialog only when it is configured and not already in use."""
@@ -245,7 +256,6 @@ class Agent:
             self.log.emit("error", text=f"{self.tier} backend not reachable: {e}")
         self.log.emit("info", text=f"model {self.model} loaded in {time.time() - tl:.1f} s; swap baseline taken after loading",
                       swap_used_mib=round(hwmon.swap_used_mib()))
-        self.local_t0 = time.time()
         swap = hwmon.SwapWatch(self.cfg["watchdogs"]["swap_growth_mib"], self._swap_trip)
         if self.cfg["watchdogs"]["swap_watch"]:
             swap.begin()
@@ -310,7 +320,7 @@ class Agent:
             if call["name"] != "understand" or not call["arguments"].get("goal"):
                 t.result(call["name"], "Call understand with goal, inputs, outputs and plan.")
                 continue
-            u = call["arguments"]
+            u = normalize_understanding(call["arguments"])
             self.log.emit("phase", phase="understood", understanding=u)
             if not self.cfg["approvals"]["confirm_first"]:
                 t.result("understand", "ok")
@@ -373,20 +383,24 @@ class Agent:
         creator = Creator(self)
         ctx = self.context()
         tools = list(covered["use"])
+        built = []
         for need in covered["missing"]:
             m = creator.create(need, task, ctx)
             tools.append(m["name"])
+            built.append(m["name"])
         self.wd.reset_task()
+        self.built_names, self.need_reminded = list(built), False
         self.log.emit("phase", phase="execute", tools=tools)
         listing = lambda: "\n".join(describe_tool(self.registry.get(n)) for n in dict.fromkeys(tools)) or "(none)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
                 {"role": "user", "content": prompts.EXECUTE.format(task=task, understanding=json.dumps(understanding, indent=1),
                                                                    context=ctx, tools=listing(), core=self.core.listing(),
-                                                                   files=self.list_work())}]
+                                                                   files=self.list_work(),
+                                                                   built=prompts.BUILT.format(names=", ".join(built)) if built else "")}]
         finish_rejections = 0
         offered = self.core.tools() + CONTROL_TOOLS
         while True:
-            t = Turns(self, "execute", msgs, offered)
+            t = Turns(self, "execute", msgs, offered, implicit=self._implicit_finish)
             try:
                 reply = t.ask()
             except RestartRequested:
@@ -396,7 +410,10 @@ class Agent:
                 name, args = call["name"], call["arguments"] or {}
                 guard = self.wd.on_call(name, args)
                 if guard == "block":
-                    t.result(name, f"BLOCKED: this exact call was made {self.wd.call_streak} times in a row. Do something different.")
+                    if self.wd.call_streak >= 3 * self.wd.w["identical_call_repeat"]:
+                        raise AgentStop(f"stuck repeating {name} with the same arguments")
+                    t.result(name, f"BLOCKED: this exact call was made {self.wd.call_streak} times in a row, and it gave: "
+                                   f"{trim(self.wd.last_text, 300)}\nChange the arguments or use a different tool.")
                     continue
                 note = "\nWarning: same call as before. A third identical call in a row will be blocked." if guard == "warn" else ""
                 self.log.emit("tool_call", step="execute", name=name, args=args)
@@ -425,6 +442,14 @@ class Agent:
                 self.log.emit("tool_result", step="execute", name=name, text=trim(text, 3000))
                 t.result(name, text + note)
 
+    @staticmethod
+    def _implicit_finish(reply):
+        """A substantial text-only reply is the answer: the model wrote it out instead of calling finish."""
+        text = (reply.get("content") or "").strip()
+        if len(text) >= MIN_IMPLICIT_ANSWER and not text.endswith(":"):
+            return {"name": "finish", "arguments": {"answer": text}}
+        return None
+
     def act(self, name, args, content="", messages=None):
         """Run a core capability: the arguments are validated against its schema first. Returns (result text,
         whether the handler already answered in the conversation)."""
@@ -444,6 +469,11 @@ class Agent:
         if hit:
             self.log.emit("watchdog", name="core_covers_need", need=need, capability=hit)
             return f"Not built: the core capability {hit} already does this. Call {hit} directly."
+        if self.built_names and not self.need_reminded:
+            self.need_reminded = True               # once: a tool built for this task is usually the answer
+            self.log.emit("watchdog", name="built_tool_unused", built=self.built_names)
+            return (f"Not built yet: {', '.join(self.built_names)} was built and installed for this task. Call "
+                    "`invoke_tool` with it. If it truly cannot do what the task needs, call need_tool again.")
         s = self.last_script
         if args.get("from_run_code") and s and s.get("ok") and s.get("script"):
             need += f"\n\nA script that already did this once in the sandbox (start from it):\n```python\n{s['script']}```"
@@ -481,16 +511,49 @@ class Agent:
         except ckpt.GitError as e:
             raise PolicyError(f"no checkpoint, so nothing was changed: {e}")
 
+    def _excuse(self, secs):
+        """Time spent waiting for the user or for another session does not count against the time caps."""
+        self.wd.task_t0 += secs
+        self.run_t0 += secs
+
+    def _unclocked(self, handler):
+        """The approval handler, with the time the user takes to answer taken off the clocks."""
+        def wrapped(*a, **kw):
+            t = time.time()
+            try:
+                return handler(*a, **kw)
+            finally:
+                self._excuse(time.time() - t)
+        return wrapped
+
+    @contextlib.contextmanager
+    def _waiting_for(self, gate, **kw):
+        t = time.time()
+        with gate.hold(stop_event=self.stop_event, **kw):
+            self._excuse(time.time() - t)                   # the queue, not the work
+            yield
+
     def _change(self, rels, write):
         """Checkpoint (ensure_checkpoint), then write(), which returns the relative paths written, then record them
-        in the checkpoint. PolicyError, before anything is written, when there is no checkpoint."""
-        self.ensure_checkpoint(rels)
-        done = write()
-        if self.checkpoint:
-            self.checkpoint.after_change(done)
+        in the checkpoint. PolicyError, before anything is written, when there is no checkpoint. Changes to the
+        folder happen one at a time across sessions (gates.FOLDER)."""
+        try:
+            with self._waiting_for(gates.FOLDER, on_wait=lambda: self.log.emit("gate", gate="folder", state="waiting")):
+                self.ensure_checkpoint(rels)
+                done = write()
+                if self.checkpoint:
+                    self.checkpoint.after_change(done)
+        except gates.Stopped:
+            raise AgentStop("stopped while waiting to change the folder")
         self.changed += [r for r in done if r not in self.changed]
         self.log.emit("files_changed", paths=done)
         return done
+
+    def hold_model(self):
+        """The local model serves one reply at a time across sessions (gates.LOCAL); cloud tiers are not gated."""
+        if self.tier != "local":
+            return contextlib.nullcontext()
+        return self._waiting_for(gates.LOCAL, on_wait=lambda: self.log.emit("gate", gate="local", state="waiting"))
 
     def context_tokens(self):
         """The local model's context size, when it is known (llama.cpp); None otherwise."""

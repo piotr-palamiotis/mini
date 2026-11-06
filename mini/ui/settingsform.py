@@ -10,11 +10,6 @@ from textual.widgets import Collapsible, Input, Label, Select, Static, Switch
 # (section, key, label, kind[, options]); kind: switch | select | int | float | text
 FIELDS = [
     ("Model tiers", [
-        ("free", "enabled", "Free cloud tier (through OmniRoute)", "switch"),
-        ("paid", "enabled", "Paid cloud tier (through OmniRoute)", "switch"),
-        ("routing", "start", "A task starts on", "select", ("local", "free", "paid")),
-        ("routing", "auto_escalate", "Move local -> free by itself when the local model is stuck", "switch"),
-        ("routing", "local_budget_s", "Local model time per task before it moves on, seconds (0 = no limit)", "int"),
         ("local", "temperature", "Local model temperature", "float"),
     ]),
     ("Approvals", [

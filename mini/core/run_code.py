@@ -5,12 +5,12 @@ import shutil
 from ._files import show
 from ..agent import codeblocks
 from ..harness import workspace as ws
-from ..harness.sandbox import PolicyError
+from ..harness.sandbox import PolicyError, repair_argv
 
 NAME = "run_code"
 SCRIPT = ws.META + "/script.py"                   # where the script sits in the call's sandbox folder
 DESCRIPTION = ("Run a Python script (the fenced python block in this reply, or script) or a command (an argv list, "
-               "no shell) once in the sandbox, with no network. files: the files and folders it works on; they are "
+               "no shell) once in the sandbox, with no network. files: the files and folders it works on (default: the whole project when it is small); they are "
                "copied in at their relative paths (the working directory), and every file it writes there lands at "
                "the same path in the user's folder. Use it for exact processing this task needs; build a tool only "
                "for what is worth keeping.")
@@ -21,6 +21,21 @@ SCHEMA = {"type": "object", "required": [], "properties": {
 COVERS = ("run script", "run code", "run command", "execute script", "execute code", "run python")
 
 
+SMALL_FILES, SMALL_BYTES = 200, 20 * 2**20       # a project this small is copied in when the call names no files
+
+
+def small_project(folder):
+    n = size = 0
+    for d, dirs, files in os.walk(folder):
+        dirs[:] = [x for x in dirs if x not in ws.SKIP_DIRS and not os.path.islink(os.path.join(d, x))]
+        for f in files:
+            n += 1
+            size += os.path.getsize(os.path.join(d, f))
+            if n > SMALL_FILES or size > SMALL_BYTES:
+                return False
+    return True
+
+
 def run(call, args):
     a = call.agent
     script = args.get("script")
@@ -28,7 +43,7 @@ def run(call, args):
         script = codeblocks.single(call.content, "script.py")[0]
     if bool(script) == bool(args.get("command")):
         return "Give a script (a fenced python block in the reply) or a command (argv), not both."
-    argv = list(args.get("command") or ["python", "/work/" + SCRIPT])
+    argv = repair_argv(list(args.get("command") or ["python", "/work/" + SCRIPT]))
     try:
         a.sandbox.check_argv(argv)
     except PolicyError as e:
@@ -37,7 +52,10 @@ def run(call, args):
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{NAME}")
     os.makedirs(box)
     try:
-        ws.copy_in(a.folder, box, list(args.get("files") or []), outside=a.attachments)
+        names = list(args.get("files") or [])
+        if not names and small_project(a.folder):
+            names = ["."]                         # a small model often forgets files; the sandbox must not start empty
+        ws.copy_in(a.folder, box, names, outside=a.attachments)
         if script:
             os.makedirs(os.path.join(box, ws.META), exist_ok=True)
             open(os.path.join(box, SCRIPT), "w").write(script)
@@ -53,9 +71,12 @@ def run(call, args):
     text = f"exit {res['exit_code']}" + (" (timed out)" if res.get("timed_out") else "") + "\n" + show(res["output"], 4000)
     if written:
         text += "\nFiles written to the folder: " + ", ".join(written)
+    if ok and not res["output"].strip() and not written and not refused:
+        text += ("\nThe script ran but printed nothing and wrote no file. Check that it calls the function it defines, "
+                 "prints what it finds, and writes the file it should produce.")
     if refused:
         text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
-    if ok and script:
+    if ok and script and not getattr(a, "built_names", None):
         text += ("\nIf this script is worth keeping for later tasks, call need_tool with from_run_code true: it becomes "
                  "the starting point of a tool.")
     return text

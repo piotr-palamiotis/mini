@@ -148,7 +148,8 @@ class SetupTest(unittest.TestCase):
             return [setup.Check("a", "thing a", state["fixed"], "broken", fix=fix, fix_text="repair a"),
                     setup.Check("b", "thing b", False, "needs root", manual="sudo do-b"),
                     setup.Check("c", "thing c", False, "optional", fix=fix, fix_text="repair c")]
-        ui = ScriptUI(yes=[False, True, False])      # cloud: no; fix a: yes; fix c: no
+        self.cfg["free"]["enabled"] = self.cfg["paid"]["enabled"] = False
+        ui = ScriptUI(yes=[False, True, False])      # add cloud: no; fix a: yes; fix c: no
         with mock.patch.object(setup, "checks", fake_checks):
             self.assertTrue(setup.needs_setup(self.cfg))
             rc = setup.wizard(self.cfg, ui)
@@ -157,7 +158,7 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(any("sudo do-b" in s for s in ui.said))
         self.assertFalse(setup.needs_setup(self.cfg))
         self.assertEqual(json.load(open(setup.marker(self.cfg)))["open"], ["b", "c"])
-        self.assertFalse(tomllib.load(open(self.cfg.path, "rb"))["free"]["enabled"], "no cloud: tiers turned off")
+        self.assertFalse(self.cfg["free"]["enabled"] or self.cfg["paid"]["enabled"], "no cloud wanted: none added")
 
     def test_gguf_header(self):
         import struct

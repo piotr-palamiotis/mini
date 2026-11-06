@@ -9,6 +9,7 @@ import re
 import time
 
 from ..harness.eventlog import ReplyStream
+from ..harness.gates import Stopped
 
 CHARS_PER_TOKEN = 3            # a cautious estimate; code and JSON are denser than prose
 CONTEXT_SHARE = 0.75           # shorten old results before the conversation passes this share of the context
@@ -48,12 +49,15 @@ def fn(name, desc, props, req=()):
 class Turns:
     def __init__(self, agent, step, messages, tools, implicit=None):
         self.a, self.step, self.messages, self.tools = agent, step, messages, tools
+        self.runaway = False
         self.implicit = implicit       # implicit(reply) -> synthesized tool call or None (e.g. code without a call)
 
     def user(self, text):
         self.messages.append({"role": "user", "content": text})
 
     def result(self, name, text):
+        if not text.startswith("BLOCKED"):
+            self.a.wd.last_text = text            # what a repeated call keeps getting, shown when it is blocked
         self.messages.append({"role": "tool", "tool_name": name, "content": text})
 
     def ask_text(self):
@@ -67,15 +71,6 @@ class Turns:
             if time.time() - a.run_t0 > a.cfg["caps"]["run_hard_wall_clock_s"]:
                 a.log.emit("cap", cap="run_hard_wall_clock_s", limit=a.cfg["caps"]["run_hard_wall_clock_s"])
                 raise AgentStop(f"hard wall-clock cap of {a.cfg['caps']['run_hard_wall_clock_s']} s per run reached")
-            if a.local_time_up() and not a.local_budget_noted:
-                budget = a.cfg["routing"]["local_budget_s"]
-                if a.auto_escalate(f"the local model used its {budget} s for this task"):
-                    self.user("A different model continues this task from here. Read the conversation above and "
-                              "carry on with the current step.")
-                else:
-                    a.local_budget_noted = True
-                    a.log.emit("info", text=f"local time budget ({budget} s) used up; free tier not available, "
-                                            "staying on local")
             if a.wd.time_or_turns_exceeded():
                 self._limit_reached()
             limit = a.context_tokens()
@@ -86,8 +81,13 @@ class Turns:
                                             f"({saved} characters)")
             stream = ReplyStream(a.log, step=self.step, model=a.model)    # thinking and text blocks, streamed
             try:
-                reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True),
-                                       options=a.model_options, on_delta=stream, stop_event=a.stop_event)
+                with a.hold_model():
+                    reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True) and not self.runaway,
+                                           options=a.model_options, on_delta=stream, stop_event=a.stop_event)
+            except Stopped:
+                stream.close("stopped")
+                a.check_abort()
+                raise AgentStop("stopped")
             except BaseException:
                 stream.close("error")
                 raise
@@ -128,10 +128,15 @@ class Turns:
                     a.log.emit("info", text=f"reply had no tool call but carried {call['name']} content; accepted as {call['name']}")
                     reply["tool_calls"] = [call]
             verdict = a.wd.on_reply(reply)
+            self.runaway = verdict == "runaway"           # the retry goes without thinking, which is what ran away
             if verdict == "runaway":
                 self.messages.append({"role": "assistant", "content": "(reply discarded: too long)"})
                 self.user(f"Your reply was cut off after {reply.get('output_tokens')} tokens / {reply.get('secs')} s. "
-                          "Make smaller changes: one file or one small edit per reply.")
+                          + ("You ran out of room while reasoning and made no call. Do not work through bytes, "
+                             "numbers or long text by hand: write a short Python script and run it with run_code, "
+                             "then answer from its output. Call a tool now."
+                             if not reply.get("content") and not reply.get("tool_calls") else
+                             "Make smaller changes: one file or one small edit per reply."))
                 continue
             if verdict in ("parse_error", "parse_limit"):
                 if verdict == "parse_limit":
@@ -142,7 +147,8 @@ class Turns:
                 continue
             if verdict in ("empty", "empty_limit"):
                 self.messages.append({"role": "assistant", "content": reply.get("content") or ""})
-                self.user("Do the next step now: call one of the tools." if verdict == "empty" else
+                self.user("If the task is done, call finish with your answer; otherwise call one tool for the next step."
+                          if verdict == "empty" else
                           "You must call a tool now. Available: " + ", ".join(t["function"]["name"] for t in self.tools))
                 continue
             self.messages.append({"role": "assistant", "content": reply.get("content") or "",

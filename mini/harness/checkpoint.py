@@ -15,6 +15,8 @@ import subprocess
 import sys
 import time
 
+from . import gates
+
 REF = "refs/mini/"
 AFTER = "mini after "                       # subject of an "after" commit
 ENV = {"GIT_AUTHOR_NAME": "mini", "GIT_AUTHOR_EMAIL": "mini@localhost",
@@ -176,7 +178,12 @@ def task_files(folder, run_id):
     return [n[len(prefix):] for n in names if n.startswith(prefix)]
 
 
-def undo(folder, run_id=None, files=()):
+def undo(*args, **kw):
+    with gates.FOLDER.hold():
+        return _undo(*args, **kw)
+
+
+def _undo(folder, run_id=None, files=()):
     """Put files back as they were before a task: the given ones, or all the task changed. Files the task created
     are deleted. The state before the undo is a checkpoint of its own (undo-<run>-<time>), so an undo can be undone.
     Returns (run id, [(relative path, "restored" | "deleted" | "refused")])."""

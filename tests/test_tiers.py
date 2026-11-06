@@ -62,39 +62,14 @@ class TiersTest(unittest.TestCase):
     def cfg(self, **over):
         return temp_config(**{"caps.attempts_per_tool": 2, **over})
 
-    def test_local_attempts_used_up_moves_to_free_by_itself(self):
+    def test_local_failure_never_moves_to_another_model(self):
         free = fake_backend(fixes_and_finishes())
-        agent, s = run(self.cfg(**{"free.enabled": True}), fake_backend(local_failing()), {"free": free})
-        self.assertEqual(s["status"], "success", s["error"])
-        self.assertEqual(s["tiers"]["used"], ["local", "free"])
-        m = agent.registry.get("count_text_lines")
-        self.assertEqual(m["created_by"]["provider"], "free")
-        self.assertEqual(m["created_by"]["escalated_from"], "local")
-        self.assertEqual(m["attempts_used"], {"local": 2, "free": 1})
-        sw = events(agent, "tier")
-        self.assertEqual([(e["previous"], e["tier"], e["decided_by"]) for e in sw], [("local", "free", "auto")])
-        self.assertTrue(sw[0]["leaves_machine"])
-        self.assertFalse([e for e in events(agent, "approval") if e["req"] == "consult"], "no dialog for local -> free")
-        self.assertEqual(free.script, [], "the rest of the task stayed on free")
-
-    def test_local_time_budget_moves_to_free_with_the_conversation(self):
-        # local answers once (incomplete, ~0.3 s of streamed thinking); its time is then up mid-conversation
-        slow = step(call("understand", inputs=["in/a.txt"]), thinking=" ".join(["hm"] * 30))
-        free = recording(fake_backend([
-            step(call("understand", goal="count lines", inputs=["in/a.txt"], outputs=["n"], plan="1")),
-            step(call("decide_coverage", reasoning="empty", use=[], missing=["count the lines of a text file"])),
-            step(call("write_spec", **SPEC)), step(content=fence("tool.py", GOOD)), step(content=fence("test_tool.py", TESTS)),
-            step(call("invoke_tool", name="count_text_lines", inputs={"path": "in/a.txt"})),
-            step(call("finish", answer="2 lines"))]))
-        local = fake_backend([slow, step(call("understand", goal="never reached", outputs=[], plan=""))])
-        agent, s = run(self.cfg(**{"free.enabled": True, "routing.local_budget_s": 0.1}), local, {"free": free})
-        self.assertEqual(s["status"], "success", s["error"])
-        self.assertEqual(len(local.script), 1, "local stopped after its time budget")
-        first = free.seen[0]
-        self.assertTrue(any(m.get("tool_calls") and m["tool_calls"][0]["function"]["name"] == "understand" for m in first),
-                        "free continues the same conversation")
-        self.assertIn("A different model continues", first[-1]["content"])
-        self.assertEqual(events(agent, "tier")[0]["why"], "the local model used its 0.1 s for this task")
+        agent, s = run(self.cfg(**{"free.enabled": True, "paid.enabled": True}), fake_backend(local_failing() + [LESSON]),
+                       {"free": free, "paid": fake_backend([])})
+        self.assertEqual(s["status"], "failed")                      # auto mode refuses the consult dialog: stop
+        self.assertEqual(s["tiers"]["used"], ["local"])
+        self.assertEqual(events(agent, "tier"), [])
+        self.assertTrue(free.script, "the free model was never asked")
 
     def test_no_tier_left_asks_then_stops(self):
         agent, s = run(self.cfg(), fake_backend(local_failing() + [LESSON]))
@@ -118,18 +93,6 @@ class TiersTest(unittest.TestCase):
         self.assertEqual(offered, [["use paid", "stop"]])
         self.assertEqual([(e["tier"], e["decided_by"]) for e in events(agent, "tier")], [("paid", "user")])
         self.assertEqual(agent.registry.get("count_text_lines")["created_by"]["provider"], "paid")
-
-    def test_free_never_escalates_to_paid_by_itself(self):
-        cfg = self.cfg(**{"free.enabled": True, "paid.enabled": True})       # auto mode refuses consult -> stop
-        free = fake_backend([step(call("replace", path="tool.py", old="import os  # try", new="import os  # again"),
-                                  call("run_tests")),
-                             step(call("replace", path="tool.py", old="import os  # again", new="import os  # 3"),
-                                  call("run_tests")), LESSON, LESSON])
-        agent, s = run(cfg, fake_backend(local_failing()), {"free": free, "paid": fake_backend([])})
-        self.assertEqual(s["status"], "failed")
-        self.assertEqual(s["tiers"]["used"], ["local", "free"])
-        consult = [e for e in events(agent, "approval") if e["req"] == "consult" and e["phase"] == "decided"]
-        self.assertEqual(consult[0]["choice"], "stop")
 
     def test_consult_advice_extends_the_budget(self):
         asked = []
@@ -162,6 +125,20 @@ class TiersTest(unittest.TestCase):
         self.assertEqual(s["tiers"], {"start": "paid", "used": ["paid"], "tokens": {"paid": 360}})
 
 
+class StuckLoopTest(unittest.TestCase):
+    def test_the_same_failing_call_is_blocked_with_its_error_then_the_run_stops(self):
+        bad = call("list_files", path="x", bogus=1)
+        script = [step(call("understand", goal="g", inputs=[], outputs=["n"], plan="1")),
+                  step(call("decide_coverage", reasoning="none needed", use=[], missing=[]))] + [step(bad)] * 12
+        backend = recording(fake_backend(script))
+        agent, s = run(temp_config(), backend)
+        self.assertNotEqual(s["status"], "success")
+        self.assertIn("stuck repeating list_files", s["error"])
+        blocked = [m["content"] for chat in backend.seen for m in chat if m.get("role") == "tool" and m["content"].startswith("BLOCKED")]
+        self.assertTrue(blocked)
+        self.assertIn("unknown argument bogus", blocked[0])
+
+
 class OpenAIBodyTest(unittest.TestCase):
     def body(self, **options):
         sent = {}
@@ -180,6 +157,14 @@ class OpenAIBodyTest(unittest.TestCase):
         self.assertEqual(sent["reasoning_budget"], 0)
         self.assertNotIn("tools", sent, "an empty tool list is not sent")
         self.assertEqual((out["thinking"], out["content"], out["prompt_tokens"]), ("r", "c", 3))
+
+    def test_thinking_loop_is_cut_before_any_answer(self):
+        chunks = b"".join(b'data: {"choices":[{"delta":{"reasoning":"xxxxxxxxxx"}}]}\n' for _ in range(50))
+        b = OpenAIBackend(Endpoint("openai", "http://x/v1", think_max_chars=100))
+        with mock.patch("urllib.request.urlopen", lambda req, timeout: io.BytesIO(chunks + b"data: [DONE]\n")):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [], think=True)
+        self.assertEqual(out["done_reason"], "length")
+        self.assertLess(len(out["thinking"]), 200)
 
     def test_gateway_gets_no_llama_fields(self):
         sent, _ = self.body(thinking_controls=False)

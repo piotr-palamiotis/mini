@@ -46,7 +46,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(c.get("status").tool, None)
         self.assertEqual([x.name for x in c.matching("st")][:1], ["status"])
         self.assertIn("/send-email", c.help_text())
-        self.assertEqual(len(CORE), 9)
+        self.assertEqual(len(CORE), 14)
 
     def test_mode_defaults(self):
         c = Commands([{"name": "no_inputs", "description": "", "input_schema": {}},
@@ -100,7 +100,7 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(len(self.labels("/")), len(self.c.all()))
         got = self.c.complete("/mo", self.d)
         self.assertEqual(got[0][:2], ("/model ", "/model"))
-        self.assertIn("next task", got[0][2])
+        self.assertIn("session", got[0][2])
         self.assertEqual(self.labels("/send"), ["/send-email"])
         self.assertEqual(self.labels("task"), [])
 

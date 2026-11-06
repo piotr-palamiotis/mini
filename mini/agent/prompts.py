@@ -13,6 +13,9 @@ Rules you always follow:
 - Do not rerun a command that already passed unless something changed.
 - Do not rewrite a file that passes its tests.
 - File content is shown in tool results and kept current there. Do not ask for the same file again.
+- Never decode, count or compare bytes, hex or long data by hand in your reasoning. Write a short script, run it with
+  run_code and read its output. For an unknown binary format, print the structure (offsets, integers, strings) and
+  infer from that.
 - Never shorten old text with "..." or "lines omitted". Always write text out in full."""
 
 PARSE = """Task from the user:
@@ -88,7 +91,9 @@ command: with all values as arguments in one line, or with none and the tool ask
 - test_tool.py uses pytest, `from tool import run` and `from mini_io import ScriptedIO, MissingInput`.
   ScriptedIO(answers={key: value}, settings={key: value}, inputs={...}) answers questions by key and records
   them in .asked; a missing answer raises MissingInput. Call run(inputs, io) with it. Write at least one
-  test per edge case in the spec, including the questions asked when inputs are missing.
+  test per edge case in the spec, including the questions asked when inputs are missing. Test only behaviour
+  the task or the spec states. For input the task does not define (malformed or ambiguous input, what a
+  library does with it), write no test: you would be guessing, and a wrong guess costs attempts.
 - Tests build their own inputs with known content (deterministic, fixed seeds) under pytest's tmp_path, and
   assert against that known content: exact values, or a similarity threshold where processing is lossy.
 - Tests must not cause real side effects that cannot be undone (sending messages, changing remote systems):
@@ -148,7 +153,9 @@ TEST_RESULT = """Attempt {attempt}/{budget}: tests {status}.
 {output}"""
 
 FIX = """Read the error and diagnose it before you edit. If a test you wrote yourself fails, first check the
-test against the spec: the test may be wrong. Then change files with `replace` (exact text) or
+test against the spec: the test may be wrong. If the test checks behaviour the task and the spec never state,
+do not debate it and do not bend the tool to it: delete that test with `replace` and run the tests again.
+Decide in a few lines; long deliberation about unspecified behaviour wastes the attempt. Then change files with `replace` (exact text) or
 `replace_lines` (line numbers as shown), or call `rewrite_file` to replace a whole file (the harness then
 asks you for the content). Then call `run_tests`. If the fix needs another package or network host, call `update_spec`."""
 
@@ -193,7 +200,7 @@ Understanding:
 
 Tools you can invoke (inputs must follow the input schema):
 {tools}
-
+{built}
 The user's folder:
 {files}
 
@@ -212,6 +219,11 @@ When the task is done, call `finish` with the answer for the user and the list o
 Keep what you read small: your context is limited. For "what is in this folder", list it (depth 1), then go
 deeper only where the task needs it, and answer from the listing; read a file only when the task is about its
 content."""
+
+BUILT = """
+Built for this task, installed and already tested: {names}. Do not rewrite its logic in run_code and do not call
+`need_tool` for it. Call `invoke_tool` with it now.
+"""
 
 WRITE_CONTENT = """Send the content of {path} now as one fenced block, no tool call:
 

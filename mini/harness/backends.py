@@ -19,9 +19,10 @@ REPLY_TIMEOUT_S = 300        # no data for this long ends the reply (tool calls 
 
 
 class Endpoint:
-    def __init__(self, type, url, options=None, api_key_env="", max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S):
+    def __init__(self, type, url, options=None, api_key_env="", max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S, think_max_chars=0):
         self.type, self.url, self.options, self.api_key_env = type, url.rstrip("/"), dict(options or {}), api_key_env
         self.max_tokens, self.timeout_s = max_tokens, timeout_s
+        self.think_max_chars = think_max_chars        # 0 = no cap; thinking past this with no answer or call ends the reply
 
     def api_key(self):
         from .config import secret
@@ -146,6 +147,10 @@ class OpenAIBackend(Backend):
                     if isinstance(rc, str) and rc:
                         out["thinking"] += rc
                         on_delta and on_delta("thinking", rc)
+                        if (self.ep.think_max_chars and len(out["thinking"]) > self.ep.think_max_chars
+                                and not out["content"] and not calls):
+                            out["done_reason"] = "length"          # a reasoning loop: cut it, the watchdog retries without thinking
+                            break
                     if d.get("content"):
                         out["content"] += d["content"]
                         on_delta and on_delta("content", d["content"])
@@ -156,6 +161,8 @@ class OpenAIBackend(Backend):
                         c["args"] += fn.get("arguments") or ""
                     if ch.get("finish_reason"):
                         out["done_reason"] = {"tool_calls": "stop"}.get(ch["finish_reason"], ch["finish_reason"])
+                if out["done_reason"] == "length":
+                    break
                 if time.time() - t0 > self.ep.timeout_s:
                     out["done_reason"] = "timeout"
                     break

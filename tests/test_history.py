@@ -37,10 +37,10 @@ class HistoryTest(unittest.TestCase):
 
         async def go():
             async with app.run_test(size=(120, 40)) as pilot:
-                app.on_agent_event({"kind": "run_end", "t": 1.0, "status": "stopped", "task": "list files", "error": "boom",
+                app.on_agent_event(app.active, {"kind": "run_end", "t": 1.0, "status": "stopped", "task": "list files", "error": "boom",
                                     "answer": "", "created": [], "outputs": [], "secs": 1, "run_id": "r1"})
                 self.assertEqual([h["task"] for h in app.history], ["list files"])
-                await pilot.press(*"/new")
+                await pilot.press(*"/clear")
                 await pilot.press("enter")
                 self.assertEqual(app.history, [])
         asyncio.run(go())
