@@ -16,13 +16,16 @@ import urllib.request
 
 MAX_OUTPUT_TOKENS = 8192     # hard cap per reply; protects against runaway generation inside a tool call
 REPLY_TIMEOUT_S = 300        # no data for this long ends the reply (tool calls are not streamed while being written)
+THINK_BUDGET_MESSAGE = " Thinking budget reached. Stop reasoning and act now on what you have: make the tool call or give the answer."
 
 
 class Endpoint:
-    def __init__(self, type, url, options=None, api_key_env="", max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S, think_max_chars=0):
+    def __init__(self, type, url, options=None, api_key_env="", max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S, think_max_chars=0,
+                 think_budget_tokens=0):
         self.type, self.url, self.options, self.api_key_env = type, url.rstrip("/"), dict(options or {}), api_key_env
         self.max_tokens, self.timeout_s = max_tokens, timeout_s
         self.think_max_chars = think_max_chars        # 0 = no cap; thinking past this with no answer or call ends the reply
+        self.think_budget_tokens = think_budget_tokens  # 0 = none; llama-server closes thinking here and the model answers
 
     def api_key(self):
         from .config import secret
@@ -104,9 +107,12 @@ class OpenAIBackend(Backend):
             kw.setdefault("enable_thinking", bool(think))
             body["chat_template_kwargs"] = kw
             if not think:
-                body["reasoning_budget"] = 0
+                body["reasoning_budget_tokens"] = 0
+            elif self.ep.think_budget_tokens:      # the server ends thinking at the budget, so the reply still has an answer
+                body["reasoning_budget_tokens"] = self.ep.think_budget_tokens
+                body["reasoning_budget_message"] = THINK_BUDGET_MESSAGE
         body.update({k: v for k, v in opts.items() if k in ("temperature", "top_p", "top_k", "min_p", "repeat_penalty",
-                                                              "presence_penalty", "seed", "reasoning_budget")})
+                                                              "presence_penalty", "seed", "reasoning_budget_tokens")})
         req = urllib.request.Request(self.ep.url + "/chat/completions", data=json.dumps(body).encode(), headers=self._headers())
         out = {"content": "", "thinking": "", "tool_calls": [], "done_reason": None,
                "prompt_tokens": 0, "output_tokens": 0, "secs": 0.0, "raw_error": None, "stopped": False}
@@ -178,6 +184,7 @@ class OpenAIBackend(Backend):
             out["tool_calls"].append({"name": calls[i]["name"], "arguments": args})
         if not out["output_tokens"]:
             out["output_tokens"] = (len(out["thinking"]) + len(out["content"])) // 4
+        out["think_budget_hit"] = THINK_BUDGET_MESSAGE.strip() in out["thinking"]
         out["secs"] = round(time.time() - t0, 2)
         return out
 

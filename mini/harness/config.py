@@ -48,7 +48,9 @@ DEFAULTS = {
         "run_hard_wall_clock_s": 3600,       # hard stop for a whole run, no question asked
         "reply_max_tokens": 8192,
         "reply_max_s": 300,
-        "reply_think_max_chars": 14000,      # thinking this long with no answer or call is a loop (about 3.5k tokens)
+        "reply_think_budget_tokens": 2000,   # llama-server closes thinking here and the model answers (0 = no budget)
+        "reply_think_max_chars": 14000,      # thinking this long with no answer or call is a loop (about 3.5k tokens);
+                                             # a backstop for backends without the budget: the reply is discarded
         "tokens_per_run": 1500000,           # local tokens per run, prompt + output summed over every model call
         "max_repairs_per_task": 2,           # new versions after a failed real run
     },

@@ -154,7 +154,7 @@ class OpenAIBodyTest(unittest.TestCase):
     def test_llama_server_gets_thinking_controls(self):
         sent, out = self.body()
         self.assertEqual(sent["chat_template_kwargs"], {"enable_thinking": False})
-        self.assertEqual(sent["reasoning_budget"], 0)
+        self.assertEqual(sent["reasoning_budget_tokens"], 0)
         self.assertNotIn("tools", sent, "an empty tool list is not sent")
         self.assertEqual((out["thinking"], out["content"], out["prompt_tokens"]), ("r", "c", 3))
 
@@ -166,10 +166,29 @@ class OpenAIBodyTest(unittest.TestCase):
         self.assertEqual(out["done_reason"], "length")
         self.assertLess(len(out["thinking"]), 200)
 
+    def test_thinking_budget_is_sent_and_its_use_reported(self):
+        from mini.harness.backends import THINK_BUDGET_MESSAGE
+        sent = {}
+        chunk = json.dumps({"choices": [{"delta": {"reasoning_content": "x" + THINK_BUDGET_MESSAGE}}]}).encode()
+
+        def fake_urlopen(req, timeout):
+            sent.update(json.loads(req.data))
+            return io.BytesIO(b"data: " + chunk + b"\ndata: [DONE]\n")
+        b = OpenAIBackend(Endpoint("openai", "http://x/v1", think_budget_tokens=50))
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [], think=True)
+        self.assertEqual((sent["reasoning_budget_tokens"], sent["reasoning_budget_message"]), (50, THINK_BUDGET_MESSAGE))
+        self.assertTrue(out["think_budget_hit"])
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            b.ep.think_budget_tokens = 0
+            sent.clear()
+            b.chat("m", [{"role": "user", "content": "hi"}], [], think=True)
+        self.assertNotIn("reasoning_budget_tokens", sent)
+
     def test_gateway_gets_no_llama_fields(self):
         sent, _ = self.body(thinking_controls=False)
         self.assertNotIn("chat_template_kwargs", sent)
-        self.assertNotIn("reasoning_budget", sent)
+        self.assertNotIn("reasoning_budget_tokens", sent)
         self.assertNotIn("thinking_controls", sent)
 
 

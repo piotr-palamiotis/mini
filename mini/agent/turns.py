@@ -99,6 +99,8 @@ class Turns:
                        tool_calls=reply.get("tool_calls"), prompt_tokens=reply.get("prompt_tokens"),
                        output_tokens=reply.get("output_tokens"), secs=reply.get("secs"), done_reason=reply.get("done_reason"),
                        error=reply.get("raw_error"), run_tokens=a.tokens, tier=a.tier, model=a.model)
+            if reply.get("think_budget_hit"):
+                a.log.emit("watchdog", name="think_budget", step=self.step, limit_tokens=a.cfg["caps"].get("reply_think_budget_tokens"))
             if reply.get("stopped"):
                 a.check_abort()
             over = re.search(r"\((\d+) tokens\) exceeds the available context size \((\d+) tokens", reply.get("raw_error") or "")

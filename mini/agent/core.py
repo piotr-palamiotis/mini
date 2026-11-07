@@ -141,7 +141,8 @@ class Agent:
             self.tier_backends[tier] = make_backend(Endpoint(
                 tc["backend"], tc["url"], options={}, api_key_env=tc.get("api_key_env", ""),
                 max_tokens=self.cfg["caps"]["reply_max_tokens"], timeout_s=self.cfg["caps"]["reply_max_s"],
-                think_max_chars=self.cfg["caps"].get("reply_think_max_chars", 0)))
+                think_max_chars=self.cfg["caps"].get("reply_think_max_chars", 0),
+                think_budget_tokens=self.cfg["caps"].get("reply_think_budget_tokens", 0)))
         return self.tier_backends[tier]
 
     def _use_tier(self, tier):
