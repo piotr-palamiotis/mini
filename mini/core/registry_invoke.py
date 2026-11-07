@@ -63,6 +63,8 @@ def _invoke_in(a, m, name, inputs, box):
     a.last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:],
                            "network": res.get("network_note") or None}
     a.log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
+    if "error" not in out:
+        a.invoked_ok.add(name)
     text = json.dumps(out, indent=1, default=str)
     if len(text) > 6000:
         p = os.path.join(a.run_dir, f"result-{name}-{int(time.time())}.json")

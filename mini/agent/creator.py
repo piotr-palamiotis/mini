@@ -363,7 +363,8 @@ class Creator:
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
         net = [t for t in self.approved_perms["network"] if not t.startswith("setting:")]   # tests fake those
-        res = a.sandbox.run(["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "/tool/test_tool.py"],
+        res = a.sandbox.run(["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "-p", "mini_pytest",
+                             "/tool/test_tool.py"],
                             work, tool_dir=self.files_dir, network=net, image=self.image,
                             purpose=f"tests {self.spec['name']}")
         passed = res["exit_code"] == 0

@@ -90,6 +90,7 @@ class Agent:
         self.attachments, self.changed, self.checkpoint, self.calls = [], [], None, 0
         self.core = load_catalog()                         # core capabilities (mini/core): the agent's own actions
         self.last_invoke, self.last_script, self.web_hosts = {}, None, set()
+        self.invoked_ok = set()                  # tools that ran without an error in this task
         self.built_names, self.need_reminded = [], False
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
@@ -577,6 +578,12 @@ class Agent:
                 return str(e)
             if not os.path.isfile(full) or os.path.getsize(full) == 0:
                 return f"{f} does not exist or is empty. Write it first. Files present: {', '.join(produced) or '(none)'}"
+        built = list(dict.fromkeys(c["name"] for c in self.created))
+        unused = built if built and not self.invoked_ok.intersection(built) else []   # a rebuilt copy may replace one
+        if unused:
+            return (f"{' / '.join(unused)} was built for this task but never ran successfully. Call invoke_tool with it "
+                    "to produce the result: output made another way (run_code, write_file) does not show the tool works. "
+                    "If it cannot be used, say why in your answer.")
         promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
         # a promised deliverable: "save/write/create ... file", or a file name with an extension. "A list of files in
         # this folder" is an answer, not a file.

@@ -38,3 +38,13 @@ class FinishCheckTest(unittest.TestCase):
         self.assertIn("produces a file", self.check(["Save the summary to a file."]))
         self.assertIn("produces a file", self.check(["report.csv"]))
         self.assertEqual(self.check(["report.csv"], produced=["report.csv"]), "")
+
+    def test_a_tool_built_in_the_task_must_have_run(self):
+        a = Agent(temp_config(), label="finish")
+        a.created.append({"name": "ini_to_json", "version": 1})
+        self.assertIn("never ran successfully", a._check_finish({"answer": "done"}, {"outputs": []}, 0))
+        self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 2), "")   # gives way after 2 rejections
+        a.invoked_ok.add("ini_to_json")
+        self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0), "")
+        a.created.append({"name": "convert_ini", "version": 1})            # a second copy; one of them ran
+        self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0), "")

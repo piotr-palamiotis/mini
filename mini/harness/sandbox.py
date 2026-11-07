@@ -251,7 +251,8 @@ class Sandbox:
                 "--pids-limit", str(self.cfg["pids"]), "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "-e", "HOME=/tmp", "-e", "PYTHONPATH=/tool:/mini",
                 "-v", f"{os.path.realpath(work_dir)}:/work:rw", "-v", f"{SANDBOX_DIR}/runner.py:/mini/runner.py:ro",
-                "-v", f"{SANDBOX_DIR}/mini_io.py:/mini/mini_io.py:ro", "-w", "/work"]
+                "-v", f"{SANDBOX_DIR}/mini_io.py:/mini/mini_io.py:ro",
+                "-v", f"{SANDBOX_DIR}/mini_pytest.py:/mini/mini_pytest.py:ro", "-w", "/work"]
         if on_message:
             args.append("-i")
         if self.engine == "podman":

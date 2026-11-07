@@ -94,6 +94,9 @@ command: with all values as arguments in one line, or with none and the tool ask
   normal use, then one test per edge case in the spec, including the questions asked when inputs are missing. Test only behaviour
   the task or the spec states. For input the task does not define (malformed or ambiguous input, what a
   library does with it), write no test: you would be guessing, and a wrong guess costs attempts.
+- Each test already runs inside its own tmp_path (the harness changes into it, as it does when the tool runs):
+  write input files there and pass relative paths ("in.txt", not str(tmp_path / "in.txt")); expect relative
+  output paths back.
 - Tests build their own inputs with known content (deterministic, fixed seeds) under pytest's tmp_path, and
   assert against that known content: exact values, or a similarity threshold where processing is lossy.
 - Tests must not cause real side effects that cannot be undone (sending messages, changing remote systems):
