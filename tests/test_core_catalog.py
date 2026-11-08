@@ -311,6 +311,24 @@ class NotesAndRegistryTest(unittest.TestCase):
         self.assertIn("No installed tool", a.act("inspect_tool", {"name": "nope"})[0])
         self.assertIn("read_file is a core capability", a.act("invoke_tool", {"name": "read_file", "inputs": {}})[0])
 
+    def test_invoke_tool_finds_a_missing_name(self):
+        cfg = temp_config()
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "tool.py"), "w").write("def run(inputs, io):\n    return {}\n")
+        Registry(cfg.abspath("state"), run_id="fixture", auto_accept=True).install({
+            "name": "word_counter", "description": "Count the words of a text.", "kind": "code",
+            "input_schema": {"type": "object", "properties": {"zz_text": {"type": "string"}}},
+            "output_schema": {"type": "object"}, "settings": [], "permissions": {"network": [], "packages": {}},
+            "interaction": ["counts"], "edge_cases": [], "files": ["tool.py"],
+            "created_by": {"provider": "test"}, "test_results": {"passed": True, "summary": "1 passed"}}, d)
+        a = Agent(cfg, label="rep")
+        repair, c = core.load().caps["invoke_tool"].repair, mock.Mock(agent=a)
+        self.assertEqual(repair(c, {"inputs": {"name": "word_counter", "zz_text": "a b"}}),
+                         {"name": "word_counter", "inputs": {"zz_text": "a b"}})
+        self.assertEqual(repair(c, {"inputs": {"zz_text": "a b"}}), {"name": "word_counter", "inputs": {"zz_text": "a b"}})
+        self.assertEqual(repair(c, {"inputs": {"nobody_takes_this": 1}}), {"inputs": {"nobody_takes_this": 1}})
+        self.assertEqual(repair(c, {"name": "x", "inputs": {"zz_text": 1}}), {"name": "x", "inputs": {"zz_text": 1}})
+
 
 class PipelineTest(unittest.TestCase):
     def test_core_covers_the_task_and_no_tool_is_built(self):

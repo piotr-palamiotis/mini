@@ -18,6 +18,24 @@ SCHEMA = {"type": "object", "required": ["name", "inputs"], "properties": {
 COVERS = ("invoke tool", "run tool", "call tool", "use tool")
 
 
+def repair(call, args):
+    """The local model often puts the tool's name inside inputs, or leaves it out next to a long inputs object.
+    Take it from inputs when it names an installed tool that has no input called name; else, when exactly one
+    installed tool accepts every input key given, that is the tool."""
+    if args.get("name") or not isinstance(args.get("inputs"), dict):
+        return args
+    reg, inputs = call.agent.registry, args["inputs"]
+    n = inputs.get("name")
+    if isinstance(n, str) and reg.get(n) and "name" not in ((reg.get(n).get("input_schema") or {}).get("properties") or {}):
+        return {**args, "name": n, "inputs": {k: v for k, v in inputs.items() if k != "name"}}
+    if inputs:
+        fits = [t for t in reg.names()
+                if set(inputs) <= set(((reg.get(t) or {}).get("input_schema") or {}).get("properties") or {})]
+        if len(fits) == 1:
+            return {**args, "name": fits[0]}
+    return args
+
+
 def run(call, args):
     a, name = call.agent, args["name"]
     m = a.registry.get(name)

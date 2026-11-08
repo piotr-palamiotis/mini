@@ -35,6 +35,7 @@ class Capability:
         self.name, self.description, self.schema = module.NAME, module.DESCRIPTION, module.SCHEMA
         self.covers = tuple(getattr(module, "COVERS", ()))
         self.handler = module.run
+        self.repair = getattr(module, "repair", None)   # (call, args) -> args: fixes a known slip before validation
 
     def tool(self):
         """The function definition offered to the model."""
@@ -151,6 +152,8 @@ class Catalog:
     def invoke(self, call, name, args):
         """Validate the arguments, then run the capability. Returns the result text for the model."""
         c = self.caps[name]
+        if c.repair and isinstance(args, dict):
+            args = c.repair(call, args)
         args, problem = validate(c.schema, args)
         if problem:
             return f"{name} was not run: {problem}. Call it as {c.signature()}."
