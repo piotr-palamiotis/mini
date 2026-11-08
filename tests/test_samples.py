@@ -1,0 +1,46 @@
+import os
+import tempfile
+import types
+import unittest
+
+from mini.agent import samples
+
+
+class SamplesTest(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.d, "in"))
+        open(os.path.join(self.d, "in", "orders.csv"), "w").write(
+            "id,qty,unit_price\n" + "".join(f"{i},{i},1.5\n" for i in range(5000)))
+        open(os.path.join(self.d, "feed.xml"), "w").write("<rss><item>a</item></rss>\n")
+        open(os.path.join(self.d, "big.bin"), "wb").write(b"\0" * (samples.MAX_FILE + 1))
+        open(os.path.join(self.d, "pic.jpg"), "wb").write(b"\xff\xd8\0\0")
+        self.a = types.SimpleNamespace(folder=self.d,
+                                       task_inputs={"in/orders.csv", "feed.xml", "big.bin", "pic.jpg"})
+
+    def test_the_spec_step_sees_the_head_of_each_input(self):
+        p = samples.preview(self.a)
+        self.assertIn("id,qty,unit_price", p)
+        self.assertIn("<rss><item>a</item></rss>", p)
+        self.assertIn("pic.jpg (4 bytes, binary)", p)
+        self.assertLess(p.count("\n0,0,1.5") + p.count("\n11,11"), 3)
+
+    def test_small_samples_are_copied_for_the_tests(self):
+        files = os.path.join(self.d, "build")
+        got = dict(samples.copy(self.a, files))
+        self.assertEqual(set(got), {"in/orders.csv", "feed.xml", "pic.jpg"})      # big binary left out
+        csv = open(os.path.join(files, "samples", "in", "orders.csv")).read().splitlines()
+        self.assertEqual(len(csv), samples.KEEP_LINES)
+        self.assertEqual(csv[0], "id,qty,unit_price")
+        self.assertEqual(dict(samples.listing(files)), got)
+        self.assertIn("samples/feed.xml", samples.tests_note(files))
+
+    def test_no_inputs_no_samples(self):
+        a = types.SimpleNamespace(folder=self.d, task_inputs=set())
+        self.assertEqual(samples.preview(a), "")
+        self.assertEqual(samples.copy(a, os.path.join(self.d, "b")), [])
+        self.assertEqual(samples.tests_note(os.path.join(self.d, "b")), "")
+
+
+if __name__ == "__main__":
+    unittest.main()

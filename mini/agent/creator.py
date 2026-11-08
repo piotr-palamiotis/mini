@@ -15,7 +15,7 @@ import re
 import shutil
 import time
 
-from . import codeblocks, prompts
+from . import codeblocks, prompts, samples
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE, is_bundled
 from ..harness.sandbox import PolicyError, repair_argv, validate_packages, validate_targets
@@ -94,6 +94,7 @@ class Creator:
         self.errors = {}
         self.last_output, self.last_hash = "", None
         a.log.emit("phase", phase="create", need=need)
+        self._copy_samples()
         self._spec_phase()
         return self._code_and_test(first=True)
 
@@ -106,6 +107,7 @@ class Creator:
         shutil.rmtree(self.build, ignore_errors=True)
         shutil.copytree(manifest["_dir"], os.path.join(self.build, "files"))
         self.files_dir = os.path.join(self.build, "files")
+        self._copy_samples()
         keys = ("name", "description", "input_schema", "output_schema", "settings", "interaction", "ui", "permissions",
                 "edge_cases")
         self.spec = {k: manifest.get(k) for k in keys}
@@ -139,7 +141,7 @@ class Creator:
         self.messages = [{"role": "system", "content": prompts.SYSTEM},
                          {"role": "user", "content": self._lessons_block() + prompts.SPEC.format(
                              rules=prompts.CREATE_RULES, need=self.need, task=self.task, context=self.context, names=names,
-                             settings=self._settings_listing())}]
+                             settings=self._settings_listing()) + self._preview_block()}]
         t = Turns(a, "spec", self.messages, [T_SPEC])
         for _ in range(6):
             reply = t.ask()
@@ -173,6 +175,15 @@ class Creator:
             t.result("write_spec", "Spec accepted." + (" " + msg if msg else ""))
             return
         raise AgentStop("no valid spec after 6 tries")
+
+    def _preview_block(self):
+        p = samples.preview(self.a)
+        return "\n\n" + p if p else ""
+
+    def _copy_samples(self):
+        got = samples.copy(self.a, self.files_dir)
+        if got:
+            self.a.log.emit("info", text="samples for the tests: " + ", ".join(f"{p} ({n} B)" for p, n in got))
 
     def _settings_listing(self):
         recs = self.a.settings.list()
@@ -311,7 +322,8 @@ class Creator:
         spec_text = json.dumps(self.spec, indent=1)
         intro = f"Spec approved:\n{spec_text}\n\n"
         for path, what in (("tool.py", prompts.WHAT_TOOL),
-                           ("test_tool.py", prompts.WHAT_TESTS.format(edge_cases="; ".join(self.spec["edge_cases"])))):
+                           ("test_tool.py", prompts.WHAT_TESTS.format(edge_cases="; ".join(self.spec["edge_cases"]))
+                                            + samples.tests_note(self.files_dir))):
             body = self._ask_file(path, prompts.CODE_FILE.format(intro=intro, path=path, what=what), "code")
             if body is None:
                 raise AgentStop(f"no usable {path} after 3 replies")
@@ -742,7 +754,9 @@ class Creator:
             "name": manifest["name"], "description": manifest["description"],
             "permissions": json.dumps(manifest["permissions"]), "tests": self.last_test["summary"],
             "created by": f"{created_by['provider']} / {created_by['model']}",
-            "attempts": json.dumps(manifest["attempts_used"]), "restarts": self.restarts})
+            "attempts": json.dumps(manifest["attempts_used"]), "restarts": self.restarts,
+            "samples kept with the tool": ", ".join(f"{p} ({n} B)" for p, n in samples.listing(self.files_dir))
+                                          or "none"})
         if not d.approved:
             raise ToolFailed(f"install of {manifest['name']} refused by the user")
         manifest["approvals"] = {"install": d.decided_by, "permissions": manifest["permissions"]}
