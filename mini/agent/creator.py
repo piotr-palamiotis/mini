@@ -221,6 +221,8 @@ class Creator:
     def _validate_spec(self, s, new):
         if not isinstance(s, dict):
             return "arguments must be an object."
+        for k in ("input_schema", "output_schema"):
+            s[k] = object_schema(s.get(k))
         missing = [k for k in ("name", "description", "input_schema", "output_schema", "edge_cases") if not s.get(k)]
         if missing:
             return "missing fields: " + ", ".join(missing) + "."
@@ -585,6 +587,9 @@ class Creator:
                         f"Make it do that. A tool for something else is built on its own after this one, "
                         f"if the task needs it."), None
             spec = dict(self.spec)
+            for k in ("input_schema", "output_schema"):
+                if args.get(k):
+                    args[k] = object_schema(args[k])
             for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction", "ui"):
                 if args.get(k):
                     spec[k] = args[k]
@@ -743,6 +748,15 @@ class Creator:
         a.created.append({"name": manifest["name"], "version": v, "created_by": created_by,
                           "attempts": manifest["attempts_used"], "restarts": self.restarts})
         return a.registry.get(manifest["name"])
+
+
+def object_schema(x):
+    """A schema the local model gave as a bare field map ({"csv": {"type": "string"}}) becomes the object schema it
+    meant; anything else is returned as it is."""
+    if isinstance(x, dict) and x and not {"type", "properties"} & set(x) \
+            and all(isinstance(v, dict) and ("type" in v or "description" in v) for v in x.values()):
+        return {"type": "object", "properties": x}
+    return x
 
 
 def _content_words(text):

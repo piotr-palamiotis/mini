@@ -259,5 +259,13 @@ class SpecDriftTest(unittest.TestCase):
         self.assertFalse(another_tool(feeds, {"input_schema": email["input_schema"]}))
 
 
+    def test_a_bare_field_map_is_an_object_schema(self):
+        from mini.agent.creator import object_schema
+        self.assertEqual(object_schema({"csv": {"type": "string"}}), {"type": "object", "properties": {"csv": {"type": "string"}}})
+        full = {"type": "object", "properties": {"a": {"type": "string"}}}
+        self.assertIs(object_schema(full), full)
+        self.assertEqual(object_schema({"type": "object"}), {"type": "object"})
+
+
 if __name__ == "__main__":
     unittest.main()
