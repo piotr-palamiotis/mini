@@ -26,6 +26,47 @@ def _props(schema):
     return props if isinstance(props, dict) else {}
 
 
+def tidy(ui, schema):
+    """The ui hints with what validate would refuse left out: hints only shape the form, so a wrong one is dropped
+    instead of costing the spec another try."""
+    if not isinstance(ui, dict):
+        return {}
+    props = _props(schema)
+    out = {}
+    if ui.get("mode") in MODES:
+        out["mode"] = ui["mode"]
+    order = ui.get("order")
+    if isinstance(order, list):
+        seen = []
+        for k in order:
+            if isinstance(k, str) and k in props and k not in seen:
+                seen.append(k)
+        if seen:
+            out["order"] = seen
+    fields = ui.get("fields")
+    if isinstance(fields, dict):
+        kept = {}
+        for k, hint in fields.items():
+            if k not in props or not isinstance(hint, dict):
+                continue
+            t = (props[k] or {}).get("type") if isinstance(props[k], dict) else None
+            h = {}
+            for name, v in hint.items():
+                if name not in FIELD_HINTS or not isinstance(v, FIELD_HINTS[name]):
+                    continue
+                if name == "filter" and (t not in (None, "string", "array") or
+                                         (isinstance(v, list) and not all(isinstance(x, str) for x in v))):
+                    continue
+                if name == "multiline" and v and t not in (None, "string"):
+                    continue
+                h[name] = v
+            if h:
+                kept[k] = h
+        if kept:
+            out["fields"] = kept
+    return out
+
+
 def validate(ui, schema):
     """A problem with a spec's ui hints, or None. Hints may only refer to properties of input_schema."""
     if ui in (None, {}):

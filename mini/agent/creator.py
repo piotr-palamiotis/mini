@@ -262,7 +262,8 @@ class Creator:
             return problem
         if not isinstance(s.get("interaction") or [], list):
             return "interaction must be a list of short steps."
-        problem = toolui.validate(s.get("ui"), s["input_schema"])     # hints name only input_schema properties
+        s["ui"] = toolui.tidy(s.get("ui"), s["input_schema"])         # hints name only input_schema properties
+        problem = toolui.validate(s["ui"], s["input_schema"])
         if problem:
             return problem
         try:
@@ -611,7 +612,8 @@ class Creator:
             for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction", "ui"):
                 if args.get(k):
                     spec[k] = args[k]
-            problem = toolui.validate(spec.get("ui"), spec["input_schema"])
+            spec["ui"] = toolui.tidy(spec.get("ui"), spec["input_schema"])
+            problem = toolui.validate(spec["ui"], spec["input_schema"])
             if problem:
                 return f"Spec change rejected: {problem}", None
             if "settings" in args:

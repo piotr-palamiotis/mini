@@ -129,6 +129,14 @@ class CopyInExportTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.box, "out")))
         self.assertFalse(os.path.exists(os.path.join(self.box, "nofolder")))
 
+    def test_an_empty_folder_and_a_list_in_one_string_reach_the_tool(self):
+        os.makedirs(os.path.join(self.root, "thumbs"))
+        got = ws.copy_in(self.root, self.box, {"dir": "thumbs", "list": "notes.txt, src/a.py", "text": "a, b"})
+        self.assertEqual(got, {"dir": "thumbs", "list": "notes.txt, src/a.py", "text": "a, b"})
+        self.assertTrue(os.path.isdir(os.path.join(self.box, "thumbs")))
+        self.assertTrue(os.path.isfile(os.path.join(self.box, "src", "a.py")))
+        self.assertTrue(os.path.isfile(os.path.join(self.box, "notes.txt")))
+
     def test_the_sandbox_never_sees_git(self):
         self.assertEqual(ws.copy_in(self.root, self.box, {"all": "."}), {"all": "."})
         self.assertTrue(os.path.isfile(os.path.join(self.box, "notes.txt")))

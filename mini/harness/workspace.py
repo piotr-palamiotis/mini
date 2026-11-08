@@ -125,6 +125,11 @@ def copy_in(folder, box, value, outside=()):
             return [one(x) for x in v]
         if not isinstance(v, str) or not v.strip() or "\n" in v or len(v) > 1024:
             return v
+        if "," in v and not os.path.lexists(os.path.join(folder, v)):     # "a.jpg,b.jpg": a list in one string
+            parts = [x.strip() for x in v.split(",")]
+            if all(x and os.path.exists(os.path.join(folder, x)) for x in parts):
+                got = [one(x) for x in parts]
+                return v if got == parts else ",".join(got)
         p = os.path.expanduser(v)
         try:
             full, rel = confine(folder, p)
@@ -147,6 +152,7 @@ def copy_in(folder, box, value, outside=()):
 def _copy(src, dest, budget):
     if os.path.isdir(src):
         for d, dirs, files in os.walk(src):
+            os.makedirs(os.path.join(dest, os.path.relpath(d, src)), exist_ok=True)      # an empty folder too
             dirs[:] = [x for x in dirs if x not in (".git", META) and not os.path.islink(os.path.join(d, x))]
             for f in files:
                 s = os.path.join(d, f)

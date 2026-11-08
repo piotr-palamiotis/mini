@@ -143,19 +143,30 @@ class HintsTest(unittest.TestCase):
             self.assertIsNotNone(problem, ui)
             self.assertIn(why, problem, ui)
 
+    def test_tidy_drops_what_validate_refuses(self):
+        bad = [{"mode": "modal"}, {"order": ["cc"]}, {"fields": {"cc": {}}}, {"fields": {"to": {"colour": "red"}}},
+               {"layout": 1}, {"fields": {"copies": {"multiline": True}}}, {"fields": {"html": {"filter": "*"}}},
+               {"order": ["to", "to"]}, {"fields": {"to": {"label": 3}}}, "form"]
+        for ui in bad:
+            self.assertIsNone(toolui.validate(toolui.tidy(ui, self.schema), self.schema), ui)
+        self.assertEqual(toolui.tidy({"mode": "form", "fields": {"to": {"label": "To", "type": "email"}}}, self.schema),
+                         {"mode": "form", "fields": {"to": {"label": "To"}}})
+        self.assertEqual(toolui.tidy(EMAIL["ui"], self.schema), EMAIL["ui"])
+
     def test_bundled_tools_carry_valid_hints(self):
         for name in bundled.names():
             m = bundled.manifest(name)
             self.assertIsNone(toolui.validate(m.get("ui"), m["input_schema"]), name)
         self.assertEqual(bundled.manifest("pdf_read")["ui"]["fields"]["path"]["filter"], "*.pdf")
 
-    def test_the_creator_rejects_hints_outside_the_schema(self):
+    def test_the_creator_drops_hints_outside_the_schema(self):
         agent = types.SimpleNamespace(registry=types.SimpleNamespace(names=lambda: []), core=core.load())
         spec = {"name": "send_email", "description": "Send an email through a mail server.",
                 "input_schema": self.schema, "output_schema": {"type": "object"}, "edge_cases": ["no receiver"],
                 "ui": {"fields": {"receiver": {"label": "To"}}}}
         cr = Creator(agent)
-        self.assertIn("receiver", cr._validate_spec(spec, new=True))
+        self.assertIsNone(cr._validate_spec(spec, new=True))
+        self.assertEqual(spec["ui"], {})
         spec["ui"] = EMAIL["ui"]
         self.assertIsNone(cr._validate_spec(spec, new=True))
         self.assertEqual(cr._clean_spec({**spec, "settings": []})["ui"], EMAIL["ui"])
