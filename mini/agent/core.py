@@ -91,6 +91,7 @@ class Agent:
         self.core = load_catalog()                         # core capabilities (mini/core): the agent's own actions
         self.last_invoke, self.last_script, self.web_hosts = {}, None, set()
         self.invoked_ok = set()                  # tools that ran without an error in this task
+        self.task_inputs = set()                 # relative paths the task reads and does not change (guard_inputs)
         self.built_names, self.need_reminded = [], False
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
@@ -268,6 +269,7 @@ class Agent:
         self.wd.reset_task()
         try:
             understanding = self.parse(task)
+            self.task_inputs = self._input_files(understanding)
             covered = self.gap(understanding)
             answer = self.execute(task, understanding, covered)
             status = "success"
@@ -536,6 +538,35 @@ class Agent:
         with gate.hold(stop_event=self.stop_event, **kw):
             self._excuse(time.time() - t)                   # the queue, not the work
             yield
+
+    def _input_files(self, u):
+        """Files the understanding names as inputs (a folder stands for the files in it), less those it also names
+        as outputs: the task reads them, and the model's file capabilities may not change them."""
+        def files(items):
+            out = set()
+            for x in items:
+                p = str(x).strip().strip("`'\"").rstrip("/")
+                full = os.path.normpath(os.path.join(self.folder, p))
+                if not p or not full.startswith(os.path.normpath(self.folder) + os.sep):
+                    continue
+                if os.path.isfile(full):
+                    out.add(os.path.relpath(full, self.folder))
+                elif os.path.isdir(full):
+                    for d, _, fs in os.walk(full):
+                        out |= {os.path.relpath(os.path.join(d, f), self.folder) for f in fs}
+            return out
+        if not self.folder:
+            return set()
+        return files(u.get("inputs") or []) - files(u.get("outputs") or [])
+
+    def guard_inputs(self, rels):
+        """PolicyError when a model file edit would change an input of the task: the data stays as the user gave it,
+        and a tool that cannot read it is a tool bug."""
+        hit = sorted(r for r in rels if os.path.normpath(r) in self.task_inputs)
+        if hit:
+            self.log.emit("watchdog", name="input_protected", paths=hit)
+            raise PolicyError(f"{', '.join(hit)} is an input of this task and stays as the user gave it. If a tool "
+                              f"cannot read it as it is, call report_tool_bug so that tool is fixed for this data")
 
     def _change(self, rels, write):
         """Checkpoint (ensure_checkpoint), then write(), which returns the relative paths written, then record them

@@ -87,6 +87,17 @@ class FileCapabilityTest(unittest.TestCase):
     def read(self, rel):
         return open(os.path.join(self.root, rel)).read()
 
+    def test_the_task_inputs_stay_as_given(self):
+        self.a.task_inputs = self.a._input_files({"inputs": ["a.txt", "src/", "a description, not a path"],
+                                                  "outputs": ["src/n.py"]})
+        self.assertEqual(self.a.task_inputs, {"a.txt", "src/m.py"})
+        self.assertIn("is an input of this task", self.act("write_file", path="a.txt", content="x"))
+        self.assertIn("is an input of this task", self.act("edit_file", path="src/m.py", old="x", new="z"))
+        self.assertIn("is an input of this task", self.act("delete_file", path="src"))
+        self.assertEqual(self.read("a.txt"), "one\ntwo\nthree\n")
+        self.assertIn("updated", self.act("edit_file", path="src/n.py", old="y", new="w"))
+        self.assertIn("Wrote", self.act("write_file", path="new.txt", content="x"))
+
     def test_edit_by_text_and_by_lines(self):
         self.assertIn("a.txt updated", self.act("edit_file", path="a.txt", old="two", new="2"))
         self.assertEqual(self.read("a.txt"), "one\n2\nthree\n")

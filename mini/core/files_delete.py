@@ -25,6 +25,7 @@ def run(call, args):
         def write():
             shutil.rmtree(full) if os.path.isdir(full) and not os.path.islink(full) else os.remove(full)
             return rels
+        a.guard_inputs(rels)
         a._change(rels, write)
     except (OSError, PolicyError) as e:
         return f"Not deleted: {e}"

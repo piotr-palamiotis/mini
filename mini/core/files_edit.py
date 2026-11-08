@@ -45,6 +45,7 @@ def run(call, args):
         open(full, "w").write(out)
         return [rel]
     try:
+        a.guard_inputs([rel])
         a._change([rel], write)
     except (OSError, PolicyError) as e:
         return f"Cannot edit {rel}: {e}"

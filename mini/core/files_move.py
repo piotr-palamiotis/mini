@@ -27,6 +27,7 @@ def run(call, args):
             if os.path.isdir(full):
                 shutil.rmtree(full, ignore_errors=True)
             return [d for _, d in pairs] + gone
+        a.guard_inputs([d for _, d in pairs] + gone)
         a._change([d for _, d in pairs] + gone, write)
     except (OSError, PolicyError) as e:
         return f"Not moved: {e}"

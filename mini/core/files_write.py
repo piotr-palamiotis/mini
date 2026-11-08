@@ -40,6 +40,7 @@ def run(call, args):
             os.makedirs(os.path.dirname(full), exist_ok=True)
             open(full, "w").write(new)
             return [rel]
+        a.guard_inputs([rel])
         a._change([rel], write)
     except (OSError, UnicodeError, PolicyError) as e:
         return f"Cannot write {args['path']}: {e}"
