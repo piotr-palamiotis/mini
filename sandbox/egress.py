@@ -74,7 +74,10 @@ FAULTS = {}
 def handle(conn, port, hosts):
     dest = None
     try:
-        conn.settimeout(10)
+        # Client-first protocols (TLS, HTTP) send at once. With one host on this port the wait is short, since a
+        # protocol where the server speaks first sends nothing until it is greeted, and a client that waits
+        # for that greeting as long as this wait would time out together with it.
+        conn.settimeout(1 if len(hosts) == 1 else 10)
         try:
             first = conn.recv(65536, socket.MSG_PEEK)
         except socket.timeout:
