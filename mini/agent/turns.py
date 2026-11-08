@@ -134,7 +134,11 @@ class Turns:
             if verdict == "runaway":
                 self.messages.append({"role": "assistant", "content": "(reply discarded: too long)"})
                 self.user(f"Your reply was cut off after {reply.get('output_tokens')} tokens / {reply.get('secs')} s. "
-                          + ("You ran out of room while reasoning and made no call. Do not work through bytes, "
+                          + ("It was mostly comments working through the data by hand. Do not reason in comments: "
+                             "write a short script that tests your current guess about the data and prints what it "
+                             "finds, then read its output and adjust. Call a tool now."
+                             if reply.get("cut") == "comments" else
+                             "You ran out of room while reasoning and made no call. Do not work through bytes, "
                              "numbers or long text by hand: write a short Python script and run it with run_code, "
                              "then answer from its output. Call a tool now."
                              if not reply.get("content") and not reply.get("tool_calls") else

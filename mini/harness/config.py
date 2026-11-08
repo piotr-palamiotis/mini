@@ -48,6 +48,8 @@ DEFAULTS = {
         "run_hard_wall_clock_s": 3600,       # hard stop for a whole run, no question asked
         "reply_max_tokens": 8192,
         "reply_max_s": 300,
+        "reply_max_tokens_tools": 6144,      # replies that may call tools (thinking included); files come in text turns
+        "reply_comment_cut_chars": 4000,     # a call or reply this long and mostly comment lines is cut (0 = off)
         "reply_think_budget_tokens": 2000,   # llama-server closes thinking here and the model answers (0 = no budget)
         "reply_think_max_chars": 14000,      # thinking this long with no answer or call is a loop (about 3.5k tokens);
                                              # a backstop for backends without the budget: the reply is discarded

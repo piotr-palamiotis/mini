@@ -55,7 +55,7 @@ class Watchdogs:
         self.turns += 1
         if reply.get("done_reason") in ("length", "timeout") or reply.get("output_tokens", 0) >= self.caps["reply_max_tokens"] \
                 or reply.get("secs", 0) >= self.caps["reply_max_s"]:
-            self.trigger("runaway_output", output_tokens=reply.get("output_tokens"), secs=reply.get("secs"),
+            self.trigger("runaway_output", output_tokens=reply.get("output_tokens"), secs=reply.get("secs"), cut=reply.get("cut"),
                          limit_tokens=self.caps["reply_max_tokens"], limit_s=self.caps["reply_max_s"])
             return "runaway"
         if not expect_call:

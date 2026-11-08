@@ -185,6 +185,32 @@ class OpenAIBodyTest(unittest.TestCase):
             b.chat("m", [{"role": "user", "content": "hi"}], [], think=True)
         self.assertNotIn("reasoning_budget_tokens", sent)
 
+    def test_tool_call_of_mostly_comments_is_cut_while_streaming(self):
+        script = "import struct\\n" + "# 0x1c: 6f 6e 79 78 (a name?)\\n" * 400
+        deltas = [script[i:i + 50] for i in range(0, len(script), 50)]
+        chunks = b"".join(b"data: " + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"name": "run_code" if i == 0 else "", "arguments": ('{"script":"' if i == 0 else "") + d}}]}}]}).encode()
+            + b"\n" for i, d in enumerate(deltas))
+        sent = {}
+
+        def fake_urlopen(req, timeout):
+            sent.update(json.loads(req.data))
+            return io.BytesIO(chunks + b"data: [DONE]\n")
+        b = OpenAIBackend(Endpoint("openai", "http://x/v1", max_tokens=8192, max_tokens_tools=6144, comment_cut_chars=4000))
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [{"type": "function"}], think=True)
+        self.assertEqual((out["done_reason"], out["cut"]), ("length", "comments"))
+        self.assertEqual(sent["max_tokens"], 6144, "a reply that may call tools gets the lower cap")
+        code = "x = 1\\n" * 2000                      # long but real code: not cut
+        chunks = b"data: " + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"name": "run_code", "arguments": '{"script":"' + code + '"}'}}]}}]}).encode() + b"\n"
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [{"type": "function"}], think=True)
+        self.assertNotIn("cut", out)
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            b.chat("m", [{"role": "user", "content": "hi"}], [], think=True)
+        self.assertEqual(sent["max_tokens"], 8192, "text-only turns keep the full cap")
+
     def test_gateway_gets_no_llama_fields(self):
         sent, _ = self.body(thinking_controls=False)
         self.assertNotIn("chat_template_kwargs", sent)

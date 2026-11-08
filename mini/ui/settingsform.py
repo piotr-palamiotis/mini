@@ -34,6 +34,8 @@ FIELDS = [
         ("caps", "tokens_per_run", "Local tokens per run", "int"),
         ("caps", "reply_max_tokens", "Longest single model reply, tokens", "int"),
         ("caps", "reply_max_s", "Longest single model reply, seconds", "int"),
+        ("caps", "reply_max_tokens_tools", "Longest reply that may call a tool, tokens", "int"),
+        ("caps", "reply_comment_cut_chars", "Cut a call that is mostly comments after this many characters (0 = off)", "int"),
         ("caps", "reply_think_budget_tokens", "Thinking budget per reply, tokens (0 = none)", "int"),
         ("caps", "max_repairs_per_task", "New tool versions after a failed real run", "int"),
         ("consult", "enabled", "Ask for advice when the attempts run out", "switch"),

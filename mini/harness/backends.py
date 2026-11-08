@@ -16,16 +16,31 @@ import urllib.request
 
 MAX_OUTPUT_TOKENS = 8192     # hard cap per reply; protects against runaway generation inside a tool call
 REPLY_TIMEOUT_S = 300        # no data for this long ends the reply (tool calls are not streamed while being written)
+COMMENT_SHARE = 0.5           # a reply this much comment lines (past comment_cut_chars) is reasoning written as code
+
+
+def comment_heavy(text, min_chars):
+    """True when text (a streamed tool-call argument or reply) is long and mostly comment lines: the model works
+    through data by hand in comments instead of running code. JSON-escaped newlines count as line breaks."""
+    if not min_chars or len(text) < min_chars:
+        return False
+    lines = [l.strip() for l in text.replace("\\n", "\n").split("\n")]
+    lines = [l for l in lines if l]
+    return bool(lines) and sum(l.startswith("#") for l in lines) / len(lines) > COMMENT_SHARE
+
+
 THINK_BUDGET_MESSAGE = " Thinking budget reached. Stop reasoning and act now on what you have: make the tool call or give the answer."
 
 
 class Endpoint:
     def __init__(self, type, url, options=None, api_key_env="", max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S, think_max_chars=0,
-                 think_budget_tokens=0):
+                 think_budget_tokens=0, max_tokens_tools=0, comment_cut_chars=0):
         self.type, self.url, self.options, self.api_key_env = type, url.rstrip("/"), dict(options or {}), api_key_env
         self.max_tokens, self.timeout_s = max_tokens, timeout_s
         self.think_max_chars = think_max_chars        # 0 = no cap; thinking past this with no answer or call ends the reply
         self.think_budget_tokens = think_budget_tokens  # 0 = none; llama-server closes thinking here and the model answers
+        self.max_tokens_tools = max_tokens_tools        # 0 = max_tokens; cap for replies that may call tools (thinking included)
+        self.comment_cut_chars = comment_cut_chars      # 0 = off; a call or reply past this, mostly comments, is cut
 
     def api_key(self):
         from .config import secret
@@ -100,6 +115,8 @@ class OpenAIBackend(Backend):
         opts = {**self.ep.options, **(options or {})}
         body = {"model": model, "messages": self._convert(messages), "stream": True,
                 "stream_options": {"include_usage": True}, "max_tokens": opts.pop("max_tokens", self.ep.max_tokens)}
+        if tools and self.ep.max_tokens_tools:
+            body["max_tokens"] = min(body["max_tokens"], self.ep.max_tokens_tools)
         if tools:
             body["tools"] = tools
         if opts.pop("thinking_controls", True):          # llama-server fields; a gateway may reject them
@@ -165,6 +182,10 @@ class OpenAIBackend(Backend):
                         fn = tc.get("function") or {}
                         c["name"] += fn.get("name") or ""
                         c["args"] += fn.get("arguments") or ""
+                    if tools and (comment_heavy(out["content"], self.ep.comment_cut_chars)
+                                  or any(comment_heavy(c["args"], self.ep.comment_cut_chars) for c in calls.values())):
+                        out["done_reason"], out["cut"] = "length", "comments"   # reasoning in comments: stop paying for it
+                        break
                     if ch.get("finish_reason"):
                         out["done_reason"] = {"tool_calls": "stop"}.get(ch["finish_reason"], ch["finish_reason"])
                 if out["done_reason"] == "length":
