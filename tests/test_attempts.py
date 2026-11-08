@@ -1,7 +1,7 @@
 """The attempt log that replaces the fix conversation: what an attempt changed, and how its tests failed."""
 import unittest
 
-from mini.agent.creator import _diff_summary, _failures
+from mini.agent.creator import _diff_summary, _failures, quoted
 
 
 class AttemptLogTest(unittest.TestCase):
@@ -20,6 +20,13 @@ class AttemptLogTest(unittest.TestCase):
 
     def test_failures_without_summary_take_the_first_error_line(self):
         self.assertEqual(_failures("x\nE   ValueError: nope\n"), ["E   ValueError: nope"])
+
+    def test_an_edge_case_quote_must_be_the_tasks_own_words(self):
+        task = "Some values are missing or not numbers; leave those rows out."
+        self.assertTrue(quoted("values are missing or not numbers", task))
+        self.assertTrue(quoted("Leave those rows OUT", task))
+        self.assertFalse(quoted("rows out", task))                       # too short to say anything
+        self.assertFalse(quoted("malformed rows raise an error", task))
 
 
 if __name__ == "__main__":

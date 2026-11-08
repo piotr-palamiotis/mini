@@ -64,3 +64,14 @@ def git_folder(files=None, commit=True):
 def git(folder, *args):
     import subprocess
     return subprocess.run(["git", "-C", folder, *args], check=True, capture_output=True, text=True).stdout
+
+
+def spec_steps(spec):
+    """The four spec phases a scripted model answers, from one spec dict."""
+    return [step(call("write_design", name=spec["name"], description=spec["description"],
+                      how_it_works=spec.get("how_it_works", ["do it"]))),
+            step(call("write_io", input_schema=spec["input_schema"], output_schema=spec["output_schema"],
+                      settings=spec.get("settings", []))),
+            step(call("write_run", interaction=spec.get("interaction", ["run"]), ui=spec.get("ui", {}),
+                      permissions=spec.get("permissions", {"network": [], "packages": {}}))),
+            step(call("write_edge_cases", cases=spec.get("cases", [])))]

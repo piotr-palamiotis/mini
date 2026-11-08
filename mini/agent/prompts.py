@@ -92,9 +92,9 @@ command: with all values as arguments in one line, or with none and the tool ask
   current task except as documented defaults.
 - test_tool.py uses pytest, `from tool import run` and `from mini_io import ScriptedIO, MissingInput`.
   ScriptedIO(answers={key: value}, settings={key: value}, inputs={...}) answers questions by key and records
-  them in .asked; a missing answer raises MissingInput. Call run(inputs, io) with it. Write one test of the
-  normal use, then one test per edge case in the spec, including the questions asked when inputs are missing. Test only behaviour
-  the task or the spec states. For input the task does not define (malformed or ambiguous input, what a
+  them in .asked; a missing answer raises MissingInput, unless the question has a default, which is then used. Call run(inputs, io) with it. Write one test of the
+  normal use, then one test per edge case in the spec, and nothing else. Test only behaviour the task or the spec
+  states; an expected error is asserted with `pytest.raises(Exception)`, never a type or a message. For input the task does not define (malformed or ambiguous input, what a
   library does with it), write no test: you would be guessing, and a wrong guess costs attempts.
 - Each test already runs inside its own tmp_path (the harness changes into it, as it does when the tool runs):
   write input files there and pass relative paths ("in.txt", not str(tmp_path / "in.txt")); expect relative
@@ -104,10 +104,10 @@ command: with all values as arguments in one line, or with none and the tool ask
 - Tests must not cause real side effects that cannot be undone (sending messages, changing remote systems):
   replace those calls with fakes via monkeypatch. Prefer fakes for network reads as well; keep at most one
   test that talks to a real service.
-- Before you finish, check: missing or optional fields, off-by-one errors in indexes and buffers, empty input,
+- Before you finish, check the code (not more tests) for: missing or optional fields, off-by-one errors in indexes and buffers, empty input,
   network errors and timeouts, unexpected response shapes."""
 
-SPEC = """{rules}
+SPEC_DESIGN = """{rules}
 
 Capability needed: {need}
 
@@ -116,30 +116,64 @@ Context (the user's task that needs it): {task}
 {context}
 
 Names already used in the registry: {names}
+{revision}
+Step 1 of 4 of the tool's spec: what the tool does. Work out how it should work for the user: what it takes,
+what it does with it, what it gives back. Then call `write_design` with name (snake_case), description (one or two
+sentences, for later search) and how_it_works (the steps of the tool, in order, in plain words). Inputs, questions,
+permissions and edge cases come in the next steps."""
+
+SPEC_IO = """Step 2 of 4 of the spec of the tool {name}: its inputs and outputs.
+
+The tool: {description}
+How it works:
+{how}
+
+Task it is built for: {task}
 
 Saved settings that already exist (reuse a key when it fits; never invent values): {settings}
+{revision}
+Call `write_io` with input_schema and output_schema (JSON Schema objects with properties and descriptions; every
+value the tool may ask for is an input property; mark the ones it cannot do without as required) and settings
+(list of {{key, description, schema, secret}} for values saved once, such as an account: schema is a JSON Schema
+object, secret lists its secret fields; empty list if none). Give a file input "format": "file" and a password or
+token "format": "password"."""
 
-First work out how the tool should work for the user, then call `write_spec` with: name (snake_case),
-description (what it does, for later search), input_schema and output_schema (JSON Schema objects with
-properties and descriptions; every value the tool may ask for is an input property), settings (list of
-{{key, description, schema, secret}} for values saved once: schema is a JSON Schema object, secret lists its
-secret fields; empty list if none), interaction (the steps of the tool as the user experiences them, in
-order: which settings it needs and what happens when one is missing, which questions it asks and when,
-confirmations, the action, the result), ui (how the user runs it as a slash command in mini, see below),
-permissions (network: list of "host:port" or "setting:<key>"; packages: {{"apt": [...], "pip": [...]}}),
-edge_cases (list of short strings, each "situation -> expected result"). List only situations whose result the
-task states or the tool's job settles (a required input missing, a file that does not exist, a value outside an
-allowed set). Do not list input whose handling the task leaves open (malformed, empty or unusual input, how a
-library treats it, permissions): the tool lets the library's own error or behaviour stand, and nothing is tested
-for it. Every edge case becomes a test, so a guessed one costs attempts. The user reviews this plan.
+SPEC_RUN = """Step 3 of 4 of the spec of the tool {name}: how it runs.
 
-In input_schema, give a file input "format": "file" and a password or token "format": "password". ui is
-{{"mode": "form" or "ask", "order": [property, ...], "fields": {{property: {{"label": "...", "multiline": true,
-"filter": "*.csv"}}}}}}, every part optional: "form" when the inputs are independent fields filled in at once (a
-title, a recipient, a message, attachments), "ask" when the tool drives a dialogue (questions that depend on
-earlier answers, or no fixed set of inputs). order lists the fields shown first; label is a short field name;
-multiline is for long text such as a message body; filter limits a file picker. Hints may only name input_schema
-properties."""
+The tool: {description}
+How it works:
+{how}
+input_schema: {inputs}
+settings: {setting_keys}
+{revision}
+Call `write_run` with interaction (the steps of the tool as the user experiences them, in order: which settings it
+needs and what happens when one is missing, which questions it asks and when, confirmations, the action, the
+result), ui (how the user runs it as a slash command in mini, see below) and permissions (network: list of
+"host:port" or "setting:<key>"; packages: {{"apt": [...], "pip": [...]}}: the packages the code imports that are
+not in the Python standard library).
+
+ui is {{"mode": "form" or "ask", "order": [property, ...], "fields": {{property: {{"label": "...",
+"multiline": true, "filter": "*.csv"}}}}}}, every part optional: "form" when the inputs are independent fields filled
+in at once, "ask" when the tool drives a dialogue (questions that depend on earlier answers). order lists the fields
+shown first; label is a short field name; multiline is for long text; filter limits a file picker. Hints may only
+name input_schema properties."""
+
+SPEC_EDGES = """Step 4 of 4 of the spec of the tool {name}: the edge cases its tests will check.
+
+The user's task, word for word:
+<<<
+{task}
+>>>
+
+The tool: {description}
+input_schema: {inputs}
+{preview}
+An edge case here is a situation other than normal use whose result the user's task states in words: for example
+"skip rows that are empty" or "if the folder does not exist, stop". For each one, call `write_edge_cases` with
+situation, expected (the result the task states) and quote (the task's own words that state it, copied exactly from
+the text above). A situation the task does not speak about is not an edge case: leave it out, whatever a careful
+tool might do. Missing inputs and files that do not exist are checked by the harness itself; do not list them.
+Most tasks state none: then call `write_edge_cases` with an empty list."""
 
 CODE_FILE = """{intro}Write {path} now: {what}
 Reply with only the complete file as one fenced code block, no tool call:
@@ -151,8 +185,10 @@ Reply with only the complete file as one fenced code block, no tool call:
 WHAT_TOOL = "the tool, with `def run(inputs: dict, io) -> dict`, following the interaction steps in the spec."
 WHAT_TESTS = ("pytest tests with `from tool import run` and `from mini_io import ScriptedIO, MissingInput`: first "
               "one test of the normal use the task describes, asserting the exact expected output; then one test per "
-              "edge case, asserting its stated result: {edge_cases}. No other tests: behaviour the task and the spec "
-              "do not state is not tested.")
+              "edge case in the spec, asserting its stated result: {edge_cases}. An edge case whose result is an error "
+              "asserts `with pytest.raises(Exception):` (any error type, no message text). No other tests: behaviour "
+              "the task and the spec do not state is not tested.")
+NO_EDGE_TESTS = "(the spec lists none: write only the normal-use test)"
 
 REWRITE = """Send the complete new {path} now as one fenced code block, no tool call:
 

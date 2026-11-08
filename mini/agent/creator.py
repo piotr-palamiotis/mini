@@ -26,14 +26,20 @@ from ..harness.lessons import format_lessons
 
 S = {"type": "string"}
 OBJ = {"type": "object"}
-T_SPEC = fn("write_spec", "Write the spec of the new tool.", {
-    "name": S, "description": S, "input_schema": OBJ, "output_schema": OBJ,
+ARR = {"type": "array", "items": S}
+T_DESIGN = fn("write_design", "Write what the new tool does.", {"name": S, "description": S, "how_it_works": ARR},
+              ["name", "description", "how_it_works"])
+T_IO = fn("write_io", "Write the tool's inputs, outputs and saved settings.", {
+    "input_schema": OBJ, "output_schema": OBJ,
     "settings": {"type": "array", "items": {"type": "object", "properties": {
-        "key": S, "description": S, "schema": OBJ, "secret": {"type": "array", "items": S}}}},
-    "interaction": {"type": "array", "items": S}, "ui": OBJ,
-    "permissions": {"type": "object", "properties": {"network": {"type": "array", "items": S},
-                                                     "packages": {"type": "object"}}},
-    "edge_cases": {"type": "array", "items": S}}, ["name", "description", "input_schema", "output_schema", "edge_cases"])
+        "key": S, "description": S, "schema": OBJ, "secret": ARR}}}}, ["input_schema", "output_schema"])
+T_RUN = fn("write_run", "Write how the tool runs: interaction, ui hints and permissions.", {
+    "interaction": ARR, "ui": OBJ,
+    "permissions": {"type": "object", "properties": {"network": ARR, "packages": {"type": "object"}}}}, ["interaction"])
+T_EDGES = fn("write_edge_cases", "Write the edge cases the user's task states (often none).", {
+    "cases": {"type": "array", "items": {"type": "object", "properties": {
+        "situation": S, "expected": S, "quote": S}}}}, ["cases"])
+SPEC_THINK_TOKENS = 1500        # each spec phase thinks on its own budget, in its own fresh conversation
 T_REPLACE = fn("replace", "Replace one exact piece of text in a file. old must appear exactly once; include a few "
                "surrounding lines to make it unique. Never include line-number prefixes.",
                {"path": S, "old": S, "new": S}, ["path", "old", "new"])
@@ -143,45 +149,133 @@ class Creator:
 
     # ================================================================== spec
     def _spec_phase(self):
+        """The spec in four short phases, each in a fresh conversation with its own thinking budget and only what it
+        needs: design, inputs/outputs, how it runs, edge cases. Each phase's output is checked when it arrives; the
+        harness puts the spec together (no model call) and checks it whole."""
         a = self.a
-        names = ", ".join(a.registry.names()) or "(none)"
-        self.messages = [{"role": "system", "content": prompts.SYSTEM},
-                         {"role": "user", "content": self._lessons_block() + prompts.SPEC.format(
-                             rules=prompts.CREATE_RULES, need=self.need, task=self.task, context=self.context, names=names,
-                             settings=self._settings_listing()) + self._preview_block()}]
-        t = Turns(a, "spec", self.messages, [T_SPEC])
-        for _ in range(6):
+        revision = ""
+        for _ in range(4):
+            note = f"\nThe user revised the plan: {revision}\n" if revision else ""
+            design = self._phase("design", T_DESIGN, self._lessons_block() + prompts.SPEC_DESIGN.format(
+                rules=prompts.CREATE_RULES, need=self.need, task=self.task, context=self.context,
+                names=", ".join(a.registry.names()) or "(none)", revision=note) + self._preview_block(),
+                self._check_design)
+            how = "\n".join(f"{i}. {x}" for i, x in enumerate(design["how_it_works"], 1))
+            io = self._phase("io", T_IO, prompts.SPEC_IO.format(
+                name=design["name"], description=design["description"], how=how, task=trim(self.task, 1500),
+                settings=self._settings_listing(), revision=note) + self._preview_block(), self._check_io)
+            why = ""
+            for _ in range(3):
+                run = self._phase("run", T_RUN, prompts.SPEC_RUN.format(
+                    name=design["name"], description=design["description"], how=how,
+                    inputs=json.dumps(io["input_schema"]), revision=note + why,
+                    setting_keys=", ".join(d.get("key", "?") for d in io.get("settings") or []) or "none"),
+                    lambda r: self._check_run(r, io))
+                edges = self._edge_phase(design, io)
+                spec = {**design, **io, **run, "edge_cases": edges}
+                err = self._validate_spec(spec, new=True)
+                if err:
+                    a.log.emit("watchdog", name="spec_rejected", problem=err)
+                    why = f"\nThe spec put together from the steps was rejected: {err} Fix it here.\n"
+                    continue
+                self.spec = self._clean_spec(spec)
+                a.log.emit("spec", spec=self.spec)
+                ok, msg = self._approve_permissions(self.spec["permissions"])
+                if not ok:
+                    why = f"\n{msg} Plan it so that it works without that, or with less.\n"
+                    continue
+                break
+            else:
+                raise AgentStop("no valid spec after 3 tries at how the tool runs")
+            revision = self._review_plan()
+            if not revision:
+                return
+        raise AgentStop("the plan was revised too many times")
+
+    def _phase(self, name, tool, content, check, tries=4):
+        """One spec phase: a fresh conversation, one tool, checked arguments. Returns them."""
+        a = self.a
+        a.log.emit("phase", phase="spec_" + name)
+        a.wd.reset_conversation()
+        msgs = [{"role": "system", "content": prompts.SYSTEM}, {"role": "user", "content": content}]
+        t = Turns(a, "spec", msgs, [tool], think_tokens=a.cfg["caps"].get("spec_think_budget_tokens", SPEC_THINK_TOKENS))
+        want = tool["function"]["name"]
+        for _ in range(tries):
             reply = t.ask()
-            call = reply["tool_calls"][0]
-            for extra in reply["tool_calls"][1:]:
-                t.result(extra["name"], "ignored: call write_spec only")
-            if call["name"] != "write_spec":
-                t.result(call["name"], "Call write_spec now.")
+            call = next((c for c in reply["tool_calls"] if c["name"] == want), None)
+            for extra in reply["tool_calls"]:
+                if extra is not call:
+                    t.result(extra["name"], f"ignored: call {want} only")
+            if call is None:
                 continue
-            args = call["arguments"]
-            if isinstance(args, dict) and not args.get("name"):
-                guess = re.split(r"[:\s]", self.need.strip(), maxsplit=1)[0]      # the need often starts with the name
-                if NAME_RE.match(guess):
-                    args["name"] = guess
-            err = self._validate_spec(args, new=True)
+            args = call["arguments"] if isinstance(call["arguments"], dict) else {}
+            err = check(args)
             if err:
-                a.log.emit("watchdog", name="spec_rejected", problem=err)
-                t.result("write_spec", "Spec rejected: " + err + " Fix it and call write_spec again.")
+                a.log.emit("watchdog", name="spec_rejected", phase=name, problem=err)
+                t.result(want, f"Rejected: {err} Fix it and call {want} again.")
                 continue
-            self.spec = self._clean_spec(call["arguments"])
-            a.log.emit("spec", spec=self.spec)
-            ok, msg = self._approve_permissions(self.spec["permissions"])
-            if not ok:
-                t.result("write_spec", msg + " Write a spec that works without it, or with less.")
+            t.result(want, "Accepted.")
+            return args
+        raise AgentStop(f"no valid {want} after {tries} tries")
+
+    def _check_design(self, d):
+        if not d.get("name"):
+            guess = re.split(r"[:\s]", self.need.strip(), maxsplit=1)[0]      # the need often starts with the name
+            if NAME_RE.match(guess):
+                d["name"] = guess
+        d["how_it_works"] = [str(x) for x in d.get("how_it_works") or []] if isinstance(d.get("how_it_works"), list) \
+            else [str(d.get("how_it_works") or "")]
+        if not d.get("description") or not d["how_it_works"][0]:
+            return "description and how_it_works are both needed."
+        return self._validate_spec({**d, "input_schema": {"type": "object"}, "output_schema": {"type": "object"},
+                                    "edge_cases": []}, new=True)
+
+    def _check_io(self, d):
+        for k in ("input_schema", "output_schema"):
+            d[k] = object_schema(d.get(k))
+            if not isinstance(d[k], dict) or not d[k].get("properties"):
+                return f"{k} needs properties."
+        d["settings"] = d.get("settings") or []
+        return validate_declarations(d["settings"])
+
+    def _check_run(self, d, io):
+        if not isinstance(d.get("interaction") or [], list):
+            return "interaction must be a list of short steps."
+        d["interaction"] = [str(x) for x in d.get("interaction") or []]
+        d["ui"] = toolui.tidy(d.get("ui"), io["input_schema"])
+        problem = toolui.validate(d["ui"], io["input_schema"])
+        if problem:
+            return problem
+        d["permissions"] = d.get("permissions") or {"network": [], "packages": {}}
+        try:
+            self._norm_perms(d["permissions"], io.get("settings") or [])
+        except PolicyError as e:
+            return str(e) + "."
+        return None
+
+    def _edge_phase(self, design, io):
+        """Edge cases the user's task states. Each must quote the task's own words; one that quotes nothing in the
+        task is dropped (a guessed edge case costs attempts and tests what nobody asked for). Expected errors are
+        written as "fails with an error": the tests assert any error, never a type or a message."""
+        a = self.a
+        args = self._phase("edges", T_EDGES, prompts.SPEC_EDGES.format(
+            name=design["name"], description=design["description"], task=self.task,
+            inputs=json.dumps(io["input_schema"]), preview=self._preview_block()), lambda d: None
+            if isinstance(d.get("cases"), list) else "cases must be a list (empty when the task states none).")
+        kept, dropped = [], []
+        for c in args.get("cases") or []:
+            c = c if isinstance(c, dict) else {"situation": str(c)}
+            sit, exp, quote = (str(c.get(k) or "").strip() for k in ("situation", "expected", "quote"))
+            if not sit or not quoted(quote, self.task):
+                dropped.append(sit or str(c))
                 continue
-            revised = self._review_plan()
-            if revised:
-                t.result("write_spec", "The user revised the plan: " + revised + "\nCall write_spec again with the "
-                                       "plan changed accordingly.")
-                continue
-            t.result("write_spec", "Spec accepted." + (" " + msg if msg else ""))
-            return
-        raise AgentStop("no valid spec after 6 tries")
+            if re.search(r"\b(error|raise|exception|fail|abort|stop)", exp, re.I):
+                exp = "fails with an error"
+            kept.append(f"{sit} -> {exp or 'as the task states: ' + quote}")
+        if dropped:
+            a.log.emit("watchdog", name="edge_case_unquoted", dropped=dropped)
+        a.log.emit("edge_cases", kept=kept, dropped=dropped)
+        return kept
 
     def _preview_block(self):
         p = samples.preview(self.a)
@@ -247,7 +341,8 @@ class Creator:
             return "arguments must be an object."
         for k in ("input_schema", "output_schema"):
             s[k] = object_schema(s.get(k))
-        missing = [k for k in ("name", "description", "input_schema", "output_schema", "edge_cases") if not s.get(k)]
+        s["edge_cases"] = s.get("edge_cases") or []           # the task often states none
+        missing = [k for k in ("name", "description", "input_schema", "output_schema") if not s.get(k)]
         if missing:
             return "missing fields: " + ", ".join(missing) + "."
         if not isinstance(s["name"], str) or not NAME_RE.match(s["name"]):
@@ -328,9 +423,11 @@ class Creator:
     def _code_and_test(self, first):
         a = self.a
         spec_text = json.dumps(self.spec, indent=1)
-        intro = f"Spec approved:\n{spec_text}\n\n"
+        if first:                   # the code is written in its own conversation: the spec phases had theirs
+            self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES}]
+        intro = f"Task the tool is built for: {trim(self.task, 1500)}\n\nSpec approved:\n{spec_text}\n\n"
         for path, what in (("tool.py", prompts.WHAT_TOOL),
-                           ("test_tool.py", prompts.WHAT_TESTS.format(edge_cases="; ".join(self.spec["edge_cases"]))
+                           ("test_tool.py", prompts.WHAT_TESTS.format(edge_cases="; ".join(self.spec["edge_cases"]) or prompts.NO_EDGE_TESTS)
                                             + samples.tests_note(self.files_dir))):
             body = self._ask_file(path, prompts.CODE_FILE.format(intro=intro, path=path, what=what), "code")
             if body is None:
@@ -682,7 +779,16 @@ class Creator:
             for k in ("input_schema", "output_schema"):
                 if args.get(k):
                     args[k] = object_schema(args[k])
-            for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction", "ui"):
+            dropped = ""
+            if "edge_cases" in args:                  # the fix loop may drop an edge case, not add a guessed one
+                given = [str(e) for e in args.get("edge_cases") or []]
+                new = [e for e in given if e not in self.spec["edge_cases"]]
+                args["edge_cases"] = [e for e in given if e in self.spec["edge_cases"]]
+                spec["edge_cases"] = args["edge_cases"]
+                if new:
+                    dropped = (f" New edge cases are not added here ({'; '.join(new)}): the edge cases come from what "
+                               f"the user's task states.")
+            for k in ("description", "input_schema", "output_schema", "interaction", "ui"):
                 if args.get(k):
                     spec[k] = args[k]
             spec["ui"] = toolui.tidy(spec.get("ui"), spec["input_schema"])
@@ -704,7 +810,7 @@ class Creator:
                 return msg, None
             self.spec = spec
             a.log.emit("spec", spec=spec, updated=True)
-            return "Spec updated. " + msg, None
+            return "Spec updated." + dropped + (" " + msg if msg else ""), None
         if name == "run_in_sandbox":
             argv = repair_argv(args.get("argv"))
             try:
@@ -840,6 +946,13 @@ class Creator:
         a.created.append({"name": manifest["name"], "version": v, "created_by": created_by,
                           "attempts": manifest["attempts_used"], "restarts": self.restarts})
         return a.registry.get(manifest["name"])
+
+
+def quoted(quote, text, min_chars=10):
+    """quote is the task's own words: at least min_chars of it, found in text (case, spacing and punctuation aside)."""
+    norm = lambda x: " ".join(re.sub(r"[^\w]+", " ", str(x).lower()).split())
+    q = norm(quote)
+    return len(q) >= min_chars and q in norm(text)
 
 
 def _diff_summary(name, old, new, max_chars=300):

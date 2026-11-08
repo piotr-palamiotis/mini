@@ -8,7 +8,7 @@ import unittest
 from mini import bundled
 from mini.agent.core import Agent
 from mini.harness.registry import Registry
-from tests.helpers import call, fake_backend, fence, step, temp_config
+from tests.helpers import spec_steps, call, fake_backend, fence, step, temp_config
 
 TOOL_BAD = '''
 import os
@@ -40,7 +40,9 @@ def test_missing(tmp_path):
 SPEC = dict(name="count_text_lines", description="Count the lines of a text file.",
             input_schema={"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}},
             output_schema={"type": "object", "properties": {"lines": {"type": "integer"}}},
-            permissions={"network": [], "packages": {}}, edge_cases=["normal file", "empty file", "missing file"])
+            permissions={"network": [], "packages": {}},
+            cases=[{"situation": "a file of two lines", "expected": "2", "quote": "How many lines does a.txt have"},
+                   {"situation": "an empty file", "expected": "raises ValueError", "quote": "empty files are rejected"}])
 
 
 def script(path="a.txt"):
@@ -49,7 +51,7 @@ def script(path="a.txt"):
         step(call("understand", goal="count lines", inputs=[path], outputs=["line count"], side_effects=[],
                   ambiguities=[], plan="1. count")),
         step(call("decide_coverage", reasoning="registry empty", use=[], missing=["count the lines of a text file"])),
-        step(call("write_spec", **SPEC)),
+        *spec_steps(SPEC),
         step(content=fence("tool.py", TOOL_BAD)),
         step(content=fence("test_tool.py", TESTS)),
         step(call("replace", path="tool.py", old=TOOL_FIX_OLD, new=TOOL_FIX_NEW), call("run_tests")),
@@ -83,6 +85,12 @@ class PipelineTest(unittest.TestCase):
             self.assertIn(k, kinds)
         tests = [e for e in events if e["kind"] == "test_run"]
         self.assertEqual([t["passed"] for t in tests], [False, True])
+        # an edge case that quotes the task is kept; one that quotes words the task does not have is dropped
+        edges = [e for e in events if e["kind"] == "edge_cases"][0]
+        self.assertEqual(edges["kept"], ["a file of two lines -> 2"])
+        self.assertEqual(edges["dropped"], ["an empty file"])
+        self.assertEqual([e.get("phase") for e in events if e["kind"] == "phase" and str(e.get("phase")).startswith("spec_")],
+                         ["spec_design", "spec_io", "spec_run", "spec_edges"])
         # the failed first attempt is written down and the fix starts in a fresh conversation built from it
         note = [e for e in events if e["kind"] == "attempt_note"]
         self.assertEqual(len(note), 1)

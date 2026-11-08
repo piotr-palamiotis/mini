@@ -91,6 +91,8 @@ class ScriptedIO:
             return _coerce(kind, self.inputs[key], choices, multi)
         self.asked.append(key)
         if key not in self.answers:
+            if default is not None:         # as in a real run, where the user is offered the default
+                return _coerce(kind, default, choices, multi)
             raise MissingInput(f"no answer for {key!r}")
         return _coerce(kind, self.answers[key], choices, multi)
 

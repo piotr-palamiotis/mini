@@ -10,7 +10,7 @@ from unittest import mock
 from mini.agent.core import Agent
 from mini.harness.approvals import Decision
 from mini.harness.backends import Endpoint, OpenAIBackend
-from tests.helpers import call, fake_backend, fence, step, temp_config
+from tests.helpers import spec_steps, call, fake_backend, fence, step, temp_config
 from tests.test_pipeline import SPEC, TESTS, TOOL_BAD, TOOL_FIX_NEW, TOOL_FIX_OLD
 
 GOOD = TOOL_BAD.replace(TOOL_FIX_OLD, TOOL_FIX_NEW)
@@ -21,7 +21,7 @@ def local_failing():
     """Local model: spec, a bad tool, one edit that does not fix it (2 attempts), then the failure lesson."""
     return [step(call("understand", goal="count lines", inputs=["in/a.txt"], outputs=["n"], plan="1")),
             step(call("decide_coverage", reasoning="empty", use=[], missing=["count the lines of a text file"])),
-            step(call("write_spec", **SPEC)),
+            *spec_steps(SPEC),
             step(content=fence("tool.py", TOOL_BAD)),
             step(content=fence("test_tool.py", TESTS)),
             step(call("replace", path="tool.py", old="import os", new="import os  # try"), call("run_tests")),

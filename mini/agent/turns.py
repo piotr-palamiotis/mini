@@ -47,10 +47,16 @@ def fn(name, desc, props, req=()):
 
 
 class Turns:
-    def __init__(self, agent, step, messages, tools, implicit=None):
+    def __init__(self, agent, step, messages, tools, implicit=None, think_tokens=None):
         self.a, self.step, self.messages, self.tools = agent, step, messages, tools
+        self.think_tokens = think_tokens   # this conversation's own thinking budget per reply (None: the default)
         self.runaway = False
         self.implicit = implicit       # implicit(reply) -> synthesized tool call or None (e.g. code without a call)
+
+    def _options(self):
+        if self.think_tokens and self.a.model_options.get("thinking_controls", True):
+            return {**self.a.model_options, "reasoning_budget_tokens": self.think_tokens}
+        return self.a.model_options
 
     def user(self, text):
         self.messages.append({"role": "user", "content": text})
@@ -83,7 +89,7 @@ class Turns:
             try:
                 with a.hold_model():
                     reply = a.backend.chat(a.model, self.messages, [] if text_only else self.tools, think=a.cfg["thinking"].get(self.step, True) and not self.runaway,
-                                           options=a.model_options, on_delta=stream, stop_event=a.stop_event)
+                                           options=self._options(), on_delta=stream, stop_event=a.stop_event)
             except Stopped:
                 stream.close("stopped")
                 a.check_abort()

@@ -33,7 +33,7 @@ class UITest(unittest.TestCase):
                 await pilot.press("enter")
                 await pilot.press(*"How many lines does a.txt have?")
                 await pilot.press("enter")
-                for _ in range(600):
+                for _ in range(1500):
                     await pilot.pause(0.1)
                     card = app.card
                     if card is not None and card.active and id(card) not in handled:
