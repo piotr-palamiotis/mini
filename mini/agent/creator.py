@@ -580,6 +580,10 @@ class Creator:
             cur = open(full).read()
             return f"{path} updated. Current content:\n{codeblocks.numbered(cur)}", None
         if name == "update_spec":
+            if another_tool(self.spec, args):
+                return (f"Spec change rejected: this build is {self.spec['name']}: {self.spec['description']} "
+                        f"Make it do that. A tool for something else is built on its own after this one, "
+                        f"if the task needs it."), None
             spec = dict(self.spec)
             for k in ("description", "input_schema", "output_schema", "edge_cases", "interaction", "ui"):
                 if args.get(k):
@@ -739,6 +743,21 @@ class Creator:
         a.created.append({"name": manifest["name"], "version": v, "created_by": created_by,
                           "attempts": manifest["attempts_used"], "restarts": self.restarts})
         return a.registry.get(manifest["name"])
+
+
+def _content_words(text):
+    return {w for w in re.findall(r"[a-z]{4,}", str(text).lower())} - {
+        "with", "from", "that", "this", "into", "using", "returns", "return", "list", "file", "files", "tool", "given",
+        "each", "their", "them", "items", "data", "output", "input", "inputs", "path", "paths", "html"}
+
+
+def another_tool(spec, args):
+    """True when an update_spec during a build would make it a different tool: its new description shares no
+    content word with the current one and its new inputs (if given) share no field with the current inputs."""
+    if not args.get("description") or _content_words(args["description"]) & _content_words(spec.get("description")):
+        return False
+    new = set(((args.get("input_schema") or {}).get("properties") or {}))
+    return not new or not new & set(((spec.get("input_schema") or {}).get("properties") or {}))
 
 
 def ask_keys_outside_schema(source, spec):

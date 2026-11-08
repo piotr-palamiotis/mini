@@ -244,5 +244,20 @@ class SettingDeclarationTest(unittest.TestCase):
         self.assertIn("'type' is not", validate_declarations([bad]))
 
 
+class SpecDriftTest(unittest.TestCase):
+    def test_a_build_cannot_become_another_tool(self):
+        from mini.agent.creator import another_tool
+        feeds = {"name": "parse_feeds", "description": "Parses RSS and Atom feeds and returns a list of items.",
+                 "input_schema": {"properties": {"urls": {}, "max_items": {}}}}
+        email = {"description": "Sends an HTML email using the configured mail server.",
+                 "input_schema": {"properties": {"html_body": {}, "recipient": {}, "subject": {}}}}
+        self.assertTrue(another_tool(feeds, email))
+        self.assertTrue(another_tool(feeds, {"description": email["description"]}))
+        self.assertFalse(another_tool(feeds, {"description": "Reads RSS or Atom feeds; newest first."}))
+        self.assertFalse(another_tool(feeds, {"description": "Collects entries from syndication sources.",
+                                              "input_schema": {"properties": {"urls": {}, "sort_by": {}}}}))
+        self.assertFalse(another_tool(feeds, {"input_schema": email["input_schema"]}))
+
+
 if __name__ == "__main__":
     unittest.main()
