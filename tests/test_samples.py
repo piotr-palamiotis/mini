@@ -33,7 +33,9 @@ class SamplesTest(unittest.TestCase):
         self.assertEqual(len(csv), samples.KEEP_LINES)
         self.assertEqual(csv[0], "id,qty,unit_price")
         self.assertEqual(dict(samples.listing(files)), got)
-        self.assertIn("samples/feed.xml", samples.tests_note(files))
+        note = samples.tests_note(files)
+        self.assertIn("samples/feed.xml:\n```\n<rss><item>a</item></rss>", note)
+        self.assertNotIn("samples/pic.jpg:", note)                    # binary: named, not shown
 
     def test_no_inputs_no_samples(self):
         a = types.SimpleNamespace(folder=self.d, task_inputs=set())
@@ -53,6 +55,8 @@ class TestsReadTheSamplesTest(unittest.TestCase):
         cr.files_dir, cr.spec = d, {"edge_cases": [], "input_schema": {"type": "object", "properties": {}}}
         open(os.path.join(d, "test_tool.py"), "w").write("def test_a():\n    data = '<rss>'\n")
         self.assertIn("samples/feed.xml", cr._edge_case_gap())
+        self.assertEqual(cr._edge_case_gap(), "")                     # said once
+        cr.samples_nudged = False
         open(os.path.join(d, "test_tool.py"), "w").write(
             "import os\ndef test_a():\n    p = os.path.join(os.path.dirname(__file__), 'samples', 'feed.xml')\n")
         self.assertEqual(cr._edge_case_gap(), "")

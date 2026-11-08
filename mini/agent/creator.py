@@ -92,6 +92,7 @@ class Creator:
         self.restarts = 0
         self.consults = 0
         self.errors = {}
+        self.samples_nudged = False
         self.last_output, self.last_hash = "", None
         a.log.emit("phase", phase="create", need=need)
         self._copy_samples()
@@ -117,6 +118,7 @@ class Creator:
         self.restarts, self.last_output, self.last_hash = 0, "", None
         self.consults = 0
         self.errors = {}
+        self.samples_nudged = False
         if a.cfg["lessons"]["enabled"]:
             stored = a.lessons.add({"capability": f"{manifest['name']}: {manifest['description']}",
                                     "outcome": "real_run_failure", "problem": problem[:400], "cause": "", "avoid": "",
@@ -349,10 +351,13 @@ class Creator:
             gaps.append(f"test_tool.py has {tests} tests for {need} edge cases. Add tests so that every edge case in "
                         f"the spec is covered.")
         got = samples.listing(self.files_dir)
-        if got and "samples" not in open(os.path.join(self.files_dir, "test_tool.py")).read():
+        if got and not getattr(self, "samples_nudged", False) and \
+                "samples" not in open(os.path.join(self.files_dir, "test_tool.py")).read():
+            self.samples_nudged = True          # once: a tool that reads none of these files is left as it is
             gaps.append(f"test_tool.py does not read the real samples ({', '.join('samples/' + p for p, _ in got)}). "
-                        f"The normal-use test reads them from `os.path.join(os.path.dirname(__file__), \"samples\", "
-                        f"...)` instead of data typed into the test.")
+                        f"If this tool reads files like these, the normal-use test reads them from "
+                        f"`os.path.join(os.path.dirname(__file__), \"samples\", ...)` instead of data typed into the "
+                        f"test; if it reads none of them, leave the tests as they are.")
         unknown = ask_keys_outside_schema(open(os.path.join(self.files_dir, "tool.py")).read(), self.spec)
         if unknown:
             props = sorted((self.spec.get("input_schema") or {}).get("properties") or {})

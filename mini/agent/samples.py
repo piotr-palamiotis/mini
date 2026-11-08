@@ -89,12 +89,24 @@ def listing(files_dir):
     return sorted(out)
 
 
+SHOW_CHARS = 4000            # sample text shown whole to the test step, all files together
+
+
 def tests_note(files_dir):
     got = listing(files_dir)
     if not got:
         return ""
     names = ", ".join(f"samples/{p}" for p, _ in got)
+    shown, left = [], SHOW_CHARS
+    for p, n in got:
+        full = os.path.join(files_dir, "samples", p)
+        if n <= left and _is_text(full):
+            shown.append(f"samples/{p}:\n```\n{open(full, encoding='utf-8', errors='replace').read().rstrip()}\n```")
+            left -= n
+    body = ("\n\n" + "\n\n".join(shown)) if shown else ""
     return (f" Real samples of the task's input files are next to tool.py: {names} (a long line-based file keeps its "
-            f"first {KEEP_LINES} lines). The normal-use test reads them, e.g. `os.path.join(os.path.dirname(__file__), "
-            f"\"samples\", ...)`, copies what it needs into tmp_path and checks the tool's result on them. Do not type "
-            f"sample data of your own when a real sample exists.")
+            f"first {KEEP_LINES} lines). When this tool reads files like these, the normal-use test reads them, e.g. "
+            f"`os.path.join(os.path.dirname(__file__), \"samples\", ...)`, copies what it needs into tmp_path, and "
+            f"asserts the values they hold: the count per file and concrete values from each file (a name, a "
+            f"title, a number). `len(x) > 0` or `\"key\" in result` alone tests nothing. Do not type sample data "
+            f"of your own when a real sample exists.{body}")
