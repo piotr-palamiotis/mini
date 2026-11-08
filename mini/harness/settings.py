@@ -34,6 +34,10 @@ def validate_declarations(decls):
         sc = d.get("schema")
         if not isinstance(sc, dict) or not isinstance(sc.get("properties"), dict) or not sc["properties"]:
             return f"setting {d['key']}: schema must be a JSON Schema object with properties."
+        bad = [f for f, prop in sc["properties"].items() if not isinstance(prop, dict)]
+        if bad:                                     # {"properties": {"type": "string"}} makes a field called type
+            return (f"setting {d['key']}: each entry of schema.properties is a field name mapped to that field's "
+                    f"schema, like {{\"host\": {{\"type\": \"string\"}}}}; {', '.join(map(repr, bad))} is not.")
         if not isinstance(d.get("secret") or [], list) or any(s not in sc["properties"] for s in d.get("secret") or []):
             return f"setting {d['key']}: secret lists field names from its schema."
     return None

@@ -235,5 +235,14 @@ class InTaskTest(unittest.TestCase):
         self.assertIn("pass it in the tool inputs", text)
 
 
+class SettingDeclarationTest(unittest.TestCase):
+    def test_a_setting_field_must_be_a_schema(self):
+        from mini.harness.settings import validate_declarations
+        ok = {"key": "mail_server", "description": "SMTP", "schema": {"type": "object", "properties": {"host": {"type": "string"}}}}
+        self.assertIsNone(validate_declarations([ok]))
+        bad = {"key": "default_recipient", "description": "to", "schema": {"type": "object", "properties": {"type": "string"}}}
+        self.assertIn("'type' is not", validate_declarations([bad]))
+
+
 if __name__ == "__main__":
     unittest.main()
