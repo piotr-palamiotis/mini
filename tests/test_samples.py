@@ -60,6 +60,9 @@ class TestsReadTheSamplesTest(unittest.TestCase):
         open(os.path.join(d, "test_tool.py"), "w").write(
             "import os\ndef test_a():\n    p = os.path.join(os.path.dirname(__file__), 'samples', 'feed.xml')\n")
         self.assertEqual(cr._edge_case_gap(), "")
+        open(os.path.join(d, "samples", "feed.xml"), "w").write('<?xml version="1.0"?><rss><channel>')
+        open(os.path.join(d, "test_tool.py"), "a").write("    data = '<?xml version=\"1.0\"?><rss><title>'\n")
+        self.assertIn("types the content of samples/feed.xml", cr._edge_case_gap())      # every time, not once
 
 
 if __name__ == "__main__":

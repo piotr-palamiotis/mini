@@ -350,6 +350,12 @@ class Creator:
         if tests < need:
             gaps.append(f"test_tool.py has {tests} tests for {need} edge cases. Add tests so that every edge case in "
                         f"the spec is covered.")
+        typed = samples.retyped(self.files_dir, open(os.path.join(self.files_dir, "test_tool.py")).read())
+        if typed:
+            gaps.append(f"test_tool.py types the content of {', '.join('samples/' + p for p in typed)} into the test. "
+                        f"A typed copy differs from the real file. Read the file from "
+                        f"`os.path.join(os.path.dirname(__file__), \"samples\", ...)` and copy it into tmp_path; type "
+                        f"only small inputs no sample covers (a missing file, an edge case).")
         got = samples.listing(self.files_dir)
         if got and not getattr(self, "samples_nudged", False) and \
                 "samples" not in open(os.path.join(self.files_dir, "test_tool.py")).read():
