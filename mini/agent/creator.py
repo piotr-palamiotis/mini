@@ -149,8 +149,14 @@ class Creator:
             if call["name"] != "write_spec":
                 t.result(call["name"], "Call write_spec now.")
                 continue
-            err = self._validate_spec(call["arguments"], new=True)
+            args = call["arguments"]
+            if isinstance(args, dict) and not args.get("name"):
+                guess = re.split(r"[:\s]", self.need.strip(), maxsplit=1)[0]      # the need often starts with the name
+                if NAME_RE.match(guess):
+                    args["name"] = guess
+            err = self._validate_spec(args, new=True)
             if err:
+                a.log.emit("watchdog", name="spec_rejected", problem=err)
                 t.result("write_spec", "Spec rejected: " + err + " Fix it and call write_spec again.")
                 continue
             self.spec = self._clean_spec(call["arguments"])
@@ -750,9 +756,18 @@ class Creator:
         return a.registry.get(manifest["name"])
 
 
+def _lower_types(x):
+    if isinstance(x, dict):
+        return {k: (v.lower() if k == "type" and isinstance(v, str) else _lower_types(v)) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_lower_types(v) for v in x]
+    return x
+
+
 def object_schema(x):
     """A schema the local model gave as a bare field map ({"csv": {"type": "string"}}) becomes the object schema it
-    meant; anything else is returned as it is."""
+    meant, and type names are lower case ("STRING" is "string"); anything else is returned as it is."""
+    x = _lower_types(x)
     if isinstance(x, dict) and x and not {"type", "properties"} & set(x) \
             and all(isinstance(v, dict) and ("type" in v or "description" in v) for v in x.values()):
         return {"type": "object", "properties": x}

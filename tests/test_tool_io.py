@@ -263,8 +263,11 @@ class SpecDriftTest(unittest.TestCase):
         from mini.agent.creator import object_schema
         self.assertEqual(object_schema({"csv": {"type": "string"}}), {"type": "object", "properties": {"csv": {"type": "string"}}})
         full = {"type": "object", "properties": {"a": {"type": "string"}}}
-        self.assertIs(object_schema(full), full)
+        self.assertEqual(object_schema(full), full)
         self.assertEqual(object_schema({"type": "object"}), {"type": "object"})
+
+        self.assertEqual(object_schema({"type": "object", "properties": {"a": {"type": "STRING"}}}),
+                         {"type": "object", "properties": {"a": {"type": "string"}}})
 
 
 if __name__ == "__main__":
