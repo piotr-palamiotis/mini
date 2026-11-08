@@ -89,15 +89,17 @@ def listing(files_dir):
     return sorted(out)
 
 
-def retyped(files_dir, test_text):
-    """Samples whose opening text test_text contains: the test typed the file instead of reading it."""
+def retyped(files_dir, test_text, window=32, need=3):
+    """Samples test_text holds a copy of: `need` or more stretches of `window` characters from the start of the file
+    appear in it. One stretch is not enough, since an XML declaration or a CSV header is shared by any made-up input."""
     out = []
     for p, _ in listing(files_dir):
         full = os.path.join(files_dir, "samples", p)
         if not _is_text(full):
             continue
-        head = open(full, encoding="utf-8", errors="replace").read(200).strip()[:24]
-        if len(head) >= 12 and head in test_text:
+        text = open(full, encoding="utf-8", errors="replace").read(800)
+        hits = sum(1 for i in range(0, max(len(text) - window, 0) + 1, window // 2) if text[i:i + window] in test_text)
+        if hits >= need:
             out.append(p)
     return out
 
