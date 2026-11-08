@@ -42,5 +42,21 @@ class SamplesTest(unittest.TestCase):
         self.assertEqual(samples.tests_note(os.path.join(self.d, "b")), "")
 
 
+class TestsReadTheSamplesTest(unittest.TestCase):
+    def test_tests_that_type_their_own_data_go_back(self):
+        from mini.agent.creator import Creator
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "samples"))
+        open(os.path.join(d, "samples", "feed.xml"), "w").write("<rss/>")
+        open(os.path.join(d, "tool.py"), "w").write("def run(inputs, io):\n    return {}\n")
+        cr = Creator(types.SimpleNamespace())
+        cr.files_dir, cr.spec = d, {"edge_cases": [], "input_schema": {"type": "object", "properties": {}}}
+        open(os.path.join(d, "test_tool.py"), "w").write("def test_a():\n    data = '<rss>'\n")
+        self.assertIn("samples/feed.xml", cr._edge_case_gap())
+        open(os.path.join(d, "test_tool.py"), "w").write(
+            "import os\ndef test_a():\n    p = os.path.join(os.path.dirname(__file__), 'samples', 'feed.xml')\n")
+        self.assertEqual(cr._edge_case_gap(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

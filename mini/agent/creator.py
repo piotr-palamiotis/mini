@@ -348,6 +348,11 @@ class Creator:
         if tests < need:
             gaps.append(f"test_tool.py has {tests} tests for {need} edge cases. Add tests so that every edge case in "
                         f"the spec is covered.")
+        got = samples.listing(self.files_dir)
+        if got and "samples" not in open(os.path.join(self.files_dir, "test_tool.py")).read():
+            gaps.append(f"test_tool.py does not read the real samples ({', '.join('samples/' + p for p, _ in got)}). "
+                        f"The normal-use test reads them from `os.path.join(os.path.dirname(__file__), \"samples\", "
+                        f"...)` instead of data typed into the test.")
         unknown = ask_keys_outside_schema(open(os.path.join(self.files_dir, "tool.py")).read(), self.spec)
         if unknown:
             props = sorted((self.spec.get("input_schema") or {}).get("properties") or {})
