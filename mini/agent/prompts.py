@@ -76,6 +76,8 @@ command: with all values as arguments in one line, or with none and the tool ask
 - The working directory holds copies of the files named in the inputs, at their relative paths. Every file the
   tool writes there lands at the same relative path in the user's folder: change an input file in place, write
   a new file at the path the inputs or the task give, and return the relative paths. Put scratch files in /tmp.
+- A tool cannot call other tools (io has no such method). When the task needs an existing tool's result, the
+  agent calls that tool itself, before or after this one: this tool does only the part no existing tool does.
 - Use the Python standard library unless the spec declares packages. System packages (apt) and Python packages
   (pip) must be listed in the spec; the user approves them and the harness installs them in the sandbox.
 - Network access works only to the hosts declared in the spec as "host:port", or "setting:<key>" when the
