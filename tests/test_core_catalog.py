@@ -88,7 +88,7 @@ class FileCapabilityTest(unittest.TestCase):
         return open(os.path.join(self.root, rel)).read()
 
     def test_the_task_inputs_stay_as_given(self):
-        self.a.task_inputs = self.a._input_files({"inputs": ["a.txt", "src/", "a description, not a path"],
+        self.a.task_inputs = self.a._input_files({"inputs": ["a.txt (the notes)", "src/", "a description, not a path"],
                                                   "outputs": ["src/n.py"]})
         self.assertEqual(self.a.task_inputs, {"a.txt", "src/m.py"})
         self.assertIn("is an input of this task", self.act("write_file", path="a.txt", content="x"))

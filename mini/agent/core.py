@@ -546,6 +546,8 @@ class Agent:
             out = set()
             for x in items:
                 p = str(x).strip().strip("`'\"").rstrip("/")
+                if p and not os.path.exists(os.path.join(self.folder, p)):     # "feeds/ (the three feeds)"
+                    p = p.split()[0].strip("`'\",:;()").rstrip("/")
                 full = os.path.normpath(os.path.join(self.folder, p))
                 if not p or not full.startswith(os.path.normpath(self.folder) + os.sep):
                     continue
