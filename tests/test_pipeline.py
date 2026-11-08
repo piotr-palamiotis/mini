@@ -83,6 +83,12 @@ class PipelineTest(unittest.TestCase):
             self.assertIn(k, kinds)
         tests = [e for e in events if e["kind"] == "test_run"]
         self.assertEqual([t["passed"] for t in tests], [False, True])
+        # the failed first attempt is written down and the fix starts in a fresh conversation built from it
+        note = [e for e in events if e["kind"] == "attempt_note"]
+        self.assertEqual(len(note), 1)
+        self.assertIn("first version", note[0]["text"])
+        self.assertIn("test_counts", note[0]["text"])
+        self.assertIn("fresh_context", [e.get("phase") for e in events if e["kind"] == "phase"])
         inv = [e for e in events if e["kind"] == "invoke" and "output" in e][0]
         self.assertEqual(inv["output"], {"lines": 2})
         # install happened only after a passing test run

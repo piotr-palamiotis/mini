@@ -173,32 +173,29 @@ asks you for the content). Then call `run_tests`. If the fix needs another packa
 STEP_BACK = """Stop editing. You have rewritten {path} {n} times. Call `explain` first: what still fails, why,
 and the one change you will make next."""
 
-RESTART = """Fresh start on the same tool. Earlier tries failed {streak} times in a row.
+RESTART = """Fresh start on the same tool. Earlier tries failed {streak} times in a row. Diagnose the failure from
+the latest output below, then fix it: edit with `replace` / `replace_lines`, or call `rewrite_file` for a whole new
+file. Then call `run_tests`."""
+
+STATE = """{head}You are building the tool {name} for this task: {task}
 
 Spec:
 {spec}
 
 Current files:
 {files}
+{samples}{advice}
+Earlier attempts (each changed the files, ran the tests and failed; the harness keeps this list, the conversation of
+those attempts is gone):
+{attempts}
 
-Last failing test output:
+Latest test run:
 {output}
 
-Diagnose the failure from the output above, then fix it: edit with `replace` / `replace_lines`, or call
-`rewrite_file` for a whole new file. Then call `run_tests`."""
+Do not repeat a change listed above that did not help: the same failure will come back."""
 
 HANDOVER = """You take over building this tool from another model. Its attempts so far, per model tier: {attempts}.
-
-Spec:
-{spec}
-
-Current files:
-{files}
-
-Last failing test output:
-{output}
-
-Diagnose the failure from the output above. Keep what works; fix what does not. Fix the tests too if they
+Diagnose the failure from the latest output below. Keep what works; fix what does not. Fix the tests too if they
 contradict the spec."""
 
 EXECUTE = """Task from the user:

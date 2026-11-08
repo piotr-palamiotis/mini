@@ -8,6 +8,7 @@ Enforced in code:
   - a permission or package increase always goes through the approval gate
   - a spec that does what a core capability (mini/core) does is rejected
 """
+import difflib
 import hashlib
 import json
 import os
@@ -94,6 +95,7 @@ class Creator:
         self.errors = {}
         self.samples_nudged = False
         self.last_output, self.last_hash = "", None
+        self.attempt_log, self.snapshot, self.repair_note, self.advice = [], {}, "", None
         a.log.emit("phase", phase="create", need=need)
         self._copy_samples()
         self._spec_phase()
@@ -119,6 +121,9 @@ class Creator:
         self.consults = 0
         self.errors = {}
         self.samples_nudged = False
+        self.attempt_log, self.snapshot, self.advice = [], self._read_files(), None
+        self.repair_note = (f"The installed v{manifest['version']} failed on the real task: {problem}\n"
+                            f"Evidence:\n{trim(evidence, 1200)}\n")
         if a.cfg["lessons"]["enabled"]:
             stored = a.lessons.add({"capability": f"{manifest['name']}: {manifest['description']}",
                                     "outcome": "real_run_failure", "problem": problem[:400], "cause": "", "avoid": "",
@@ -340,8 +345,14 @@ class Creator:
         res = self._run_tests()
         out = self._test_message(res)
         verdict = a.wd.on_test(res["passed"], True, self._hash())
-        self.messages.append({"role": "user", "content": out + ("" if res["passed"] else "\n\n" + self._files_view())})
-        return self._after_test(verdict) or self._fix_loop()
+        if not res["passed"]:
+            self._record_attempt(res)
+        done = self._after_test(verdict)
+        if done:
+            return done
+        if verdict == "continue":
+            self._fresh(out)
+        return self._fix_loop()
 
     def _edge_case_gap(self):
         gaps = []
@@ -501,11 +512,51 @@ class Creator:
         self._record_lesson("restart")
         self.restarts += 1
         a.log.emit("phase", phase="restart", tool=self.spec["name"], restarts=self.restarts, attempts=a.wd.attempts)
+        self._fresh(trim(self.last_output), head=prompts.RESTART.format(
+            streak=a.cfg["watchdogs"]["fail_streak_restart"]) + "\n\n")
+
+    # ================================================================== attempts: state kept on disk, fresh context
+    def _read_files(self):
+        return {n: open(os.path.join(self.files_dir, n)).read() for n in FILES
+                if os.path.exists(os.path.join(self.files_dir, n))}
+
+    def _record_attempt(self, res):
+        """One line per failed attempt, written by the harness: what changed since the last test run, and how the
+        tests failed. It replaces the conversation of that attempt (see _fresh)."""
+        now = self._read_files()
+        changes = [_diff_summary(n, self.snapshot.get(n, ""), now.get(n, "")) for n in FILES]
+        changes = [c for c in changes if c] if self.snapshot else ["first version of tool.py and test_tool.py"]
+        self.snapshot = now
+        entry = (f"Attempt {self.a.wd.attempts}: {self.last_test.get('summary', '')}\n"
+                 f"  changed: {'; '.join(changes) or 'nothing'}\n"
+                 + "".join(f"  failed: {f}\n" for f in _failures(self.last_output)))
+        self.attempt_log.append(entry)
+        open(os.path.join(self.build, "attempts.md"), "w").write("\n".join(self.attempt_log))
+        self.a.log.emit("attempt_note", text=entry)
+
+    def _attempts_text(self, keep=6):
+        log = self.attempt_log
+        if not log:
+            return "(none yet)"
+        older = f"({len(log) - keep} earlier attempts not shown)\n" if len(log) > keep else ""
+        return older + "\n".join(log[-keep:])
+
+    def _fresh(self, output, head=""):
+        """A new conversation for the next attempt: everything it needs is rebuilt from the files and the attempt
+        log, so the context stays the same size however many attempts there were."""
+        a = self.a
         a.wd.reset_conversation()
+        got = samples.listing(self.files_dir)
+        content = prompts.STATE.format(
+            head=head + (self.repair_note or ""), name=self.spec["name"], task=trim(self.task, 800),
+            spec=json.dumps(self.spec, indent=1), files=self._files_view(),
+            samples=(f"Real samples next to tool.py: {', '.join('samples/' + p for p, _ in got)}\n" if got else ""),
+            advice=(f"Advice from the user: {self.advice}\n" if self.advice else ""),
+            attempts=self._attempts_text(), output=output)
         self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES},
-                         {"role": "user", "content": self._lessons_block() + prompts.RESTART.format(
-                             streak=a.cfg["watchdogs"]["fail_streak_restart"], spec=json.dumps(self.spec, indent=1),
-                             files=self._files_view(), output=trim(self.last_output))}]
+                         {"role": "user", "content": self._lessons_block() + content}]
+        a.log.emit("phase", phase="fresh_context", tool=self.spec["name"], attempts=a.wd.attempts,
+                   chars=len(content))
 
     # ================================================================== fix loop
     def _fix_loop(self, pending=None):
@@ -549,10 +600,16 @@ class Creator:
                         out += "\nNothing changed since the last run, so this does not count as an attempt. Edit the code first."
                     verdict = a.wd.on_test(res["passed"], changed, self._hash())
                     t.result(name, out + note)
+                    if changed and not res["passed"]:
+                        self._record_attempt(res)
                     done = self._after_test(verdict)
                     if done:
                         return done
                     if verdict in ("restart", "budget"):      # fresh conversation or a new model: drop the rest of this reply
+                        break
+                    if changed and not res["passed"]:         # a failed attempt: the next one starts fresh
+                        self._fresh(out)
+                        self.messages.append({"role": "user", "content": prompts.FIX})
                         break
                     continue
                 self._pending_result_done = False
@@ -747,10 +804,7 @@ class Creator:
         """A stronger model takes over the tool: fresh conversation with the spec, the files and the last failure."""
         a = self.a
         a.log.emit("phase", phase="handover", tool=self.spec["name"], tier=a.tier, model=a.model)
-        self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES},
-                         {"role": "user", "content": self._lessons_block() + prompts.HANDOVER.format(
-                             attempts=json.dumps(a.wd.tier_attempts), spec=json.dumps(self.spec, indent=1),
-                             files=self._files_view(), output=trim(self.last_output))}]
+        self._fresh(trim(self.last_output), head=prompts.HANDOVER.format(attempts=json.dumps(a.wd.tier_attempts)) + "\n\n")
         self.messages.append({"role": "user", "content": prompts.FIX})
 
     def _install(self):
@@ -786,6 +840,37 @@ class Creator:
         a.created.append({"name": manifest["name"], "version": v, "created_by": created_by,
                           "attempts": manifest["attempts_used"], "restarts": self.restarts})
         return a.registry.get(manifest["name"])
+
+
+def _diff_summary(name, old, new, max_chars=300):
+    """'tool.py lines 12-15, 30 (+4 -2): <first new line>' -- what an attempt changed in one file."""
+    if old == new:
+        return ""
+    a, b = old.splitlines(), new.splitlines()
+    spans, added, removed, first = [], 0, 0, ""
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        added, removed = added + (j2 - j1), removed + (i2 - i1)
+        spans.append(f"{j1 + 1}" if j2 - j1 <= 1 else f"{j1 + 1}-{j2}")
+        if not first:
+            first = next((ln.strip() for ln in b[j1:j2] if ln.strip()), "") or \
+                next(("removed " + ln.strip() for ln in a[i1:i2] if ln.strip()), "")
+    text = f"{name} lines {', '.join(spans[:6])}{' ...' if len(spans) > 6 else ''} (+{added} -{removed})"
+    return (text + (f": {first}" if first else ""))[:max_chars]
+
+
+def _failures(output, limit=5):
+    """'test_name: first error line' for each failing test of a pytest run (collection errors included)."""
+    out = []
+    for m in re.finditer(r"^(FAILED|ERROR) (\S+?)(?:::(\w+))?(?: - (.*))?$", output or "", re.M):
+        out.append(f"{m.group(3) or 'collecting ' + os.path.basename(m.group(2))}: {(m.group(4) or m.group(1)).strip()[:160]}")
+    if not out:
+        for line in (output or "").splitlines():
+            if line.startswith("E ") or "Error" in line[:40]:
+                out.append(line.strip()[:160])
+                break
+    return out[:limit]
 
 
 def _lower_types(x):
