@@ -122,6 +122,13 @@ class CopyInExportTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.box, "data", "x.csv")))
         self.assertFalse(os.path.exists(os.path.join(self.box, "r.md")))
 
+    def test_an_output_path_in_an_existing_folder_finds_that_folder(self):
+        os.makedirs(os.path.join(self.root, "out"))
+        self.assertEqual(ws.copy_in(self.root, self.box, {"o": "out/r.toml", "p": "nofolder/r.toml"}),
+                         {"o": "out/r.toml", "p": "nofolder/r.toml"})
+        self.assertTrue(os.path.isdir(os.path.join(self.box, "out")))
+        self.assertFalse(os.path.exists(os.path.join(self.box, "nofolder")))
+
     def test_the_sandbox_never_sees_git(self):
         self.assertEqual(ws.copy_in(self.root, self.box, {"all": "."}), {"all": "."})
         self.assertTrue(os.path.isfile(os.path.join(self.box, "notes.txt")))

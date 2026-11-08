@@ -135,6 +135,9 @@ def copy_in(folder, box, value, outside=()):
                 raise
             return v                                # not a path: a value like any other
         if not os.path.exists(full):                # an output path: an absolute one becomes relative
+            parent = os.path.dirname(rel)
+            if parent and os.path.isdir(os.path.join(folder, parent)):     # its folder exists for the tool too
+                os.makedirs(os.path.normpath(os.path.join(box, parent)), exist_ok=True)
             return rel if os.path.isabs(p) else v
         _copy(full, os.path.normpath(os.path.join(box, rel)), budget)       # "." copies the whole folder
         return rel
