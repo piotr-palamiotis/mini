@@ -101,6 +101,7 @@ class ScriptedIO:
 
     def say(self, text):
         self.said.append(str(text))
+        print(f"[io.say] {text}")       # pytest shows it under a failing test: a swallowed error stays visible
 
 
 def channel(inputs, settings):
