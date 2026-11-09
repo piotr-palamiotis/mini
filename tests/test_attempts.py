@@ -39,3 +39,12 @@ class AttemptLogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ElisionTest(unittest.TestCase):
+    def test_a_bare_comment_of_dots_in_a_complete_file_is_a_comment(self):
+        from mini.agent import codeblocks as c
+        self.assertEqual(c.elided("tool.py", "def run(i, io):\n    x = 1\n    #     ...\n    return {}\n"), "")
+        why = c.elided("tool.py", "def a():\n    return 1\n# ... rest of the code unchanged\n")
+        self.assertIn("line 3", why)                   # left-out code is still refused, and the line is named
+        self.assertTrue(c.elided("tool.py", "def run(i, io):\n    if x:\n    # ...\n"))     # does not parse

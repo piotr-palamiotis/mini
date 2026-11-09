@@ -6,6 +6,7 @@ fenced blocks in plain text; the harness finds the file name in, in this order:
   2. a first-line comment:       # file: tool.py     or   # tool.py
   3. the closest line above the block that mentions a file name (e.g. **tool.py**)
 """
+import ast
 import re
 
 FENCE = re.compile(r"^(`{3,}|~{3,})([^\n`]*)\n(.*?)^\1[ \t]*$", re.M | re.S)
@@ -38,6 +39,23 @@ def from_args(args, names=("tool.py", "test_tool.py")):
     return out
 
 
+def elided(name, body):
+    """'' when body is a complete file, else why not, naming the lines. A line that is only '...' in a comment is
+    taken as "the rest is left out", unless the file is Python that parses: then the comment is just a comment."""
+    hits = [(i, ln) for i, ln in enumerate(body.split("\n"), 1) if ELISION.match(ln)]
+    if not hits:
+        return ""
+    if name.endswith(".py") and all(re.match(r"^\s*#\s*(\.\.\.|…)\s*$", ln) for _, ln in hits):
+        try:
+            ast.parse(body)
+            return ""
+        except SyntaxError:
+            pass
+    where = "; ".join(f"line {i}: {ln.strip()[:60]!r}" for i, ln in hits[:3])
+    return (f"the block abbreviates code with '...' or 'omitted' ({where}); write the complete file, with no "
+            f"line that stands for left-out code")
+
+
 def extract(text):
     """Returns (files: {name: content}, problems: [str])."""
     text = clean(text)
@@ -65,8 +83,9 @@ def extract(text):
             problems.append("a code block has no file name (put the file name after the opening fence, e.g. ```python tool.py)")
             continue
         name = name.lstrip("./")
-        if ELISION.search(body):
-            problems.append(f"{name}: the block abbreviates code with '...' or 'omitted'; write the complete file")
+        why = elided(name, body)
+        if why:
+            problems.append(f"{name}: {why}")
             continue
         files[name] = body if body.endswith("\n") else body + "\n"
     opened = len(OPEN_FENCE.findall(text))
@@ -94,8 +113,9 @@ def single(text, name):
     blocks = list(FENCE.finditer(clean(text)))
     if len(blocks) == 1:
         body = blocks[0].group(3)
-        if ELISION.search(body):
-            return None, ["the block abbreviates code with '...' or 'omitted'; write the complete file"]
+        why = elided(name, body)
+        if why:
+            return None, [why]
         return (body if body.endswith("\n") else body + "\n"), []
     if not blocks:
         return None, problems + ["no complete fenced code block found (it may have been cut off)"]
