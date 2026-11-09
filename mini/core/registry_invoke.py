@@ -91,6 +91,10 @@ def _invoke_in(a, m, name, inputs, box):
                settings=sorted(settings) or None, network=network or None)
     out, res = a.sandbox.invoke_tool(m, m["_dir"], box, inputs, on_message=asker, settings=settings, network=network)
     items, refused = ws.changes(a.folder, box)
+    try:
+        made = ws.make_dirs(a.folder, ws.new_dirs(a.folder, box))
+    except (OSError, PolicyError):
+        made = []
     written = []
     if items:
         try:
@@ -109,6 +113,8 @@ def _invoke_in(a, m, name, inputs, box):
         text = text[:5000] + f"\n[... output is {len(text)} characters; full JSON saved to {p} (read_file takes that path)]"
     if written:
         text += "\nFiles written to the folder: " + ", ".join(written)
+    if made:
+        text += "\nFolders made in the folder: " + ", ".join(d + "/" for d in made)
     if refused:
         text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
         a.log.emit("watchdog", name="export_refused", tool=name, refused=refused)

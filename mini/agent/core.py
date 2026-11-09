@@ -18,7 +18,7 @@ import threading
 import time
 
 from . import prompts
-from .creator import Creator, ToolFailed, trim
+from .creator import _content_words, Creator, ToolFailed, trim
 from .turns import AgentStop, RestartRequested, Turns, fn
 from ..core import Call, load as load_catalog
 from ..core._tools import describe_tool
@@ -477,13 +477,13 @@ class Agent:
         if hit:
             self.log.emit("watchdog", name="core_covers_need", need=need, capability=hit)
             return f"Not built: the core capability {hit} already does this. Call {hit} directly."
-        unrun = [n for n in self.built_names if n not in self.invoked_any]
+        unrun = [n for n in self.built_names if n not in self.invoked_any and self._same_need(n, need)]
         if unrun:                                   # every time: build, then run; never build the same thing again
             self.log.emit("watchdog", name="built_tool_unrun", built=unrun, need=need[:200])
             return (f"Not built: {', '.join(unrun)} was built and installed for this task and has not run yet. Call "
                     "`invoke_tool` with it first. If it fails on the real data, call `report_tool_bug`: it is repaired "
                     "as a new version instead of built again.")
-        if self.built_names and not self.need_reminded:
+        if any(self._same_need(n, need) for n in self.built_names) and not self.need_reminded:
             self.need_reminded = True               # once: a tool built for this task is usually the answer
             self.log.emit("watchdog", name="built_tool_unused", built=self.built_names)
             return (f"Not built yet: {', '.join(self.built_names)} was built and installed for this task. Call "
@@ -498,6 +498,15 @@ class Agent:
             return "New tool installed:\n" + describe_tool(m) + f"\nRun it now with `invoke_tool` (name {m['name']!r})."
         finally:
             self.wd.reset_conversation()
+
+    def _same_need(self, tool, need):
+        """need asks again for what tool, built in this task, does: it names the tool, or half or more of the
+        tool's own content words (name and description) are in it. A different capability is built at once."""
+        m = self.registry.get(tool) or {}
+        if tool in need:
+            return True
+        words = _content_words(tool.replace("_", " ") + " " + str(m.get("description") or ""))
+        return bool(words) and len(words & _content_words(need)) * 2 >= len(words)
 
     def _path(self, p):
         return ws.confine(self.folder, p)[0]

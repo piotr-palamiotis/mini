@@ -61,7 +61,9 @@ def run(call, args):
             open(os.path.join(box, SCRIPT), "w").write(script)
         res = a.sandbox.run(argv, box, purpose=NAME)
         items, refused = ws.changes(a.folder, box)
+        made = ws.new_dirs(a.folder, box)
         written = a._change([rel for rel, _ in items], lambda: ws.export(a.folder, items)) if items else []
+        made = ws.make_dirs(a.folder, made)
     except (OSError, PolicyError) as e:
         return f"{NAME} failed: {e}"
     finally:
@@ -71,7 +73,9 @@ def run(call, args):
     text = f"exit {res['exit_code']}" + (" (timed out)" if res.get("timed_out") else "") + "\n" + show(res["output"], 4000)
     if written:
         text += "\nFiles written to the folder: " + ", ".join(written)
-    if ok and not res["output"].strip() and not written and not refused:
+    if made:
+        text += "\nFolders made in the folder: " + ", ".join(d + "/" for d in made)
+    if ok and not res["output"].strip() and not written and not refused and not made:
         text += ("\nThe script ran but printed nothing and wrote no file. Check that it calls the function it defines, "
                  "prints what it finds, and writes the file it should produce.")
     if refused:

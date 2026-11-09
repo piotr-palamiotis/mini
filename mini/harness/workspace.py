@@ -200,6 +200,34 @@ def changes(folder, box):
     return sorted(out), refused
 
 
+def new_dirs(folder, box):
+    """Folders the program made in the sandbox that the workspace does not have (an empty one exports no file, so
+    without this it would vanish: `mkdir toml` must leave toml/ behind). .mini/ and .git are never made."""
+    out = []
+    for d, dirs, _ in os.walk(box):
+        if os.path.relpath(d, box) == ".":
+            dirs[:] = [x for x in dirs if x not in (META, ".git")]
+        dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(d, x))]
+        for x in dirs:
+            rel = os.path.relpath(os.path.join(d, x), box)
+            try:
+                full, rel = confine(folder, rel)
+            except PolicyError:
+                continue
+            if not os.path.exists(full):
+                out.append(rel)
+    return sorted(out)
+
+
+def make_dirs(folder, rels):
+    done = []
+    for rel in rels:
+        full, rel = confine(folder, rel)
+        os.makedirs(full, exist_ok=True)
+        done.append(rel)
+    return done
+
+
 def export(folder, items):
     """Copy (relative path, sandbox file) items into the workspace. Returns the relative paths written."""
     done = []

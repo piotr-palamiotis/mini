@@ -226,3 +226,19 @@ class CopyInExportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewDirsTest(unittest.TestCase):
+    def test_an_empty_folder_the_program_made_is_made_in_the_folder(self):
+        import tempfile
+        from mini.harness import workspace as ws
+        folder, box = tempfile.mkdtemp(), tempfile.mkdtemp()
+        os.makedirs(os.path.join(box, "toml"))
+        os.makedirs(os.path.join(box, "out", "deep"))
+        os.makedirs(os.path.join(box, ".mini", "in"))
+        os.makedirs(os.path.join(folder, "out"))
+        got = ws.new_dirs(folder, box)
+        self.assertEqual(got, ["out/deep", "toml"])
+        ws.make_dirs(folder, got)
+        self.assertTrue(os.path.isdir(os.path.join(folder, "toml")))
+        self.assertFalse(os.path.exists(os.path.join(folder, ".mini")))
