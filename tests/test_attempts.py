@@ -18,6 +18,14 @@ class AttemptLogTest(unittest.TestCase):
         self.assertEqual(_failures(out), ["test_normal: TypeError: bad operand",
                                           "collecting test_tool.py: SyntaxError: invalid syntax"])
 
+    def test_failures_read_the_traceback_not_the_cut_summary(self):
+        out = ("___________________ test_empty_csv ___________________\n"
+               "    run(inputs, io)\n"
+               "E   mini_io.MissingInput: no answer for 'output_dir'\n"
+               "=========================== short test summary info ============================\n"
+               "FAILED ../tool/test_tool.py::test_empty_csv - mini_io.M...\n")
+        self.assertEqual(_failures(out), ["test_empty_csv: mini_io.MissingInput: no answer for 'output_dir'"])
+
     def test_failures_without_summary_take_the_first_error_line(self):
         self.assertEqual(_failures("x\nE   ValueError: nope\n"), ["E   ValueError: nope"])
 

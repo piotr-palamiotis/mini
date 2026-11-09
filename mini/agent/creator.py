@@ -508,7 +508,8 @@ class Creator:
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
         net = [t for t in self.approved_perms["network"] if not t.startswith("setting:")]   # tests fake those
-        res = a.sandbox.run(["python", "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", "-p", "mini_pytest",
+        res = a.sandbox.run(["python", "-m", "pytest", "-q", "--tb=short", "--disable-warnings", "-p", "no:cacheprovider",
+                             "-p", "mini_pytest",
                              "/tool/test_tool.py"],
                             work, tool_dir=self.files_dir, network=net, image=self.image,
                             purpose=f"tests {self.spec['name']}")
@@ -975,8 +976,15 @@ def _diff_summary(name, old, new, max_chars=300):
 
 def _failures(output, limit=5):
     """'test_name: first error line' for each failing test of a pytest run (collection errors included)."""
-    out = []
+    out, seen = [], set()
+    for m in re.finditer(r"^_{3,} (?:ERROR collecting )?(\S+?) _{3,}\n(.*?)(?=^_{3,} |^={3,}|\Z)", output or "", re.M | re.S):
+        err = next((ln[1:].strip() for ln in m.group(2).splitlines() if ln.startswith("E ")), "")
+        if err:                     # the traceback section: the summary line pytest cuts to the terminal width
+            seen.add(m.group(1).split("::")[-1])
+            out.append(f"{m.group(1).split('::')[-1]}: {err[:160]}")
     for m in re.finditer(r"^(FAILED|ERROR) (\S+?)(?:::(\w+))?(?: - (.*))?$", output or "", re.M):
+        if (m.group(3) or os.path.basename(m.group(2))) in seen:
+            continue
         out.append(f"{m.group(3) or 'collecting ' + os.path.basename(m.group(2))}: {(m.group(4) or m.group(1)).strip()[:160]}")
     if not out:
         for line in (output or "").splitlines():
