@@ -69,3 +69,20 @@ class KeepTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandScriptTest(unittest.TestCase):
+    def test_a_command_running_a_py_file_in_the_folder_is_a_script_run(self):
+        import tempfile
+        from mini.core.run_code import _script_of
+        box = tempfile.mkdtemp()
+        open(os.path.join(box, "calc.py"), "w").write("print(1)\n")
+        got = _script_of(["python3", "calc.py", "a.json"], box)
+        self.assertTrue(got.startswith("# run as: python3 calc.py a.json\n") and got.endswith("print(1)\n"))
+        self.assertIsNone(_script_of(["wc", "-l", "a.txt"], box))
+
+    def test_a_task_that_asks_for_a_tool(self):
+        from mini.agent.core import ASKS_FOR_TOOL
+        self.assertTrue(ASKS_FOR_TOOL.search("Build a tool that totals invoice files"))
+        self.assertTrue(ASKS_FOR_TOOL.search("Make a tool that converts an INI file to JSON"))
+        self.assertFalse(ASKS_FOR_TOOL.search("Rename get_usr to get_user. Use the tools you have."))

@@ -111,6 +111,15 @@ def ensure_packages(a, wanted):
         return None, f"installing the packages failed: {str(e)[-1500:]}"
 
 
+def _script_of(argv, box):
+    """The source of a .py file that argv runs with python (in the sandbox folder), with the arguments noted."""
+    if len(argv) >= 2 and os.path.basename(argv[0]).startswith("python") and argv[1].endswith(".py"):
+        p = os.path.join(box, argv[1].replace("/work/", "", 1).lstrip("/"))
+        if os.path.isfile(p):
+            return f"# run as: {' '.join(argv)}\n" + open(p).read()
+    return None
+
+
 def _record(a, box, n):
     """Keep what the run saw (its working directory before it ran) so a kept tool can be tested on it."""
     dest = os.path.join(a.run_dir, "scripts", f"{n:03d}")
@@ -148,7 +157,11 @@ def run(call, args):
         if script:
             os.makedirs(os.path.join(box, ws.META), exist_ok=True)
             open(os.path.join(box, SCRIPT), "w").write(script)
-        if script:
+        if not script:                            # python path/to/x.py args: the file is the script
+            ran = _script_of(argv, box)
+            if ran:
+                script, record = ran, _record(a, box, a.calls)
+        elif script:
             record = _record(a, box, a.calls)
         res = a.sandbox.run(argv, box, purpose=NAME, image=image)
         items, refused = ws.changes(a.folder, box)
@@ -180,7 +193,7 @@ def run(call, args):
     missing = re.search(r"No module named '([\w.]+)'", res["output"]) if not ok else None
     if missing:
         text += _module_hint(a, missing.group(1))
-    if ok and script:
+    if ok and script and record:
         text += ("\nIf this script is worth keeping for later tasks, call `keep_tool`: it becomes a tool, tested on this "
                  "run.")
     return text

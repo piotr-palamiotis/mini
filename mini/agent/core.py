@@ -62,7 +62,9 @@ T_COVERAGE = fn("decide_coverage", "Decide which installed tools cover the task 
     "reasoning": S, "use": ARR, "missing": ARR}, ["reasoning", "use", "missing"])
 T_JUDGE = fn("judge_tool", "Say whether this one tool can do a step of the task.", {
     "fits": {"type": "boolean"}, "step": S, "why": S}, ["fits"])
+T_SCREEN = fn("shortlist", "Name the installed tools that could do a step of the task.", {"names": ARR}, ["names"])
 T_CHOOSE = fn("choose_tools", "Pick the tools to use among the ones that fit.", {"use": ARR, "why": S}, ["use"])
+ASKS_FOR_TOOL = re.compile(r"\b(build|make|create|write|develop)\b[^.]{0,60}?\btools?\b", re.I)
 GAP_CANDIDATES = 5              # registry tools judged one by one for a task (the best search matches)
 GAP_THINK_TOKENS = 700          # each judgement is one small question
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
@@ -370,6 +372,8 @@ class Agent:
         g = self.cfg.get("gap") or {}
         candidates = [m for score, m in self.registry.scored(query, limit=g.get("candidates", GAP_CANDIDATES))
                       if score >= g.get("min_score", 2)] if g.get("judge", True) else []
+        if len(candidates) > 1:
+            candidates = self._screen(candidates)
         fits = []
         for m in candidates:
             v = self._judge(u, m)
@@ -410,6 +414,24 @@ class Agent:
             self.gap_decision = {"use": use, "missing": missing}
             return {"use": use, "missing": missing}
         raise AgentStop("no coverage decision")
+
+    def _screen(self, candidates):
+        """One call over the candidates' names and descriptions: only the ones it names are judged one by one."""
+        listing = "\n".join(f"- {m['name']}: {(m.get('description') or '').strip()[:200]}" for m in candidates)
+        msgs = [{"role": "system", "content": prompts.SYSTEM},
+                {"role": "user", "content": prompts.GAP_SCREEN.format(task=trim(self.task_text, 1500), tools=listing)}]
+        t = Turns(self, "gap", msgs, [T_SCREEN], think_tokens=GAP_THINK_TOKENS)
+        names = {m["name"] for m in candidates}
+        for _ in range(3):
+            reply = t.ask()
+            c = next((c for c in reply["tool_calls"] if c["name"] == "shortlist"), None)
+            got = ((c or {}).get("arguments") or {}).get("names")
+            if isinstance(got, list):
+                keep = [m for m in candidates if m["name"] in got]
+                self.log.emit("gap_screen", among=sorted(names), shortlist=[m["name"] for m in keep])
+                return keep
+            t.user(f"Call shortlist with names: a list of names from {', '.join(sorted(names))} (or an empty list).")
+        return candidates
 
     def _judge(self, u, m):
         msgs = [{"role": "system", "content": prompts.SYSTEM},
@@ -726,6 +748,9 @@ class Agent:
             return (f"{' / '.join(unused)} was built for this task but never ran successfully. Call invoke_tool with it "
                     "to produce the result: output made another way (run_code, write_file) does not show the tool works. "
                     "If it cannot be used, say why in your answer.")
+        if ASKS_FOR_TOOL.search(self.task_text or "") and not (built or self.built_names or self.invoked_any):
+            return ("the task asks for a tool, and none was made or used. Call `keep_tool` on the run_code script that "
+                    "did the work (it becomes a tool tested on that run), or run an installed tool with invoke_tool.")
         promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
         # a promised deliverable: "save/write/create ... file", or a file name with an extension. "A list of files in
         # this folder" is an answer, not a file.

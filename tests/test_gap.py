@@ -24,7 +24,8 @@ class GapTest(unittest.TestCase):
 
     def test_each_tool_is_judged_alone_and_only_the_fitting_one_is_used(self):
         tools = [manifest("yaml_to_toml", "Convert a YAML file to TOML."), manifest("pdf_read", "Read a PDF.")]
-        script = [step(call("judge_tool", fits=True, step="convert", why="it converts")),
+        script = [step(call("shortlist", names=["yaml_to_toml", "pdf_read"])),
+                  step(call("judge_tool", fits=True, step="convert", why="it converts")),
                   step(call("judge_tool", fits=False, why="pdf")),
                   step(call("decide_coverage", reasoning="the tool does it", use=[], missing=[]))]
         a, got = self.run_gap(script, tools)
@@ -35,11 +36,22 @@ class GapTest(unittest.TestCase):
 
     def test_two_tools_for_the_same_step_one_is_picked(self):
         tools = [manifest("yaml_to_toml", "Convert a YAML file to TOML."), manifest("convert_yaml", "YAML to TOML.")]
-        script = [step(call("judge_tool", fits=True, step="convert")), step(call("judge_tool", fits="true", step="convert")),
+        script = [step(call("shortlist", names=["yaml_to_toml", "convert_yaml"])),
+                  step(call("judge_tool", fits=True, step="convert")), step(call("judge_tool", fits="true", step="convert")),
                   step(call("choose_tools", use=["convert_yaml"], why="newer")),
                   step(call("decide_coverage", reasoning="ok", use=[], missing=[]))]
         a, got = self.run_gap(script, tools)
         self.assertEqual(got["use"], ["convert_yaml"])
+
+    def test_the_screen_skips_tools_that_cannot_help(self):
+        tools = [manifest("yaml_to_toml", "Convert a YAML file to TOML."), manifest("pdf_read", "Read a PDF.")]
+        script = [step(call("shortlist", names=["yaml_to_toml"])),
+                  step(call("judge_tool", fits=True, step="convert")),
+                  step(call("decide_coverage", reasoning="ok", use=[], missing=[]))]
+        a, got = self.run_gap(script, tools)
+        ev = [json.loads(l) for l in open(os.path.join(a.run_dir, "log.jsonl"))]
+        self.assertEqual([e["tool"] for e in ev if e["kind"] == "gap_judge"], ["yaml_to_toml"])
+        self.assertEqual(got["use"], ["yaml_to_toml"])
 
 
 if __name__ == "__main__":

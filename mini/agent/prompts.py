@@ -31,6 +31,15 @@ Read the task carefully. Call the tool `understand` with:
 - ambiguities: anything unclear and the assumption you will make for each
 - plan: short numbered steps"""
 
+GAP_SCREEN = """The user's task:
+{task}
+
+Installed tools (name: what it does):
+{tools}
+
+Which of these could do a step of this task? Call `shortlist` with names: the tools worth a closer look, often
+none. Each one you name is then checked against the task on its own."""
+
 GAP_ONE = """The user's task:
 {task}
 
@@ -307,7 +316,8 @@ Complete the task now. Call `invoke_tool` to run a tool. Pass every input you al
 the tool asks the user only for what is missing, and saved settings are filled in by the harness. Tool outputs
 come back as JSON. `invoke_tool` runs only installed tools. The core capabilities work on the user's folder, with
 paths relative to it, and change files in place; write_file and run_code take their content as a fenced block in
-the same reply. Do the processing with run_code; give it packages when the script needs them. When the user asks
+the same reply. Do data processing and calculations with run_code, and give it packages when the script needs
+them; change the project's own files (code, text, configuration) with edit_file, one exact change at a time. When the user asks
 for tools, or a script is worth keeping for later tasks, call `keep_tool` right after the script that did the step
 ran without an error: it becomes a tool, tested on that run. Call `need_tool` only for a capability a script cannot
 try in the sandbox (it needs the network or a dialogue with the user). If a tool fails because of a bug in the tool,
