@@ -37,6 +37,12 @@ class SamplesTest(unittest.TestCase):
         self.assertIn("samples/feed.xml:\n```\n<rss><item>a</item></rss>", note)
         self.assertNotIn("samples/pic.jpg:", note)                    # binary: named, not shown
 
+    def test_one_input_of_each_kind_comes_first(self):
+        names = {f"conf/{n}.yaml" for n in "abcdefg"} | {"schema.json"}
+        got = samples._inputs(types.SimpleNamespace(task_inputs=names))
+        self.assertEqual(len(got), samples.MAX_FILES)
+        self.assertIn("schema.json", got)                 # not crowded out by seven configs from one folder
+
     def test_no_inputs_no_samples(self):
         a = types.SimpleNamespace(folder=self.d, task_inputs=set())
         self.assertEqual(samples.preview(a), "")

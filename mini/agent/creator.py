@@ -39,6 +39,7 @@ T_RUN = fn("write_run", "Write how the tool runs: interaction, ui hints and perm
 T_EDGES = fn("write_edge_cases", "Write the edge cases the user's task states (often none).", {
     "cases": {"type": "array", "items": {"type": "object", "properties": {
         "situation": S, "expected": S, "quote": S}}}}, ["cases"])
+GAP_HOLDS = 2                   # the pre-test checks hold a test run back at most this often for the same reason
 SPEC_THINK_TOKENS = 1500        # each spec phase thinks on its own budget, in its own fresh conversation
 T_REPLACE = fn("replace", "Replace one exact piece of text in a file. old must appear exactly once; include a few "
                "surrounding lines to make it unique. Never include line-number prefixes.",
@@ -425,7 +426,8 @@ class Creator:
         spec_text = json.dumps(self.spec, indent=1)
         if first:                   # the code is written in its own conversation: the spec phases had theirs
             self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES}]
-        intro = f"Task the tool is built for: {trim(self.task, 1500)}\n\nSpec approved:\n{spec_text}\n\n"
+        intro = (f"Task the tool is built for: {trim(self.task, 1500)}{self._preview_block()}\n\n"
+                 f"Spec approved:\n{spec_text}\n\n")
         for path, what in (("tool.py", prompts.WHAT_TOOL),
                            ("test_tool.py", prompts.WHAT_TESTS.format(edge_cases="; ".join(self.spec["edge_cases"]) or prompts.NO_EDGE_TESTS)
                                             + samples.tests_note(self.files_dir))):
@@ -479,9 +481,18 @@ class Creator:
                         f"A caller answers a question by passing its key in the inputs, so every io.ask key must be an "
                         f"input property (now: {', '.join(props) or 'none'}). Use a property name as the key, or add "
                         f"the property with `update_spec`.")
-        if gaps:
-            return "Saved, but " + " ".join(gaps) + " Then call `run_tests`."
-        return ""
+        if not gaps:
+            return ""
+        text = "Saved, but " + " ".join(gaps) + " Then call `run_tests`."
+        held = getattr(self, "gap_held", {})
+        self.gap_held = held
+        key = tuple(g[:40] for g in gaps)
+        held[key] = held.get(key, 0) + 1
+        if held[key] > GAP_HOLDS:               # a check that keeps holding the tests back would loop without attempts
+            self.a.log.emit("watchdog", name="gap_let_through", gaps=[g[:120] for g in gaps], holds=held[key] - 1)
+            self.gap_note = "Note: " + " ".join(gaps)
+            return ""
+        return text
 
     def _hash(self):
         h = hashlib.sha256()
@@ -592,6 +603,9 @@ class Creator:
                                          output=trim(res["output"]))
         if res.get("network_note") and not res["passed"]:
             out += "\n" + res["network_note"]
+        if getattr(self, "gap_note", "") and not res["passed"]:
+            out += "\n" + self.gap_note
+        self.gap_note = ""
         return out
 
     def _after_test(self, verdict):

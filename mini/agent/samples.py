@@ -24,7 +24,15 @@ def _is_text(path):
 
 
 def _inputs(agent):
-    return sorted(getattr(agent, "task_inputs", None) or ())[:MAX_FILES]
+    """At most MAX_FILES inputs, one of each kind (folder and extension) first: six configs from one folder must
+    not crowd out the schema they are checked against."""
+    names = sorted(getattr(agent, "task_inputs", None) or ())
+    kind = lambda p: (os.path.dirname(p), os.path.splitext(p)[1].lower())
+    first, rest, kinds = [], [], set()
+    for p in names:
+        (rest if kind(p) in kinds else first).append(p)
+        kinds.add(kind(p))
+    return sorted((first + rest)[:MAX_FILES])
 
 
 def preview(agent):
