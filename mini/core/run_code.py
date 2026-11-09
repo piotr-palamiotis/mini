@@ -85,6 +85,12 @@ def ensure_packages(a, wanted):
     """The image for the project's packages plus wanted. New ones need the user's approval; approved ones are saved
     for the folder. Returns (image, problem)."""
     have = project_packages(a.folder)
+    if wanted and not isinstance(wanted, dict):
+        return None, 'packages is an object: {"pip": [...], "apt": [...]}'
+    wanted = {str(k).strip().strip("'\"").strip().lower(): v for k, v in (wanted or {}).items()}
+    odd = [k for k in wanted if k not in ("pip", "apt")]
+    if odd:                         # an unknown key was silently ignored before: nothing got installed
+        return None, f'packages takes the keys "pip" and "apt", not {", ".join(map(repr, odd))}'
     try:
         want = validate_packages(wanted or {})
     except PolicyError as e:

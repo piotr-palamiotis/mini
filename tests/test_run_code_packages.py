@@ -27,6 +27,15 @@ class RunCodePackagesTest(unittest.TestCase):
             run_code.ensure_packages(a, {})                     # a later run without packages keeps the folder's image
             self.assertEqual(built[-1], {"apt": [], "pip": ["pyyaml"]})
 
+    def test_a_quoted_key_is_read_as_the_key_and_an_unknown_one_is_refused(self):
+        a = self.agent()
+        with mock.patch.object(a.sandbox, "ensure_image", return_value="x"):
+            self.assertEqual(run_code.ensure_packages(a, {'"pip"': ["pyyaml"]}), ("x", ""))
+            self.assertEqual(run_code.project_packages(self.folder)["pip"], ["pyyaml"])
+            image, problem = run_code.ensure_packages(a, {"python": ["toml"]})
+        self.assertIsNone(image)
+        self.assertIn('takes the keys "pip" and "apt"', problem)
+
     def test_refused_packages_do_not_run(self):
         a = self.agent(approve=False)
         with mock.patch.object(a.sandbox, "ensure_image", return_value="x"):

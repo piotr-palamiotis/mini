@@ -96,6 +96,10 @@ def validate_packages(pkgs):
     import sys
     if not isinstance(pkgs, dict):
         raise PolicyError("packages must be an object: {\"apt\": [...], \"pip\": [...]}")
+    pkgs = {str(k).strip().strip("'\"").strip().lower(): v for k, v in pkgs.items()}    # '"pip"' is pip
+    odd = [k for k in pkgs if k not in ("apt", "pip")]
+    if odd:
+        raise PolicyError(f"packages takes the keys apt and pip, not {', '.join(map(repr, odd))}")
     apt = sorted(set(pkgs.get("apt") or []))
     pip = sorted(set(pkgs.get("pip") or []))
     for p in apt + pip:
