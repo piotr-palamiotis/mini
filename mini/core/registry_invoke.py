@@ -65,6 +65,7 @@ def run(call, args):
                     + f": call invoke_tool with name {fits[0]!r}.\n" + describe_tool(a.registry.get(fits[0])))
         return f"Missing required inputs for {name}: {', '.join(req)}.\n" + describe_tool(m) + hint
     a.calls += 1
+    getattr(a, "invoked_any", set()).add(name)
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{name}")      # the tool's /work for this call
     os.makedirs(box)
     try:

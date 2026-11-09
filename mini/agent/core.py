@@ -93,6 +93,7 @@ class Agent:
         self.invoked_ok = set()                  # tools that ran without an error in this task
         self.task_inputs = set()                 # relative paths the task reads and does not change (guard_inputs)
         self.built_names, self.need_reminded = [], False
+        self.invoked_any = set()                 # tools invoke_tool actually ran in this task (ok or not)
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
             self.tier_backends["local"] = backend
@@ -396,6 +397,7 @@ class Agent:
             built.append(m["name"])
         self.wd.reset_task()
         self.built_names, self.need_reminded = list(built), False
+        self.invoked_any = set()
         self.log.emit("phase", phase="execute", tools=tools)
         listing = lambda: "\n".join(describe_tool(self.registry.get(n)) for n in dict.fromkeys(tools)) or "(none)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
@@ -475,6 +477,12 @@ class Agent:
         if hit:
             self.log.emit("watchdog", name="core_covers_need", need=need, capability=hit)
             return f"Not built: the core capability {hit} already does this. Call {hit} directly."
+        unrun = [n for n in self.built_names if n not in self.invoked_any]
+        if unrun:                                   # every time: build, then run; never build the same thing again
+            self.log.emit("watchdog", name="built_tool_unrun", built=unrun, need=need[:200])
+            return (f"Not built: {', '.join(unrun)} was built and installed for this task and has not run yet. Call "
+                    "`invoke_tool` with it first. If it fails on the real data, call `report_tool_bug`: it is repaired "
+                    "as a new version instead of built again.")
         if self.built_names and not self.need_reminded:
             self.need_reminded = True               # once: a tool built for this task is usually the answer
             self.log.emit("watchdog", name="built_tool_unused", built=self.built_names)
@@ -486,7 +494,8 @@ class Agent:
         try:
             m = creator.create(need, task, ctx)
             tools.append(m["name"])
-            return "New tool installed:\n" + describe_tool(m)
+            self.built_names.append(m["name"])
+            return "New tool installed:\n" + describe_tool(m) + f"\nRun it now with `invoke_tool` (name {m['name']!r})."
         finally:
             self.wd.reset_conversation()
 
