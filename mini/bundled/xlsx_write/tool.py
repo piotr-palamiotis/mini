@@ -56,9 +56,12 @@ def cell_xml(ref, v, style=""):
     raise ValueError(f"{ref}: a cell holds a string, number, boolean or null, not {type(v).__name__}")
 
 
-def sheet_xml(rows):
+def sheet_xml(rows, name="?"):
     if not isinstance(rows, list) or not all(isinstance(r, list) for r in rows):
-        raise ValueError("every sheet must be a list of rows, each row a list of values")
+        got = type(rows).__name__ if not isinstance(rows, list) else \
+            f"row {next(i for i, r in enumerate(rows, 1) if not isinstance(r, list))} is not a list"
+        raise ValueError(f"sheet {name!r}: every sheet must be a list of rows, each row a list of values (got {got}). "
+                         f"sheets holds only {{sheet name: rows}}; options such as overwrite go next to it in the inputs")
     out = [f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="{MAIN}"><sheetData>']
     for n, row in enumerate(rows, 1):
         cells = "".join(cell_xml(f"{col_name(i)}{n}", v) for i, v in enumerate(row))
@@ -76,7 +79,7 @@ def run(inputs):
     for name in sheets:
         if not name or len(name) > 31 or BAD_SHEET.search(name):
             raise ValueError(f"bad sheet name {name!r}: 1-31 characters, none of []:*?/\\")
-    parts = {name: sheet_xml(rows) for name, rows in sheets.items()}
+    parts = {name: sheet_xml(rows, name) for name, rows in sheets.items()}
     names = list(parts)
     wb = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{MAIN}" '
           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
