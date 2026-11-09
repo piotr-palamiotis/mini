@@ -36,6 +36,18 @@ def repair(call, args):
     return args
 
 
+def _fitting(a, inputs, other_than):
+    """Installed tools whose required inputs are all given and that take every input given; built ones first."""
+    built = getattr(a, "built_names", None) or []
+    out = []
+    for t in a.registry.names():
+        sch = ((a.registry.get(t) or {}).get("input_schema") or {})
+        props, req = set(sch.get("properties") or {}), set(sch.get("required") or [])
+        if t != other_than and inputs and set(inputs) <= props and req <= set(inputs):
+            out.append(t)
+    return sorted(out, key=lambda t: (t not in built, t))
+
+
 def run(call, args):
     a, name = call.agent, args["name"]
     m = a.registry.get(name)
@@ -45,7 +57,13 @@ def run(call, args):
     inputs = args["inputs"]
     req = [k for k in ((m.get("input_schema") or {}).get("required") or []) if k not in inputs]
     if req:
-        return f"Missing required inputs for {name}: {', '.join(req)}.\n" + describe_tool(m)
+        hint = ""
+        fits = _fitting(a, inputs, other_than=name)
+        if fits:                    # the inputs belong to another tool: the model mixed up two tools' schemas
+            hint = (f"\nThe inputs you gave ({', '.join(sorted(inputs))}) are the inputs of {fits[0]}"
+                    + (" (built for this task)" if fits[0] in (getattr(a, "built_names", None) or []) else "")
+                    + f": call invoke_tool with name {fits[0]!r}.\n" + describe_tool(a.registry.get(fits[0])))
+        return f"Missing required inputs for {name}: {', '.join(req)}.\n" + describe_tool(m) + hint
     a.calls += 1
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{name}")      # the tool's /work for this call
     os.makedirs(box)
