@@ -1,5 +1,6 @@
 """Run a script or a command in the sandbox against the files named: the cheap path before building a tool."""
 import os
+import re
 import shutil
 
 from ._files import show
@@ -34,6 +35,30 @@ def small_project(folder):
             if n > SMALL_FILES or size > SMALL_BYTES:
                 return False
     return True
+
+
+IMPORT_NAMES = {"pil": "pillow", "yaml": "pyyaml", "cv2": "opencv-python", "sklearn": "scikit-learn", "bs4": "beautifulsoup4",
+                "fitz": "pymupdf", "docx": "python-docx", "pptx": "python-pptx", "dateutil": "python-dateutil"}
+
+
+def _module_hint(a, module):
+    """run_code's sandbox has the standard library only. A tool that needs a package gets its own image: name the
+    installed tools that have this one, built ones first."""
+    top = module.split(".")[0].lower()
+    pkg = IMPORT_NAMES.get(top, top)
+    built = getattr(a, "built_names", None) or []
+    have = []
+    for t in a.registry.names():
+        pips = [str(p).lower().split("=")[0].split("<")[0].split(">")[0].strip()
+                for p in (((a.registry.get(t) or {}).get("permissions") or {}).get("packages") or {}).get("pip") or []]
+        if pkg in pips or top in pips:
+            have.append(t)
+    have.sort(key=lambda t: (t not in built, t))
+    if have:
+        return (f"\n{module} is not in run_code's sandbox (standard library only), and it cannot be installed there. "
+                f"The installed tool {have[0]} has it: run it with `invoke_tool` (name {have[0]!r}).")
+    return (f"\n{module} is not in run_code's sandbox (standard library only), and it cannot be installed there. "
+            f"Work that needs it is a tool: call need_tool, and the tool gets an image with the package.")
 
 
 def run(call, args):
@@ -80,6 +105,9 @@ def run(call, args):
                  "prints what it finds, and writes the file it should produce.")
     if refused:
         text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
+    missing = re.search(r"No module named '([\w.]+)'", res["output"]) if not ok else None
+    if missing:
+        text += _module_hint(a, missing.group(1))
     if ok and script and not getattr(a, "built_names", None):
         text += ("\nIf this script is worth keeping for later tasks, call need_tool with from_run_code true: it becomes "
                  "the starting point of a tool.")
