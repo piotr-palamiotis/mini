@@ -37,3 +37,12 @@ class InvokeHintTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedTest(unittest.TestCase):
+    def test_an_output_with_an_error_field_of_its_own_is_a_success(self):
+        from mini.harness.toolrun import failed
+        self.assertFalse(failed({"valid": True, "error": None}, {"exit_code": 0}))
+        self.assertFalse(failed({"rows": 3, "error": "none found in row 2"}, {"exit_code": 0}))
+        self.assertTrue(failed({"error": "ValueError", "message": "bad"}, {"exit_code": 1}))
+        self.assertTrue(failed({"error": "ValueError", "message": "bad"}))

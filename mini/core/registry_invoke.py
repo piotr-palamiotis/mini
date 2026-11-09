@@ -6,6 +6,7 @@ import time
 
 from ._tools import describe_tool
 from ..harness import workspace as ws
+from ..harness.toolrun import failed
 from ..harness.ask import GateAsker
 from ..harness.sandbox import PolicyError, network_diagnosis
 from ..harness.settings import MissingSetting
@@ -103,8 +104,8 @@ def _invoke_in(a, m, name, inputs, box):
             refused.append(("(all files)", str(e)))
     a.last_invoke[name] = {"inputs": inputs, "output": out, "sandbox_tail": res["output"][-1500:],
                            "network": res.get("network_note") or None}
-    a.log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
-    if "error" not in out:
+    a.log.emit("invoke", tool=name, version=m["version"], ok=not failed(out, res), output=out, exit_code=res["exit_code"])
+    if not failed(out, res):
         a.invoked_ok.add(name)
     text = json.dumps(out, indent=1, default=str)
     if len(text) > 6000:
@@ -119,11 +120,11 @@ def _invoke_in(a, m, name, inputs, box):
         text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
         a.log.emit("watchdog", name="export_refused", tool=name, refused=refused)
     note = res.get("network_note") or (network_diagnosis(json.dumps(out), [], (m.get("permissions") or {}).get("network"))
-                                       if "error" in out else "")
+                                       if failed(out, res) else "")
     if note:
         text += "\n" + note
         a.log.emit("watchdog", name="network_diagnosis", tool=name, note=note)
-    if "error" in out:
+    if failed(out, res):
         text += ("\nThe tool failed. If this is a bug in the tool (not a problem with your inputs), "
                  "call report_tool_bug.")
     else:

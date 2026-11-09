@@ -95,7 +95,7 @@ def _run(cfg, m, name, a, folder, log, work):
         print(f"{name}: files not written: {problem}", file=sys.stderr)
     for rel, why in refused:
         print(f"not written: {rel} ({why})", file=sys.stderr)
-    if "error" in out:
+    if toolrun.failed(out, _res):
         print(f"{name} failed: {out.get('message') or out['error']}", file=sys.stderr)
         return 1
     if a._json:

@@ -50,8 +50,16 @@ def invoke(cfg, m, folder, work, inputs, log, asker, task, via, checkpointed=Tru
         except (checkpoint.GitError, PolicyError, OSError) as e:
             problem = str(e)
     log.emit("files_changed", paths=written, refused=refused or None)
-    log.emit("invoke", tool=name, version=m["version"], ok="error" not in out, output=out, exit_code=res["exit_code"])
+    log.emit("invoke", tool=name, version=m["version"], ok=not failed(out, res), output=out, exit_code=res["exit_code"])
     return out, res, written, refused, problem
+
+
+def failed(out, res=None):
+    """A tool run failed: the runner exits 1 and reports {"error": <exception name>, "message": ...}. A tool's own
+    output may hold a key called "error" (None, or its own field) and still be a success."""
+    if res is not None and res.get("exit_code") not in (0, None):
+        return True
+    return isinstance(out, dict) and isinstance(out.get("error"), str) and "message" in out
 
 
 def result_text(out, written, refused=(), problem=""):
@@ -93,7 +101,7 @@ def slash(cfg, workspace, m, inputs, task, approval_handler, sinks=()):
                                                       GateAsker(gate, log, work, m["name"], folder), task, "slash",
                                                       checkpointed=memory)
         text = result_text(out, written, refused, problem)
-        if "error" in out:
+        if failed(out, _res):
             error = f"{m['name']} failed: {out.get('message') or out['error']}"
         else:
             status = "success"
