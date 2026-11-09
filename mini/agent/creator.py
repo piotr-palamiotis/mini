@@ -41,8 +41,8 @@ T_EDGES = fn("write_edge_cases", "Write the edge cases the user's task states (o
         "situation": S, "expected": S, "quote": S}}}}, ["cases"])
 GAP_HOLDS = 2                   # the pre-test checks hold a test run back at most this often for the same reason
 T_PLAN = fn("write_tool_plan", "Write how the script becomes a tool: name, schemas and the example inputs.", {
-    "name": S, "description": S, "input_schema": OBJ, "output_schema": OBJ, "example_inputs": OBJ},
-    ["name", "description", "input_schema", "example_inputs"])
+    "name": S, "description": S, "input_schema": OBJ, "output_schema": OBJ, "example_inputs": OBJ,
+    "outputs": {"type": "array", "items": S}}, ["name", "description", "input_schema", "example_inputs"])
 KEEP_MAX = 10 * 2**20           # the files a kept script saw travel with the tool as its test data, up to this size
 GOLDEN_TEST = '''"""Written by the harness: the tool must do what the script it was kept from did on that run."""
 import json
@@ -209,8 +209,16 @@ class Creator:
             rules=prompts.CREATE_RULES, task=trim(self.task, 1500), what=f"What to keep: {what}\n" if what else "",
             script=script_run["script"], seen=listing(seen), wrote=listing(script_run.get("written") or []),
             printed=trim(script_run.get("output") or "", 800), names=", ".join(a.registry.names()) or "(none)",
-            note=""), self._check_plan)
+            note=""), lambda d: self._check_plan(d, [os.path.normpath(w) for w in script_run.get("written") or []]))
         json.dump(plan["example_inputs"], open(os.path.join(golden, "example.json"), "w"), indent=1)
+        keep_out = plan.get("outputs")
+        if keep_out:                    # scratch files the script wrote are not what the tool makes
+            out_dir = os.path.join(golden, "out")
+            for d, _, fs in os.walk(out_dir):
+                for f in fs:
+                    if os.path.relpath(os.path.join(d, f), out_dir) not in keep_out:
+                        os.remove(os.path.join(d, f))
+            a.log.emit("info", text="kept tool's test checks: " + ", ".join(keep_out))
         spec = {"name": plan["name"], "description": plan["description"], "input_schema": plan["input_schema"],
                 "output_schema": plan.get("output_schema") or {"type": "object", "properties": {}},
                 "settings": [], "interaction": [], "ui": {}, "edge_cases": [],
@@ -242,7 +250,7 @@ class Creator:
             self._fresh(out, head=prompts.KEPT_NOTE + "\n\n")
         return self._fix_loop()
 
-    def _check_plan(self, d):
+    def _check_plan(self, d, wrote=()):
         for k in ("input_schema", "output_schema"):
             d[k] = object_schema(d.get(k) or {"type": "object", "properties": {}})
         props = (d["input_schema"] or {}).get("properties") or {}
@@ -255,6 +263,13 @@ class Creator:
         missing = [k for k in (d["input_schema"].get("required") or []) if k not in ex]
         if missing:
             return f"example_inputs lacks the required inputs {', '.join(missing)}."
+        outs = d.get("outputs")
+        if outs is not None:
+            outs = [os.path.normpath(str(o)) for o in outs] if isinstance(outs, list) else None
+            if not outs or any(o not in wrote for o in outs):
+                return (f"outputs must list the files the tool makes, from the files the script wrote: "
+                        f"{', '.join(wrote) or '(none)'}.")
+            d["outputs"] = outs
         return self._validate_spec({**d, "edge_cases": []}, new=True)
 
     def repair(self, manifest, problem, evidence, task, context):

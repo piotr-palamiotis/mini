@@ -11,6 +11,7 @@ import csv
 rows = list(csv.DictReader(open("sales.csv")))
 total = sum(float(r["qty"]) * float(r["price"]) for r in rows)
 open("total.txt", "w").write(f"{total:.2f}\\n")
+open("scratch.txt", "w").write("a check the script made on the side\\n")
 print("total", round(total, 2))
 '''
 TOOL = '''
@@ -27,7 +28,7 @@ PLAN = dict(name="csv_total", description="Sum qty * price over a CSV and write 
             input_schema={"type": "object", "required": ["csv_path", "out_path"], "properties": {
                 "csv_path": {"type": "string", "description": "the CSV"}, "out_path": {"type": "string"}}},
             output_schema={"type": "object", "properties": {"total": {"type": "number"}}},
-            example_inputs={"csv_path": "sales.csv", "out_path": "total.txt"})
+            example_inputs={"csv_path": "sales.csv", "out_path": "total.txt"}, outputs=["total.txt"])
 
 
 def script():
@@ -55,6 +56,7 @@ class KeepTest(unittest.TestCase):
         self.assertEqual(json.load(open(os.path.join(golden, "example.json"))), PLAN["example_inputs"])
         self.assertEqual(open(os.path.join(golden, "out", "total.txt")).read(), "12.50\n")
         self.assertTrue(os.path.exists(os.path.join(golden, "in", "sales.csv")))
+        self.assertFalse(os.path.exists(os.path.join(golden, "out", "scratch.txt")))   # not the tool's result
         events = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
         tests = [e for e in events if e["kind"] == "test_run"]
         self.assertEqual([t["passed"] for t in tests], [True])          # the harness's test, first try

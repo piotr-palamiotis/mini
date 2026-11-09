@@ -454,7 +454,7 @@ class Agent:
             built.append(m["name"])
         self.wd.reset_task()
         self.built_names, self.need_reminded = list(built), False
-        self.invoked_any = set()
+        self.invoked_any, self.keep_reminded = set(), False
         self.log.emit("phase", phase="execute", tools=tools)
         listing = lambda: "\n".join(describe_tool(self.registry.get(n)) for n in dict.fromkeys(tools)) or "(none)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
@@ -566,6 +566,13 @@ class Agent:
         if not (s.get("ok") and s.get("script") and s.get("record")):
             return ("Nothing to keep: keep_tool keeps the last run_code script that ran without an error (a script, "
                     "not a command). Do the work with run_code first.")
+        same = [n for n in self.built_names if self._same_need(n, what)]
+        if same and not getattr(self, "keep_reminded", False):
+            self.keep_reminded = True               # once: a tool made for this task already does it
+            self.log.emit("watchdog", name="keep_duplicate", tool=same[0], what=what[:200])
+            return (f"Not kept: {same[0]} was made for this task and already does this. Run it with `invoke_tool` "
+                    f"(name {same[0]!r}); if it cannot do this step as it is, call `report_tool_bug` and it is upgraded "
+                    f"instead of kept twice. If this script does something else, call keep_tool again.")
         try:
             m = creator.keep(s, what, task, ctx)
         except ToolFailed as e:

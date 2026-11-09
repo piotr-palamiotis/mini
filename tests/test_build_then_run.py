@@ -44,3 +44,14 @@ class BuildThenRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeepDuplicateTest(unittest.TestCase):
+    def test_keeping_what_a_tool_made_for_this_task_does_is_refused_once(self):
+        a = types.SimpleNamespace(built_names=["yaml_to_toml"], keep_reminded=False, log=Log(),
+                                  last_script={"ok": True, "script": "x", "record": "/r"},
+                                  registry=types.SimpleNamespace(get=lambda n: {"description": "Convert a YAML file to TOML."}))
+        a._same_need = lambda tool, need: Agent._same_need(a, tool, need)
+        out = Agent._keep(a, None, "convert a YAML file to a TOML file", "task", "", [])
+        self.assertIn("yaml_to_toml was made for this task and already does this", out)
+        self.assertTrue(a.keep_reminded)

@@ -215,8 +215,9 @@ Names already used in the registry: {names}
 Call `write_tool_plan` with name (snake_case), description (what it does in general, for later search),
 input_schema (a JSON Schema object: every path, name or value the script hardcodes that another use would change is
 an input property with a description; mark the ones it cannot do without as required), output_schema (what run
-returns, e.g. the paths it wrote and a few values) and example_inputs: the inputs that make the tool do exactly what
-this script did (the same paths and values)."""
+returns, e.g. the paths it wrote and a few values), example_inputs: the inputs that make the tool do exactly what
+this script did (the same paths and values), and outputs: the files it wrote that are the tool's result (leave out
+scratch or test files the script made on the side)."""
 
 WHAT_KEPT = ("the tool: the script's work as `def run(inputs: dict, io) -> dict`, taking every input with "
              "`io.ask(key, prompt, kind)` (it returns inputs[key] when the caller gave it). Called with the example "
