@@ -17,7 +17,7 @@ import shutil
 import time
 
 from . import codeblocks, prompts, samples
-from .turns import AgentStop, RestartRequested, Turns, fn
+from .turns import AgentStop, ModelGaveUp, RestartRequested, Turns, fn
 from ..harness.registry import NAME_RE, is_bundled
 from ..harness.sandbox import PolicyError, repair_argv, validate_packages, validate_targets
 from ..harness import toolui
@@ -234,7 +234,7 @@ class Creator:
                  f"The script it is kept from (it worked on the user's files):\n```python\n{script_run['script']}```\n\n")
         body = self._ask_file("tool.py", prompts.CODE_FILE.format(intro=intro, path="tool.py", what=prompts.WHAT_KEPT), "code")
         if body is None:
-            raise AgentStop("no usable tool.py after 3 replies")
+            raise ModelGaveUp("no usable tool.py after 3 replies")
         self._write("tool.py", body)
         self._write("test_tool.py", GOLDEN_TEST)
         a.log.emit("code", tool=self.spec["name"], files={k: open(os.path.join(self.files_dir, k)).read() for k in FILES})
@@ -259,7 +259,9 @@ class Creator:
             return "example_inputs must be an object: the inputs that redo this run."
         extra = [k for k in ex if k not in props]
         if extra:
-            return f"example_inputs has keys that are not input_schema properties: {', '.join(extra)}."
+            return (f"example_inputs has keys that are not input_schema properties: {', '.join(extra)}. Each input "
+                    f"is a field of input_schema.properties: {{\"type\": \"object\", \"properties\": "
+                    f"{{\"{extra[0]}\": {{...}}}}, \"required\": [...]}}.")
         missing = [k for k in (d["input_schema"].get("required") or []) if k not in ex]
         if missing:
             return f"example_inputs lacks the required inputs {', '.join(missing)}."
@@ -382,7 +384,7 @@ class Creator:
                 continue
             t.result(want, "Accepted.")
             return args
-        raise AgentStop(f"no valid {want} after {tries} tries")
+        raise ModelGaveUp(f"no valid {want} after {tries} tries")
 
     def _check_design(self, d):
         if not d.get("name"):
@@ -1194,7 +1196,17 @@ def object_schema(x):
     if isinstance(x, dict) and x and not {"type", "properties"} & set(x) \
             and all(isinstance(v, dict) and ("type" in v or "description" in v) for v in x.values()):
         return {"type": "object", "properties": x}
+    if isinstance(x, dict) and x.get("type") == "object":      # fields put next to "type" instead of in properties
+        stray = {k: v for k, v in x.items() if k not in SCHEMA_WORDS and isinstance(v, dict)
+                 and ("type" in v or "description" in v)}
+        if stray:
+            props = x.get("properties") if isinstance(x.get("properties"), dict) else {}
+            return {**{k: v for k, v in x.items() if k not in stray}, "properties": {**stray, **props}}
     return x
+
+
+SCHEMA_WORDS = {"type", "properties", "required", "additionalProperties", "description", "title", "items", "enum",
+                "default", "$schema", "examples", "patternProperties", "minProperties", "maxProperties"}
 
 
 def _content_words(text):

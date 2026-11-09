@@ -66,6 +66,28 @@ class KeepTest(unittest.TestCase):
         a = Agent(temp_config(), label="keep0", workspace=git_folder({"a.txt": "x\n"}))
         self.assertIn("Nothing to keep", a._keep(None, "x", "task", "", []))
 
+    def test_a_plan_the_model_never_gets_right_is_not_kept_and_the_task_goes_on(self):
+        bad = dict(PLAN, example_inputs={"nope": 1})
+        steps = script()[:4] + [step(call("write_tool_plan", **bad))] * 4 + [
+            step(call("finish", answer="The total is 12.50.", files=["total.txt"]))]
+        folder = git_folder({"sales.csv": "qty,price\n2,1.25\n4,2.5\n"})
+        agent = Agent(temp_config(), backend=fake_backend(steps), label="keepbad", workspace=folder)
+        s = agent.run_task("Write the total of sales.csv (qty * price) to total.txt.")
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertEqual(open(os.path.join(folder, "total.txt")).read(), "12.50\n")
+        self.assertIsNone(agent.registry.get("csv_total"))
+
+
+class SchemaShapeTest(unittest.TestCase):
+    def test_fields_next_to_type_go_into_properties(self):
+        from mini.agent.creator import object_schema
+        got = object_schema({"type": "object", "required": ["data"], "data": {"type": "object"},
+                             "out": {"description": "path", "type": "string"}, "properties": {}})
+        self.assertEqual(got, {"type": "object", "required": ["data"],
+                               "properties": {"data": {"type": "object"}, "out": {"description": "path", "type": "string"}}})
+        ok = {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "string"}}
+        self.assertEqual(object_schema(dict(ok)), ok)
+
 
 if __name__ == "__main__":
     unittest.main()

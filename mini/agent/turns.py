@@ -37,6 +37,10 @@ class AgentStop(Exception):
     """The run stops: cap reached, user said stop, hardware watchdog, unrecoverable model output."""
 
 
+class ModelGaveUp(AgentStop):
+    """The model gave no usable answer to one build step after its tries (a plan, a file): not a cap or a stop."""
+
+
 class RestartRequested(Exception):
     pass
 

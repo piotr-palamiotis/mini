@@ -19,7 +19,7 @@ import time
 
 from . import prompts
 from .creator import _content_words, Creator, ToolFailed, trim
-from .turns import AgentStop, RestartRequested, Turns, fn
+from .turns import AgentStop, ModelGaveUp, RestartRequested, Turns, fn
 from ..core import Call, load as load_catalog
 from ..core._tools import describe_tool
 from ..harness import checkpoint as ckpt, gates, hwmon, journal, workspace as ws
@@ -597,7 +597,7 @@ class Agent:
                     f"instead of kept twice. If this script does something else, call keep_tool again.")
         try:
             m = creator.keep(s, what, task, ctx)
-        except ToolFailed as e:
+        except (ToolFailed, ModelGaveUp) as e:    # a keep that fails costs the tool, not the task: the script ran
             self.log.emit("watchdog", name="keep_failed", problem=str(e))
             return f"Not kept: {e}. The script already did the work; go on with the task."
         finally:
