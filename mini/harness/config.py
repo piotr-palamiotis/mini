@@ -44,6 +44,7 @@ DEFAULTS = {
     "gap": {
         "judge": True,                       # judge the registry's best matches for a task one tool at a time
         "candidates": 5,                     # how many of them
+        "min_score": 2,                      # a match shares at least this many words with the task ("file" alone is not one)
     },
     "caps": {
         "attempts_per_tool": 10,             # one attempt = generate/fix code + run tests

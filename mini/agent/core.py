@@ -369,7 +369,7 @@ class Agent:
                           " ".join(u.get("side_effects") or []), u.get("plan", "")])
         g = self.cfg.get("gap") or {}
         candidates = [m for score, m in self.registry.scored(query, limit=g.get("candidates", GAP_CANDIDATES))
-                      if score > 0] if g.get("judge", True) else []
+                      if score >= g.get("min_score", 2)] if g.get("judge", True) else []
         fits = []
         for m in candidates:
             v = self._judge(u, m)
