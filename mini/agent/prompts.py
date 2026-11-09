@@ -43,8 +43,10 @@ Core capabilities you always have (they are not tools and never need to be built
 
 Core capabilities that match this task best: {matches}
 
-Exact processing this task needs once is done with run_code (a script run in the sandbox); a missing capability
-is one worth keeping as a tool for later tasks. Anything else that touches other systems needs a tool.
+Processing is done with run_code: a script in the sandbox, which gets the pip or apt packages it names (file
+formats, images, spreadsheets, charts...). A script worth keeping becomes a tool afterwards (keep_tool), tested on its own
+run, so work a script can do is never `missing`. `missing` is only for a capability a script cannot try in the
+sandbox: one that needs the network or a dialogue with the user.
 
 Decide whether the installed tools plus the core capabilities cover every step. A step a core capability does is
 covered: never put it in `missing` and never build a tool for it. If every step is a core capability or an
@@ -175,6 +177,37 @@ the text above). A situation the task does not speak about is not an edge case: 
 tool might do. Missing inputs and files that do not exist are checked by the harness itself; do not list them.
 Most tasks state none: then call `write_edge_cases` with an empty list."""
 
+KEEP_PLAN = """{rules}
+
+A script did a step of the user's task in the sandbox, and it worked. It is kept as a tool for later tasks: the same
+work, with everything that varies between uses as an input.
+
+The user's task: {task}
+{what}
+The script:
+```python
+{script}
+```
+Files in its working directory when it ran: {seen}
+Files it wrote: {wrote}
+What it printed (the end): {printed}
+
+Names already used in the registry: {names}
+{note}
+Call `write_tool_plan` with name (snake_case), description (what it does in general, for later search),
+input_schema (a JSON Schema object: every path, name or value the script hardcodes that another use would change is
+an input property with a description; mark the ones it cannot do without as required), output_schema (what run
+returns, e.g. the paths it wrote and a few values) and example_inputs: the inputs that make the tool do exactly what
+this script did (the same paths and values)."""
+
+WHAT_KEPT = ("the tool: the script's work as `def run(inputs: dict, io) -> dict`, taking every input with "
+             "`io.ask(key, prompt, kind)` (it returns inputs[key] when the caller gave it). Called with the example "
+             "inputs it must write the same files with the same content as the script did: test_tool.py, written by "
+             "the harness, checks exactly that.")
+
+KEPT_NOTE = """test_tool.py is the harness's: it copies the files the script saw, calls run with the example inputs and
+checks that the tool writes the same files as the script did. Change tool.py only, so that it does."""
+
 CODE_FILE = """{intro}Write {path} now: {what}
 Reply with only the complete file as one fenced code block, no tool call:
 
@@ -255,9 +288,11 @@ Complete the task now. Call `invoke_tool` to run a tool. Pass every input you al
 the tool asks the user only for what is missing, and saved settings are filled in by the harness. Tool outputs
 come back as JSON. `invoke_tool` runs only installed tools. The core capabilities work on the user's folder, with
 paths relative to it, and change files in place; write_file and run_code take their content as a fenced block in
-the same reply. For exact processing this task needs once, use run_code before thinking of a new tool. If a tool
-fails because of a bug in the tool, call `report_tool_bug`. If you discover a capability that neither core nor
-a tool provides, call `need_tool`. Before you finish, check that every tool output answers what was asked
+the same reply. Do the processing with run_code; give it packages when the script needs them. When the user asks
+for tools, or a script is worth keeping for later tasks, call `keep_tool` right after the script that did the step
+ran without an error: it becomes a tool, tested on that run. Call `need_tool` only for a capability a script cannot
+try in the sandbox (it needs the network or a dialogue with the user). If a tool fails because of a bug in the tool,
+call `report_tool_bug`. Before you finish, check that every tool output answers what was asked
 (the requested item, not a different or nearby one). If it does not, that is a tool bug: call `report_tool_bug`.
 When the task is done, call `finish` with the answer for the user and the list of files you produced.
 Keep what you read small: your context is limited. For "what is in this folder", list it (depth 1), then go

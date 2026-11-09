@@ -40,6 +40,72 @@ T_EDGES = fn("write_edge_cases", "Write the edge cases the user's task states (o
     "cases": {"type": "array", "items": {"type": "object", "properties": {
         "situation": S, "expected": S, "quote": S}}}}, ["cases"])
 GAP_HOLDS = 2                   # the pre-test checks hold a test run back at most this often for the same reason
+T_PLAN = fn("write_tool_plan", "Write how the script becomes a tool: name, schemas and the example inputs.", {
+    "name": S, "description": S, "input_schema": OBJ, "output_schema": OBJ, "example_inputs": OBJ},
+    ["name", "description", "input_schema", "example_inputs"])
+KEEP_MAX = 10 * 2**20           # the files a kept script saw travel with the tool as its test data, up to this size
+GOLDEN_TEST = '''"""Written by the harness: the tool must do what the script it was kept from did on that run."""
+import json
+import os
+import shutil
+
+from mini_io import MissingInput, ScriptedIO
+from tool import run
+
+HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
+EXAMPLE = json.load(open(os.path.join(HERE, "example.json")))
+
+
+class Answers(ScriptedIO):
+    """The example inputs answer the tool's questions; a confirmation is yes, as the user said yes by running it."""
+    def ask(self, key, prompt, kind="text", choices=None, default=None, multi=False):
+        try:
+            return super().ask(key, prompt, kind, choices, default, multi)
+        except MissingInput:
+            if kind == "confirm":
+                return True
+            raise
+
+
+def same(path, want):
+    got = open(path, "rb").read()
+    if got == want:
+        return True
+    try:
+        g, w = got.decode("utf-8"), want.decode("utf-8")
+    except UnicodeDecodeError:          # binary output (an image, a document): the same kind of file of a similar size
+        return got[:4] == want[:4] and 0.5 * len(want) <= len(got) <= 2 * len(want) + 64
+    if path.endswith(".json"):
+        try:
+            return json.loads(g) == json.loads(w)
+        except ValueError:
+            return False
+    norm = lambda t: [ln.rstrip() for ln in t.replace("\\r\\n", "\\n").strip().split("\\n")]
+    return norm(g) == norm(w)
+
+
+def test_does_what_the_script_did():
+    src = os.path.join(HERE, "in")
+    for d, _, files in os.walk(src):
+        for f in files:
+            rel = os.path.relpath(os.path.join(d, f), src)
+            os.makedirs(os.path.dirname(rel) or ".", exist_ok=True)
+            shutil.copyfile(os.path.join(d, f), rel)
+    out = run(dict(EXAMPLE), Answers(answers=EXAMPLE, inputs=EXAMPLE))
+    assert isinstance(out, dict), f"run returned {type(out).__name__}, not a dict"
+    want_dir = os.path.join(HERE, "out")
+    wrong = []
+    for d, _, files in os.walk(want_dir):
+        for f in files:
+            rel = os.path.relpath(os.path.join(d, f), want_dir)
+            want = open(os.path.join(d, f), "rb").read()
+            if not os.path.exists(rel):
+                wrong.append(f"{rel}: not written (the script wrote it)")
+            elif not same(rel, want):
+                got = open(rel, "rb").read()
+                wrong.append(f"{rel}: differs from the script's file; script: {want[:300]!r} tool: {got[:300]!r}")
+    assert not wrong, "\\n".join(wrong)
+'''
 SPEC_THINK_TOKENS = 1500        # each spec phase thinks on its own budget, in its own fresh conversation
 T_REPLACE = fn("replace", "Replace one exact piece of text in a file. old must appear exactly once; include a few "
                "surrounding lines to make it unique. Never include line-number prefixes.",
@@ -103,10 +169,93 @@ class Creator:
         self.samples_nudged = False
         self.last_output, self.last_hash = "", None
         self.attempt_log, self.snapshot, self.repair_note, self.advice = [], {}, "", None
+        self.kept = False
         a.log.emit("phase", phase="create", need=need)
         self._copy_samples()
         self._spec_phase()
         return self._code_and_test(first=True)
+
+    def keep(self, script_run, what, task, context):
+        """A script run_code ran successfully becomes a tool: the model turns it into run(inputs, io) with the
+        script's hardcoded values as inputs; the harness writes the test from the run itself (the files the script
+        saw, the example inputs, the files it wrote) and the usual fix loop makes the tool pass it."""
+        a = self.a
+        a.wd.reset_task()
+        rec = script_run.get("record")
+        self.task, self.context, self.need = task, context, what or "keep the script as a tool"
+        self.build = os.path.join(a.run_dir, "build", f"kept{len(a.created) + 1}")
+        shutil.rmtree(self.build, ignore_errors=True)
+        self.files_dir = os.path.join(self.build, "files")
+        golden = os.path.join(self.files_dir, "golden")
+        os.makedirs(golden)
+        size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(rec) for f in fs)
+        if size > KEEP_MAX:
+            raise ToolFailed(f"the script's files ({size // 2**20} MB) are too large to keep as the tool's test")
+        for part in ("in", "out"):
+            if os.path.isdir(os.path.join(rec, part)):
+                shutil.copytree(os.path.join(rec, part), os.path.join(golden, part))
+            else:
+                os.makedirs(os.path.join(golden, part))
+        self.spec, self.approved_perms, self.image = None, {"network": [], "packages": {"apt": [], "pip": []}}, None
+        self.parent, self.restarts, self.consults, self.errors = None, 0, 0, {}
+        self.samples_nudged, self.last_output, self.last_hash = True, "", None
+        self.attempt_log, self.snapshot, self.repair_note, self.advice = [], {}, "", None
+        self.kept = True
+        a.log.emit("phase", phase="keep", what=self.need)
+        seen = sorted(os.path.relpath(os.path.join(d, f), os.path.join(golden, "in"))
+                      for d, _, fs in os.walk(os.path.join(golden, "in")) for f in fs)
+        listing = lambda xs: ", ".join(xs[:40]) + (f" (+{len(xs) - 40} more)" if len(xs) > 40 else "") or "(none)"
+        plan = self._phase("keep_plan", T_PLAN, self._lessons_block() + prompts.KEEP_PLAN.format(
+            rules=prompts.CREATE_RULES, task=trim(self.task, 1500), what=f"What to keep: {what}\n" if what else "",
+            script=script_run["script"], seen=listing(seen), wrote=listing(script_run.get("written") or []),
+            printed=trim(script_run.get("output") or "", 800), names=", ".join(a.registry.names()) or "(none)",
+            note=""), self._check_plan)
+        json.dump(plan["example_inputs"], open(os.path.join(golden, "example.json"), "w"), indent=1)
+        spec = {"name": plan["name"], "description": plan["description"], "input_schema": plan["input_schema"],
+                "output_schema": plan.get("output_schema") or {"type": "object", "properties": {}},
+                "settings": [], "interaction": [], "ui": {}, "edge_cases": [],
+                "permissions": {"network": [], "packages": script_run.get("packages") or {}}}
+        self.spec = self._clean_spec(spec)
+        a.log.emit("spec", spec=self.spec, kept_from_script=True)
+        ok, msg = self._approve_permissions(self.spec["permissions"])
+        if not ok:
+            raise ToolFailed(msg)
+        self.example = plan["example_inputs"]
+        self.messages = [{"role": "system", "content": prompts.SYSTEM + "\n\n" + prompts.CREATE_RULES}]
+        intro = (f"Plan of the tool:\n{json.dumps({**self.spec, 'example_inputs': self.example}, indent=1)}\n\n"
+                 f"The script it is kept from (it worked on the user's files):\n```python\n{script_run['script']}```\n\n")
+        body = self._ask_file("tool.py", prompts.CODE_FILE.format(intro=intro, path="tool.py", what=prompts.WHAT_KEPT), "code")
+        if body is None:
+            raise AgentStop("no usable tool.py after 3 replies")
+        self._write("tool.py", body)
+        self._write("test_tool.py", GOLDEN_TEST)
+        a.log.emit("code", tool=self.spec["name"], files={k: open(os.path.join(self.files_dir, k)).read() for k in FILES})
+        res = self._run_tests()
+        out = self._test_message(res)
+        verdict = a.wd.on_test(res["passed"], True, self._hash())
+        if not res["passed"]:
+            self._record_attempt(res)
+        done = self._after_test(verdict)
+        if done:
+            return done
+        if verdict == "continue":
+            self._fresh(out, head=prompts.KEPT_NOTE + "\n\n")
+        return self._fix_loop()
+
+    def _check_plan(self, d):
+        for k in ("input_schema", "output_schema"):
+            d[k] = object_schema(d.get(k) or {"type": "object", "properties": {}})
+        props = (d["input_schema"] or {}).get("properties") or {}
+        ex = d.get("example_inputs")
+        if not isinstance(ex, dict):
+            return "example_inputs must be an object: the inputs that redo this run."
+        extra = [k for k in ex if k not in props]
+        if extra:
+            return f"example_inputs has keys that are not input_schema properties: {', '.join(extra)}."
+        missing = [k for k in (d["input_schema"].get("required") or []) if k not in ex]
+        if missing:
+            return f"example_inputs lacks the required inputs {', '.join(missing)}."
+        return self._validate_spec({**d, "edge_cases": []}, new=True)
 
     def repair(self, manifest, problem, evidence, task, context):
         """The real run found a bug: the tool goes back into the loop as a new version."""
@@ -129,6 +278,7 @@ class Creator:
         self.errors = {}
         self.samples_nudged = False
         self.attempt_log, self.snapshot, self.advice = [], self._read_files(), None
+        self.kept = False
         self.repair_note = (f"The installed v{manifest['version']} failed on the real task: {problem}\n"
                             f"Evidence:\n{trim(evidence, 1200)}\n")
         if a.cfg["lessons"]["enabled"]:
@@ -454,6 +604,8 @@ class Creator:
         return self._fix_loop()
 
     def _edge_case_gap(self):
+        if getattr(self, "kept", False):
+            return ""
         gaps = []
         tests = open(os.path.join(self.files_dir, "test_tool.py")).read().count("def test_")
         need = len(self.spec["edge_cases"])
@@ -659,6 +811,8 @@ class Creator:
         a = self.a
         a.wd.reset_conversation()
         got = samples.listing(self.files_dir)
+        if getattr(self, "kept", False) and prompts.KEPT_NOTE not in head:
+            head = prompts.KEPT_NOTE + "\n\n" + head
         content = prompts.STATE.format(
             head=head + (self.repair_note or ""), name=self.spec["name"], task=trim(self.task, 800),
             spec=json.dumps(self.spec, indent=1), files=self._files_view(),
@@ -739,8 +893,10 @@ class Creator:
         a = self.a
         if name in ("replace", "replace_lines", "rewrite_file"):
             path = os.path.basename(str(args.get("path", "")))
-            if path not in FILES:
-                return f"You can only edit {', '.join(FILES)}.", None
+            editable = ("tool.py",) if getattr(self, "kept", False) else FILES
+            if path not in editable:
+                return (f"You can only edit {', '.join(editable)}." + (" test_tool.py is the harness's check that the "
+                        "tool does what the script did." if getattr(self, "kept", False) else "")), None
             full = os.path.join(self.files_dir, path)
             old_text = open(full).read() if os.path.exists(full) else ""
             if name == "replace":

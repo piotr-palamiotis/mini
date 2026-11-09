@@ -203,7 +203,7 @@ class RunCodeTest(unittest.TestCase):
         self.assertIn("open('data.txt')", seen["script"])
         self.assertIn("exit 0\n7", text)
         self.assertIn("Files written to the folder: sum.txt", text)
-        self.assertIn("need_tool with from_run_code", text)
+        self.assertIn("call `keep_tool`", text)
         self.assertEqual(open(os.path.join(self.root, "sum.txt")).read(), "7\n")
         self.assertEqual(ckpt.task_files(self.root, self.a.log.run_id), ["sum.txt"])
         self.assertFalse(os.path.exists(os.path.join(self.root, ".mini", "script.py")))

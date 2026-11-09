@@ -1,4 +1,4 @@
-"""run_code has the standard library only: a missing package points to the installed tool that has it."""
+"""A missing package: name it for run_code's packages input, and an installed tool that has it."""
 import types
 import unittest
 
@@ -20,11 +20,13 @@ class ModuleHintTest(unittest.TestCase):
     def test_the_tool_built_for_the_task_that_has_the_package(self):
         a = types.SimpleNamespace(registry=Reg({"get_image_metadata": ["Pillow>=10"], "xlsx_x": ["openpyxl"]}),
                                   built_names=["get_image_metadata"])
-        self.assertIn("get_image_metadata has it: run it with `invoke_tool`", _module_hint(a, "PIL"))
+        h = _module_hint(a, "PIL")
+        self.assertIn('packages {"pip": ["pillow"]}', h)
+        self.assertIn("get_image_metadata already has it", h)
 
     def test_no_tool_has_it(self):
         a = types.SimpleNamespace(registry=Reg({"xlsx_x": ["openpyxl"]}), built_names=[])
-        self.assertIn("Work that needs it is a tool: call need_tool", _module_hint(a, "yaml"))
+        self.assertNotIn("already has it", _module_hint(a, "yaml"))
 
 
 if __name__ == "__main__":

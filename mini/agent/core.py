@@ -62,13 +62,15 @@ T_COVERAGE = fn("decide_coverage", "Decide which installed tools cover the task 
     "reasoning": S, "use": ARR, "missing": ARR}, ["reasoning", "use", "missing"])
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
            {"name": S, "problem": S}, ["name", "problem"])
-T_NEED = fn("need_tool", "A capability is missing; build a new tool for it. from_run_code: true when the last "
-            "run_code script did this and should become the tool.", {"need": S, "from_run_code": {"type": "boolean"}},
-            ["need"])
+T_NEED = fn("need_tool", "Build a tool from a spec, for a capability a run_code script cannot try in the sandbox: it "
+            "needs the network or a dialogue with the user. Work a script can do is run with run_code and kept with "
+            "keep_tool.", {"need": S, "from_run_code": {"type": "boolean"}}, ["need"])
+T_KEEP = fn("keep_tool", "Keep the last run_code script that ran without an error as a tool for later tasks: the "
+            "harness tests the tool on that run. what: what the tool does, in general words.", {"what": S}, [])
 T_FINISH = fn("finish", "The task is done. answer: the reply to the user, with any list or result written out in it. "
               "files: only deliverable files you wrote or changed in the folder; leave it out when the answer is text "
               "(names a tool returned are not files).", {"answer": S, "files": ARR}, ["answer"])
-CONTROL_TOOLS = [T_BUG, T_NEED, T_FINISH]         # the pipeline's own calls; everything else is a core capability
+CONTROL_TOOLS = [T_BUG, T_KEEP, T_NEED, T_FINISH]         # the pipeline's own calls; everything else is a core capability
 
 
 class Agent:
@@ -441,6 +443,9 @@ class Agent:
                         self.log.emit("tool_result", step="execute", name=name, text=trim(text, 3000))
                         t.user(text + note)
                         continue
+                elif name == "keep_tool" or (name == "need_tool" and args.get("from_run_code")
+                                             and (self.last_script or {}).get("record")):
+                    text = self._keep(creator, args.get("what") or args.get("need") or "", task, ctx, tools)
                 elif name == "need_tool":
                     text = self._need(creator, args, task, ctx, tools)
                 elif name == "report_tool_bug":
@@ -498,6 +503,27 @@ class Agent:
             return "New tool installed:\n" + describe_tool(m) + f"\nRun it now with `invoke_tool` (name {m['name']!r})."
         finally:
             self.wd.reset_conversation()
+
+    def _keep(self, creator, what, task, ctx, tools):
+        """keep_tool: the last successful script becomes a tool, tested on its own run; then the installed tool runs
+        once on the user's files with the example inputs (it writes what the script wrote, so nothing changes)."""
+        s = self.last_script or {}
+        if not (s.get("ok") and s.get("script") and s.get("record")):
+            return ("Nothing to keep: keep_tool keeps the last run_code script that ran without an error (a script, "
+                    "not a command). Do the work with run_code first.")
+        try:
+            m = creator.keep(s, what, task, ctx)
+        except ToolFailed as e:
+            self.log.emit("watchdog", name="keep_failed", problem=str(e))
+            return f"Not kept: {e}. The script already did the work; go on with the task."
+        finally:
+            self.wd.reset_conversation()
+        self.last_script = None
+        tools.append(m["name"])
+        self.built_names.append(m["name"])
+        text, _ = self.act("invoke_tool", {"name": m["name"], "inputs": dict(getattr(creator, "example", {}) or {})})
+        return (f"Kept as the tool {m['name']} v{m['version']}: its test is the script's run, and it just ran once on "
+                f"your files with the example inputs:\n{trim(text, 800)}\n" + describe_tool(m))
 
     def _same_need(self, tool, need):
         """need asks again for what tool, built in this task, does: it names the tool, or half or more of the
