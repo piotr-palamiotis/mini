@@ -41,6 +41,10 @@ DEFAULTS = {
     "thinking": {                            # thinking per step
         "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,
     },
+    "gap": {
+        "judge": True,                       # judge the registry's best matches for a task one tool at a time
+        "candidates": 5,                     # how many of them
+    },
     "caps": {
         "attempts_per_tool": 10,             # one attempt = generate/fix code + run tests
         "task_wall_clock_s": 1200,           # per tool creation and per execution phase; then the user decides

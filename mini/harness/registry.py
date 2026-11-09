@@ -153,7 +153,12 @@ class Registry:
     def list_tools(self):
         return [m for m in (self.get(n) for n in self.names()) if m]
 
-    def search(self, query, limit=10):
+    def search(self, query, limit=10, min_score=0):
+        return [m for s, m in self.scored(query, limit) if s >= min_score]
+
+    def scored(self, query, limit=10):
+        """[(score, manifest)], best first: score is the number of query words in the tool's name, description and
+        schema fields."""
         q = tokens(query)
         scored = []
         for m in self.list_tools():
@@ -162,7 +167,7 @@ class Registry:
             score = len(q & tokens(text))
             scored.append((score, m["name"], m))
         scored.sort(key=lambda x: (-x[0], x[1]))
-        return [m for s, _, m in scored[:limit]]
+        return [(s, m) for s, _, m in scored[:limit]]
 
     def snapshot(self):
         """Compact registry state for the log."""

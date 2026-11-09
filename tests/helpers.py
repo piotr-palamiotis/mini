@@ -17,6 +17,7 @@ def temp_config(**over):
     cfg["local"]["use"] = []
     cfg["llamacpp"]["preset"] = ""                    # tests set up their own llama.cpp settings, not the user's preset
     cfg["tools"]["auto_accept"] = True                # tests that check staging turn this off
+    cfg["gap"]["judge"] = False                       # scripted models answer the one coverage call; test_gap judges
     cfg["free"]["enabled"] = False
     cfg["paid"]["enabled"] = False
     for path, v in over.items():

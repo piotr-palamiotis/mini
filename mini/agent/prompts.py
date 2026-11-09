@@ -31,11 +31,33 @@ Read the task carefully. Call the tool `understand` with:
 - ambiguities: anything unclear and the assumption you will make for each
 - plan: short numbered steps"""
 
+GAP_ONE = """The user's task:
+{task}
+
+As understood:
+- goal: {goal}
+- steps: {plan}
+
+An installed tool:
+{tool}
+
+Can this tool, as it is, do one of the task's steps? Call `judge_tool` with fits (true or false), step (the step it
+does, in the task's words; empty when it does not fit) and why (one short sentence). A tool that does something
+nearby but not this step does not fit."""
+
+GAP_PICK = """The user's task:
+{task}
+
+These installed tools each fit a step of it:
+{fits}
+
+Call `choose_tools` with use: the names of the tools to use. When two do the same step, keep the one that does it
+better and leave the other out."""
+
 GAP = """The task, as understood:
 {understanding}
 
-Tools installed in the registry ({count}):
-{registry}
+Installed tools chosen for this task (each was checked against it): {chosen}
 
 Core capabilities you always have (they are not tools and never need to be built), besides pure text reasoning
 (reading, summarizing, writing or rephrasing text you have seen):
@@ -48,15 +70,11 @@ formats, images, spreadsheets, charts...). A script worth keeping becomes a tool
 run, so work a script can do is never `missing`. `missing` is only for a capability a script cannot try in the
 sandbox: one that needs the network or a dialogue with the user.
 
-Decide whether the installed tools plus the core capabilities cover every step. A step a core capability does is
-covered: never put it in `missing` and never build a tool for it. If every step is a core capability or an
-installed tool, `missing` is an empty list.
-
 Call `decide_coverage` with:
-- reasoning: how each step is covered, or why it is not
-- use: names of installed tools you will use
-- missing: one entry per missing capability. Describe a general, reusable capability (everything that varies
-  between uses is an input), not a one-off for this exact task. Empty list if everything is covered."""
+- reasoning: how each step is covered (a chosen tool, a core capability, a run_code script), or why it is not
+- use: the chosen tools you will use
+- missing: one entry per capability that needs the network or a dialogue and that no chosen tool provides,
+  described as a general, reusable capability. Usually an empty list."""
 
 CREATE_RULES = """You are building one new tool for the registry. The user also runs it from the terminal as a
 command: with all values as arguments in one line, or with none and the tool asks. The tool contract:

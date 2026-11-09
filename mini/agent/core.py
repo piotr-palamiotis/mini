@@ -60,6 +60,11 @@ T_UNDERSTAND = fn("understand", "State your understanding of the task.", {
     ["goal", "inputs", "outputs", "plan"])
 T_COVERAGE = fn("decide_coverage", "Decide which installed tools cover the task and which capabilities are missing.", {
     "reasoning": S, "use": ARR, "missing": ARR}, ["reasoning", "use", "missing"])
+T_JUDGE = fn("judge_tool", "Say whether this one tool can do a step of the task.", {
+    "fits": {"type": "boolean"}, "step": S, "why": S}, ["fits"])
+T_CHOOSE = fn("choose_tools", "Pick the tools to use among the ones that fit.", {"use": ARR, "why": S}, ["use"])
+GAP_CANDIDATES = 5              # registry tools judged one by one for a task (the best search matches)
+GAP_THINK_TOKENS = 700          # each judgement is one small question
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
            {"name": S, "problem": S}, ["name", "problem"])
 T_NEED = fn("need_tool", "Build a tool from a spec, for a capability a run_code script cannot try in the sandbox: it "
@@ -96,6 +101,7 @@ class Agent:
         self.task_inputs = set()                 # relative paths the task reads and does not change (guard_inputs)
         self.built_names, self.need_reminded = [], False
         self.invoked_any = set()                 # tools invoke_tool actually ran in this task (ok or not)
+        self.task_text = ""
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
             self.tier_backends["local"] = backend
@@ -270,6 +276,7 @@ class Agent:
         else:
             self.log.emit("info", text="swap watchdog is off ([watchdogs] swap_watch); swap growth is only recorded")
         self.wd.reset_task()
+        self.task_text = task
         try:
             understanding = self.parse(task)
             self.task_inputs = self._input_files(understanding)
@@ -351,18 +358,33 @@ class Agent:
 
     # ------------------------------------------------------------ 3 gap detection
     def gap(self, understanding):
+        """Which installed tools this task uses, decided one tool at a time: the registry's best matches for the task
+        are each judged in a fresh conversation (fits a step, or not); when several fit, one more call picks among
+        them. Then one call decides what is missing (only what a script cannot try: network, a dialogue)."""
         self.log.emit("phase", phase="gap_detection")
         snap = self.registry.snapshot()
         self.log.emit("registry_state", when="before_run", tools=snap, count=len(snap))
-        query = " ".join([understanding.get("goal", ""), " ".join(understanding.get("outputs") or []),
-                          " ".join(understanding.get("side_effects") or []), understanding.get("plan", "")])
-        tools = self.registry.list_tools() if len(snap) <= 40 else self.registry.search(query, limit=15)
-        listing = "\n".join(describe_tool(m) for m in tools) or "(the registry is empty)"
+        u = understanding
+        query = " ".join([self.task_text, u.get("goal", ""), " ".join(u.get("outputs") or []),
+                          " ".join(u.get("side_effects") or []), u.get("plan", "")])
+        g = self.cfg.get("gap") or {}
+        candidates = [m for score, m in self.registry.scored(query, limit=g.get("candidates", GAP_CANDIDATES))
+                      if score > 0] if g.get("judge", True) else []
+        fits = []
+        for m in candidates:
+            v = self._judge(u, m)
+            self.log.emit("gap_judge", tool=m["name"], fits=v["fits"], step=v.get("step"), why=v.get("why"))
+            if v["fits"]:
+                fits.append((m, v))
+        chosen = [m["name"] for m, _ in fits] if g.get("judge", True) else \
+            [m["name"] for m in self.registry.search(query, limit=15)]
+        if len(fits) > 1:
+            chosen = self._choose(fits) or chosen
         matches = ", ".join(c.name for c in self.core.search(query)) or "(none)"     # the catalog is searched first
         msgs = [{"role": "system", "content": prompts.SYSTEM},
                 {"role": "user", "content": prompts.GAP.format(
-                    understanding=json.dumps(understanding, indent=1), count=len(snap), registry=listing,
-                    core=self.core.listing(), matches=matches)}]
+                    understanding=json.dumps(u, indent=1), core=self.core.listing(), matches=matches,
+                    chosen=", ".join(chosen) or "(none: no installed tool fits)")}]
         t = Turns(self, "gap", msgs, [T_COVERAGE])
         for _ in range(4):
             reply = t.ask()
@@ -371,21 +393,54 @@ class Agent:
             if call["name"] != "decide_coverage":
                 t.result(call["name"], "Call decide_coverage.")
                 continue
-            use = [u for u in (args.get("use") or []) if isinstance(u, str) and u not in self.core]
-            unknown = [u for u in use if u not in self.registry.names()]
+            use = [x for x in (args.get("use") or []) if isinstance(x, str) and x not in self.core]
+            unknown = [x for x in use if x not in self.registry.names()]
             if unknown:
                 t.result("decide_coverage", f"Not installed: {', '.join(unknown)}. Only use installed tool names; "
                                             "list anything else under missing.")
                 continue
-            missing = [m if isinstance(m, str) else json.dumps(m) for m in (args.get("missing") or [])]
-            core = {m: self.core.covering(m) for m in missing}
-            core = {m: c for m, c in core.items() if c}         # a need core already covers is never built
-            missing = [m for m in missing if m not in core]
+            use = list(dict.fromkeys(chosen + use))       # a tool judged to fit stays offered
+            missing = [x if isinstance(x, str) else json.dumps(x) for x in (args.get("missing") or [])]
+            core = {x: self.core.covering(x) for x in missing}
+            core = {x: c for x, c in core.items() if c}         # a need core already covers is never built
+            missing = [x for x in missing if x not in core]
             self.log.emit("gap", reasoning=args.get("reasoning"), use=use, missing=missing, core=core or None,
-                          covered=not missing, registry_count=len(snap))
+                          covered=not missing, registry_count=len(snap), judged=[m["name"] for m in candidates],
+                          fits=[m["name"] for m, _ in fits])
             self.gap_decision = {"use": use, "missing": missing}
             return {"use": use, "missing": missing}
         raise AgentStop("no coverage decision")
+
+    def _judge(self, u, m):
+        msgs = [{"role": "system", "content": prompts.SYSTEM},
+                {"role": "user", "content": prompts.GAP_ONE.format(
+                    task=trim(self.task_text, 1500), goal=u.get("goal", ""), plan=u.get("plan", ""), tool=describe_tool(m))}]
+        t = Turns(self, "gap", msgs, [T_JUDGE], think_tokens=GAP_THINK_TOKENS)
+        for _ in range(3):
+            reply = t.ask()
+            c = next((c for c in reply["tool_calls"] if c["name"] == "judge_tool"), None)
+            if c and isinstance(c.get("arguments"), dict) and isinstance(c["arguments"].get("fits"), (bool, str)):
+                v = dict(c["arguments"])
+                v["fits"] = v["fits"] is True or str(v["fits"]).strip().lower() in ("true", "yes")
+                return v
+            t.user("Call judge_tool with fits true or false.")
+        return {"fits": False, "why": "no judgement"}
+
+    def _choose(self, fits):
+        listing = "\n".join(f"{describe_tool(m)}\n  step it fits: {v.get('step') or '?'}" for m, v in fits)
+        msgs = [{"role": "system", "content": prompts.SYSTEM},
+                {"role": "user", "content": prompts.GAP_PICK.format(task=trim(self.task_text, 1500), fits=listing)}]
+        t = Turns(self, "gap", msgs, [T_CHOOSE], think_tokens=GAP_THINK_TOKENS * 2)
+        names = {m["name"] for m, _ in fits}
+        for _ in range(3):
+            reply = t.ask()
+            c = next((c for c in reply["tool_calls"] if c["name"] == "choose_tools"), None)
+            use = [x for x in ((c or {}).get("arguments") or {}).get("use") or [] if x in names]
+            if use:
+                self.log.emit("gap_choose", use=use, among=sorted(names), why=(c["arguments"].get("why") or "")[:300])
+                return use
+            t.user(f"Call choose_tools with use: names from {', '.join(sorted(names))}.")
+        return None
 
     # ------------------------------------------------------------ 4-6 create, then execute
     def execute(self, task, understanding, covered):
