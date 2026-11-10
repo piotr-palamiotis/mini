@@ -77,6 +77,18 @@ class FinishReviewTest(unittest.TestCase):
         self.assertEqual(s["status"], "success", s["error"])
         self.assertTrue(any("no check for test.txt" in r for r in results), results)
 
+    def test_deleting_a_stray_file_at_the_end_names_the_files_that_may_have_read_it(self):
+        folder = git_folder({"a.txt": "x\n"})
+        script = steps(step(call("write_file", path="test.txt", content="t\n")), finish(OK),
+                       step(call("delete_file", path="test.txt")), finish(OK))
+        agent = Agent(temp_config(**{"finish.review_outputs": True}), backend=fake_backend(script), label="review",
+                      workspace=folder)
+        self.assertEqual(agent.run_task("Write names.json as " + ASKS + ".")["status"], "success")
+        events = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
+        deleted = [e["text"] for e in events if e["kind"] == "tool_result" and e.get("name") == "delete_file"]
+        self.assertIn("names.json", deleted[0])
+        self.assertIn("run that step again", deleted[0])
+
     def test_after_three_rounds_the_task_may_end(self):
         s, _, _, reviews = self.run_task(steps(finish(), finish(), finish()))
         self.assertEqual(s["status"], "success", s["error"])

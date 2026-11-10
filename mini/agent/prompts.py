@@ -344,8 +344,8 @@ Call finish again with checks: one per file, each with
   columns; the names of fields and columns, their order, spacing, number format, units),
 - file_has: the form the sample shows, described the same way, in your own words,
 - matches: true only if file_has is exactly task_asks.
-A file the task did not ask for (a test or scratch file): delete it instead of checking it. If a file does not
-match, fix it first."""
+A file the task did not ask for (a test or scratch file): delete it instead of checking it, then redo every step
+that read it. If a file does not match, fix it first."""
 
 JUDGE_FORM = """The user's task:
 {task}

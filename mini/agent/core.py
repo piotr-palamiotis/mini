@@ -534,6 +534,12 @@ class Agent:
                         self.log.emit("tool_result", step="execute", name=name, text=trim(text, 3000))
                         t.user(text + note)
                         continue
+                    if name == "delete_file" and reviews:          # a stray file removed at the end may have been read
+                        made = [r for r in self.produced_files() if os.path.isfile(os.path.join(self.folder, r))]
+                        if made:
+                            text += ("\nFiles this task wrote before: " + ", ".join(made[:8]) + ". If a step that made "
+                                     "one of them read the deleted file, run that step again so they no longer "
+                                     "include it.")
                 elif name == "keep_tool" or (name == "need_tool" and args.get("from_run_code")
                                              and (self.last_script or {}).get("record")):
                     text = self._keep(creator, args.get("what") or args.get("need") or "", task, ctx, tools)
