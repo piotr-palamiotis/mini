@@ -347,6 +347,17 @@ Call finish again with checks: one per file, each with
 A file the task did not ask for (a test or scratch file): delete it instead of checking it. If a file does not
 match, fix it first."""
 
+JUDGE_FORM = """The user's task:
+{task}
+
+One file the task wrote, as it is now:
+{head}
+
+Look only at the form of {file}: does it have exactly the form the task asks for this file (the structure: a list,
+an object, rows, columns; what each entry is; the names of fields and columns, their order, spacing, number format)?
+Do not check whether the values are right. Call `judge_form` with matches (true or false) and why: one short
+sentence naming what the task asks and what the file has."""
+
 BUILT = """
 Built for this task, installed and already tested: {names}. Do not rewrite its logic in run_code and do not call
 `need_tool` for it. Call `invoke_tool` with it now.

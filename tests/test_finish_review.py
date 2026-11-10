@@ -30,9 +30,9 @@ def steps(*after_review):
 
 
 class FinishReviewTest(unittest.TestCase):
-    def run_task(self, script):
+    def run_task(self, script, **over):
         folder = git_folder({"a.txt": "x\n"})
-        agent = Agent(temp_config(**{"finish.review_outputs": True}), backend=fake_backend(script), label="review",
+        agent = Agent(temp_config(**{"finish.review_outputs": True, **over}), backend=fake_backend(script), label="review",
                       workspace=folder)
         s = agent.run_task("Write the names in a.txt to names.json as " + ASKS + ".")
         events = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
@@ -58,6 +58,18 @@ class FinishReviewTest(unittest.TestCase):
         self.assertIn("sample is not in the file", results[1])
         self.assertIn("repeats the task's words", results[2])
         self.assertEqual(open(os.path.join(folder, "names.json")).read(), '["x"]\n')
+
+    def test_a_fresh_judge_sends_back_a_file_whose_form_differs(self):
+        judge = lambda ok, why: step(call("judge_form", matches=ok, why=why))
+        fix = [finish([dict(OK[0], sample='{"name": "x"}', file_has="objects with a name")]),
+               judge(False, "the task asks for strings; the file has objects."),
+               step(call("write_file", path="names.json", content='["x"]\n')),
+               finish(OK), judge(True, "a list of strings.")]
+        s, folder, results, reviews = self.run_task(steps(*fix), **{"finish.judge": True})
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertIn("the task asks for strings; the file has objects.", results[1])
+        self.assertEqual(open(os.path.join(folder, "names.json")).read(), '["x"]\n')
+        self.assertEqual(len(reviews), 2)
 
     def test_a_file_with_no_check_is_named(self):
         stray = [step(call("write_file", path="test.txt", content="t\n")), finish(OK)]

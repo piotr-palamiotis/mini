@@ -44,6 +44,7 @@ DEFAULTS = {
     "finish": {
         "review_outputs": True,              # before finish, show the task next to the head of each file it wrote, once
         "review_max_files": 8,
+        "judge": True,                       # then a fresh question per text file: does its form match the task
     },
     "gap": {
         "judge": True,                       # judge the registry's best matches for a task one tool at a time

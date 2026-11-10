@@ -66,6 +66,8 @@ T_SCREEN = fn("shortlist", "Name the installed tools that could do a step of the
 T_CHOOSE = fn("choose_tools", "Pick the tools to use among the ones that fit.", {"use": ARR, "why": S}, ["use"])
 ASKS_FOR_TOOL = re.compile(r"\b(build|make|create|write|develop)\b[^.]{0,60}?\btools?\b", re.I)
 GAP_CANDIDATES = 5              # registry tools judged one by one for a task (the best search matches)
+T_FORM = fn("judge_form", "Say whether this file has the form the task asks for it.", {
+    "matches": {"type": "boolean"}, "why": S}, ["matches", "why"])
 GAP_THINK_TOKENS = 700          # each judgement is one small question
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
            {"name": S, "problem": S}, ["name", "problem"])
@@ -806,7 +808,13 @@ class Agent:
                            f"{trim(str(c.get('sample') or ''), 200)!r} shows, then compare it with task_asks.")
         wrong = [c for f, c in got.items() if f in map(norm, files) and c.get("matches") is not True]
         if not unchecked and not wrong and not out:
-            return ""
+            for f in files[:n]:                 # its own checks pass: a fresh look at each text file, task next to file
+                if fin.get("judge", True) and samples.is_text(os.path.join(self.folder, f)):
+                    v = self._judge_form(task, f)
+                    if not v["matches"]:
+                        out.append(f"{f} does not have the form the task asks for: {v['why']} Fix it, then finish "
+                                   "with checks again.")
+            return "\n".join(out)
         for c in wrong:
             out.append(f"{c.get('file')}: the task asks for {c.get('task_asks')!r} but the file has "
                        f"{c.get('file_has')!r}. Change it to what the task asks, then finish with checks again.")
@@ -814,6 +822,23 @@ class Agent:
             out.append("no check for " + ", ".join(unchecked) + ": give one for each file the task wrote, or delete "
                        "the file if the task did not ask for it (a test or scratch file).")
         return "\n".join(out)
+
+    def _judge_form(self, task, rel):
+        """One fresh question, apart from the work that made the file: the task and the file's head, does the file
+        have the form the task asks for it? An unclear answer counts as a match (the agent's own checks passed)."""
+        msgs = [{"role": "system", "content": prompts.SYSTEM},
+                {"role": "user", "content": prompts.JUDGE_FORM.format(task=trim(task, 2000), file=rel,
+                                                                      head=samples.head(self.folder, rel))}]
+        t = Turns(self, "review", msgs, [T_FORM], think_tokens=GAP_THINK_TOKENS)
+        for _ in range(2):
+            c = next((c for c in t.ask()["tool_calls"] if c["name"] == "judge_form"), None)
+            v = (c or {}).get("arguments")
+            if isinstance(v, dict) and isinstance(v.get("matches"), (bool, str)):
+                ok = v["matches"] is True or str(v["matches"]).strip().lower() in ("true", "yes")
+                self.log.emit("judge_form", file=rel, matches=ok, why=trim(str(v.get("why") or ""), 300))
+                return {"matches": ok, "why": str(v.get("why") or "").strip()}
+            t.user("Call judge_form with matches (true or false) and why.")
+        return {"matches": True, "why": ""}
 
     def _repair(self, creator, args, task, ctx):
         name = args.get("name", "")
