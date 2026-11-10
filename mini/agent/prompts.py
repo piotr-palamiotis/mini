@@ -328,7 +328,7 @@ Keep what you read small: your context is limited. For "what is in this folder",
 deeper only where the task needs it, and answer from the listing; read a file only when the task is about its
 content."""
 
-REVIEW_OUTPUTS = """Before you finish, compare the files with the task's exact words.
+REVIEW_OUTPUTS = """before the task ends, check each file against the task's exact words.
 
 Task from the user:
 {task}
@@ -337,10 +337,13 @@ The files this task wrote or changed:
 
 {heads}
 
-For each file: is its form exactly what the task asks for: the structure (a list, an object, rows, columns), the
-names of fields and columns, their order, spacing, number format and units? Is any of them a file the task did not
-ask for (a test or scratch file)? If something differs, fix it (delete files that should not be there), then finish.
-If everything matches, call finish again."""
+Call finish again with checks: one per file, each with
+- task_asks: the form the task asks for this file, quoting its words (the structure: a list, an object, rows,
+  columns; the names of fields and columns, their order, spacing, number format, units),
+- file_has: the form the file above actually has, described the same way,
+- matches: true only if file_has is exactly task_asks.
+A file the task did not ask for (a test or scratch file): delete it instead of checking it. If a file does not
+match, fix it first."""
 
 BUILT = """
 Built for this task, installed and already tested: {names}. Do not rewrite its logic in run_code and do not call

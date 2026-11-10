@@ -1,4 +1,5 @@
-"""Before a task ends, the model sees the task next to the head of each file it wrote, once, and checks the form."""
+"""Before a task ends, the model checks each file it wrote against the task's words: finish carries one check per
+file, and a file that does not match, or has no check, keeps the task going (at most 3 rounds)."""
 import json
 import os
 import unittest
@@ -6,47 +7,61 @@ import unittest
 from mini.agent.core import Agent
 from tests.helpers import call, fake_backend, git_folder, step, temp_config
 
+ASKS = "a list of strings"
+OK = [{"file": "names.json", "task_asks": ASKS, "file_has": "a list of strings", "matches": True}]
+BAD = [{"file": "names.json", "task_asks": ASKS, "file_has": "a list of objects", "matches": False}]
+
+
+def finish(checks=None):
+    return step(call("finish", answer="Done.", files=["names.json"], **({"checks": checks} if checks else {})))
+
 
 def steps(*after_review):
     return [
         step(call("understand", goal="list names", inputs=["a.txt"], outputs=["names.json"], plan="1. write")),
         step(call("decide_coverage", reasoning="write_file does it", use=[], missing=[])),
         step(call("write_file", path="names.json", content='[{"name": "x"}]\n')),
-        step(call("finish", answer="Done.", files=["names.json"])),
+        finish(),
         *after_review,
     ]
 
 
 class FinishReviewTest(unittest.TestCase):
-    def run_task(self, script, **over):
+    def run_task(self, script):
         folder = git_folder({"a.txt": "x\n"})
-        agent = Agent(temp_config(**over), backend=fake_backend(script), label="review", workspace=folder)
-        s = agent.run_task("Write the names in a.txt to names.json as a list of strings.")
+        agent = Agent(temp_config(**{"finish.review_outputs": True}), backend=fake_backend(script), label="review",
+                      workspace=folder)
+        s = agent.run_task("Write the names in a.txt to names.json as " + ASKS + ".")
         events = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
-        return s, folder, events
+        reviews = [e for e in events if e["kind"] == "watchdog" and e.get("name") == "finish_review"]
+        results = [e["text"] for e in reviews]
+        return s, folder, results, reviews
 
-    def test_the_first_finish_shows_the_files_and_the_model_can_fix_them(self):
-        fix = [step(call("write_file", path="names.json", content='["x"]\n')),
-               step(call("finish", answer="Done.", files=["names.json"]))]
-        s, folder, events = self.run_task(steps(*fix), **{"finish.review_outputs": True})
+    def test_a_file_that_does_not_match_is_fixed_before_the_task_ends(self):
+        fix = [finish(BAD), step(call("write_file", path="names.json", content='["x"]\n')), finish(OK)]
+        s, folder, results, reviews = self.run_task(steps(*fix))
         self.assertEqual(s["status"], "success", s["error"])
         self.assertEqual(open(os.path.join(folder, "names.json")).read(), '["x"]\n')
-        reviews = [e for e in events if e["kind"] == "watchdog" and e.get("name") == "finish_review"]
-        self.assertEqual([e["files"] for e in reviews], [["names.json"]])
+        self.assertEqual(len(reviews), 2)
+        self.assertIn('[{"name": "x"}]', results[0])                    # the head of the file, next to the task
+        self.assertIn(ASKS, results[0])
+        self.assertIn("a list of objects", results[1])
 
-    def test_it_is_shown_once(self):
-        again = [step(call("finish", answer="Done.", files=["names.json"]))]
-        s, _, events = self.run_task(steps(*again), **{"finish.review_outputs": True})
+    def test_a_file_with_no_check_is_named(self):
+        stray = [step(call("write_file", path="test.txt", content="t\n")), finish(OK)]
+        s, _, results, reviews = self.run_task(steps(*stray, step(call("delete_file", path="test.txt")), finish(OK)))
         self.assertEqual(s["status"], "success", s["error"])
+        self.assertTrue(any("no check for test.txt" in r for r in results), results)
 
-    def test_the_review_text_has_the_task_and_the_file_head(self):
-        from mini.agent import prompts, samples
-        folder = git_folder({"out.json": '[{"name": "x"}]\n'})
-        h = samples.head(folder, "out.json")
-        self.assertIn('[{"name": "x"}]', h)
-        text = prompts.REVIEW_OUTPUTS.format(task="T as a list of strings", heads=h)
-        self.assertIn("T as a list of strings", text)
-        self.assertIn("out.json", text)
+    def test_after_three_rounds_the_task_may_end(self):
+        s, _, _, reviews = self.run_task(steps(finish(), finish(), finish()))
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertEqual(len(reviews), 3)
+
+    def test_off_in_config_means_no_review(self):
+        folder = git_folder({"a.txt": "x\n"})
+        agent = Agent(temp_config(), backend=fake_backend(steps()), label="review", workspace=folder)
+        self.assertEqual(agent.run_task("Write names.json.")["status"], "success")
 
 
 if __name__ == "__main__":

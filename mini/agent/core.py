@@ -76,7 +76,10 @@ T_KEEP = fn("keep_tool", "Keep the last run_code script that ran without an erro
             "harness tests the tool on that run. what: what the tool does, in general words.", {"what": S}, [])
 T_FINISH = fn("finish", "The task is done. answer: the reply to the user, with any list or result written out in it. "
               "files: only deliverable files you wrote or changed in the folder; leave it out when the answer is text "
-              "(names a tool returned are not files).", {"answer": S, "files": ARR}, ["answer"])
+              "(names a tool returned are not files). checks: only when the harness asks for them, one per file.",
+              {"answer": S, "files": ARR, "checks": {"type": "array", "items": {
+                  "type": "object", "required": ["file", "task_asks", "file_has", "matches"], "properties": {
+                      "file": S, "task_asks": S, "file_has": S, "matches": {"type": "boolean"}}}}}, ["answer"])
 PATH_LIKE = re.compile(r"^(?:[\w.-]+/)*[\w.-]*(?:\.\w{1,8}|/)$")   # a.csv, out/, reports/x.md
 CONTROL_TOOLS = [T_BUG, T_KEEP, T_NEED, T_FINISH]         # the pipeline's own calls; everything else is a core capability
 
@@ -485,7 +488,7 @@ class Agent:
                                                                    context=ctx, tools=listing(), core=self.core.listing(),
                                                                    files=self.list_work(),
                                                                    built=prompts.BUILT.format(names=", ".join(built)) if built else "")}]
-        finish_rejections, reviewed = 0, False
+        finish_rejections, reviews = 0, 0
         offered = self.core.tools() + CONTROL_TOOLS
         while True:
             t = Turns(self, "execute", msgs, offered, implicit=self._implicit_finish)
@@ -512,13 +515,13 @@ class Agent:
                         self.log.emit("watchdog", name="finish_check", problem=problem, rejections=finish_rejections)
                         t.result(name, "Not finished: " + problem)
                         continue
-                    if not reviewed:
-                        reviewed = True
-                        review = self._review_outputs(task)
-                        if review:
-                            self.log.emit("watchdog", name="finish_review", files=self.produced_files())
-                            t.result(name, review)
-                            continue
+                    review = self._review_outputs(task, args.get("checks"), reviews)
+                    if review:
+                        reviews += 1
+                        self.log.emit("watchdog", name="finish_review", round=reviews, checks=args.get("checks"),
+                                      text=trim(review, 3000))
+                        t.result(name, "Not finished: " + review)
+                        continue
                     answer = args.get("answer", "")
                     self.log.emit("phase", phase="done", answer=answer, outputs=self.produced_files())
                     return answer
@@ -769,18 +772,33 @@ class Agent:
                     "(or a tool) to create it, then finish with its path in files.")
         return ""
 
-    def _review_outputs(self, task):
-        """Once per task, before it ends: the task's words next to the head of each file it wrote, so the model
-        checks the form (structure, names, spacing, format) and stray files. "" when off or nothing was written."""
+    def _review_outputs(self, task, checks, rounds):
+        """Before the task ends, the model checks each file it wrote against the task's words: finish carries one check
+        per file (what the task asks, what the file has, whether they match). A file that does not match, or has no
+        check, keeps the task going; after 3 rounds it may finish. "" when off, done or nothing was written."""
         fin = self.cfg.get("finish") or {}
-        if not fin.get("review_outputs", True):
-            return ""
-        heads = [h for h in (samples.head(self.folder, rel) for rel in self.produced_files()) if h]
-        if not heads:
+        files = [r for r in self.produced_files() if os.path.isfile(os.path.join(self.folder, r))]
+        if not fin.get("review_outputs", True) or not files or rounds >= 3:
             return ""
         n = fin.get("review_max_files", 8)
-        more = f"\n\n(and {len(heads) - n} more)" if len(heads) > n else ""
-        return prompts.REVIEW_OUTPUTS.format(task=task, heads="\n\n".join(heads[:n]) + more)
+        if rounds == 0 or not isinstance(checks, list) or not checks:
+            heads = [samples.head(self.folder, rel) for rel in files[:n]]
+            more = f"\n\n(and {len(files) - n} more: {', '.join(files[n:])})" if len(files) > n else ""
+            return prompts.REVIEW_OUTPUTS.format(task=task, heads="\n\n".join(heads) + more)
+        norm = lambda f: os.path.normpath(str(f or "").strip().lstrip("./") or ".")
+        got = {norm(c.get("file")): c for c in checks if isinstance(c, dict)}
+        unchecked = [f for f in files[:n] if norm(f) not in got]
+        wrong = [c for f, c in got.items() if f in map(norm, files) and c.get("matches") is not True]
+        if not unchecked and not wrong:
+            return ""
+        out = []
+        for c in wrong:
+            out.append(f"{c.get('file')}: the task asks for {c.get('task_asks')!r} but the file has "
+                       f"{c.get('file_has')!r}. Change it to what the task asks, then finish with checks again.")
+        if unchecked:
+            out.append("no check for " + ", ".join(unchecked) + ": give one for each file the task wrote, or delete "
+                       "the file if the task did not ask for it (a test or scratch file).")
+        return "\n".join(out)
 
     def _repair(self, creator, args, task, ctx):
         name = args.get("name", "")
