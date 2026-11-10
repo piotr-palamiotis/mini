@@ -209,9 +209,13 @@ class Creator:
             rules=prompts.CREATE_RULES, task=trim(self.task, 1500), what=f"What to keep: {what}\n" if what else "",
             script=script_run["script"], seen=listing(seen), wrote=listing(script_run.get("written") or []),
             printed=trim(script_run.get("output") or "", 800), names=", ".join(a.registry.names()) or "(none)",
-            note=""), lambda d: self._check_plan(d, [os.path.normpath(w) for w in script_run.get("written") or []]))
+            note=""), lambda d: self._check_plan(d, [os.path.normpath(w) for w in script_run.get("written") or []],
+                                              script_run.get("script") or ""))
         json.dump(plan["example_inputs"], open(os.path.join(golden, "example.json"), "w"), indent=1)
-        keep_out = plan.get("outputs")
+        made_inputs = _self_made_inputs(plan["example_inputs"], golden, plan.get("outputs"))
+        if made_inputs:                 # the script made its own sample input: for the test it is input, not result
+            a.log.emit("info", text="kept tool's test gets the inputs the script made: " + ", ".join(made_inputs))
+        keep_out = [o for o in plan.get("outputs") or [] if o not in made_inputs]
         if keep_out:                    # scratch files the script wrote are not what the tool makes
             out_dir = os.path.join(golden, "out")
             for d, _, fs in os.walk(out_dir):
@@ -250,7 +254,7 @@ class Creator:
             self._fresh(out, head=prompts.KEPT_NOTE + "\n\n")
         return self._fix_loop()
 
-    def _check_plan(self, d, wrote=()):
+    def _check_plan(self, d, wrote=(), script=""):
         for k in ("input_schema", "output_schema"):
             d[k] = object_schema(d.get(k) or {"type": "object", "properties": {}})
         props = (d["input_schema"] or {}).get("properties") or {}
@@ -265,6 +269,12 @@ class Creator:
         missing = [k for k in (d["input_schema"].get("required") or []) if k not in ex]
         if missing:
             return f"example_inputs lacks the required inputs {', '.join(missing)}."
+        if script:                      # the example redoes the script's run: the files it names are the script's
+            other = [v for v in _strings(ex) if FILE_LIKE.match(v) and os.path.basename(v) not in script]
+            if other:
+                used = sorted(set(m.group(1) for m in re.finditer(r"""['"]([\w./-]+\.\w{1,8})['"]""", script)))
+                return (f"example_inputs must redo the script's run, but the script does not use {', '.join(other)}"
+                        + (f"; the files it works on: {', '.join(used)}" if used else "") + ".")
         outs = d.get("outputs")
         if outs is not None:
             outs = [os.path.normpath(str(o)) for o in outs] if isinstance(outs, list) else None
@@ -1187,6 +1197,38 @@ def _lower_types(x):
     if isinstance(x, list):
         return [_lower_types(v) for v in x]
     return x
+
+
+FILE_LIKE = re.compile(r"^(?:[\w.-]+/)*[\w-][\w.-]*\.\w{1,8}$")
+
+
+def _strings(v):
+    if isinstance(v, str):
+        return [v.strip()]
+    if isinstance(v, list):
+        return [s for x in v for s in _strings(x)]
+    if isinstance(v, dict):
+        return [s for x in v.values() for s in _strings(x)]
+    return []
+
+
+def _self_made_inputs(example, golden, outputs):
+    """Files the example inputs name that the script wrote and did not find, and that are not among the tool's
+    outputs (a sample it made, then worked on): moved from the run's results to its inputs, so the kept tool's test
+    starts with them. Without outputs nothing tells a sample from a result, and nothing moves. Returns their paths."""
+    moved = []
+    if not outputs:
+        return moved
+    outs = {os.path.normpath(str(o)) for o in outputs}
+    for rel in (os.path.normpath(x) for x in _strings(example) if x):
+        if rel.startswith("..") or os.path.isabs(rel) or rel in outs:
+            continue
+        src, dest = os.path.join(golden, "out", rel), os.path.join(golden, "in", rel)
+        if os.path.isfile(src) and not os.path.exists(dest):
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(src, dest)
+            moved.append(rel)
+    return moved
 
 
 def object_schema(x):

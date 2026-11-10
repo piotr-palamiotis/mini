@@ -100,6 +100,37 @@ class SchemaShapeTest(unittest.TestCase):
         self.assertEqual(object_schema(dict(ok)), ok)
 
 
+class PlanRedoesTheRunTest(unittest.TestCase):
+    def test_an_example_naming_a_file_the_script_never_used_is_rejected(self):
+        from mini.agent.creator import Creator
+        script = "import yaml\nopen('test.toml','w').write(convert(open('test.yaml').read()))\n"
+        plan = dict(PLAN, example_inputs={"csv_path": "app.yaml", "out_path": "test.toml"}, outputs=["test.toml"])
+        err = Creator._check_plan(types_ns(), dict(plan), ["test.toml"], script)
+        self.assertIn("does not use app.yaml", err)
+        self.assertIn("test.yaml", err)
+
+    def test_a_sample_input_the_script_made_is_the_tests_input(self):
+        import tempfile
+        from mini.agent.creator import _self_made_inputs
+        g = tempfile.mkdtemp()
+        for part, rel, text in (("out", "sample.yaml", "a: 1\n"), ("out", "sample.toml", "a = 1\n"),
+                                ("in", "app.yaml", "b: 2\n")):
+            os.makedirs(os.path.join(g, part), exist_ok=True)
+            open(os.path.join(g, part, rel), "w").write(text)
+        self.assertEqual(_self_made_inputs({"path": "sample.yaml", "out": "sample.toml", "other": ["app.yaml", 3]}, g,
+                                           ["sample.toml"]), ["sample.yaml"])
+        self.assertEqual(_self_made_inputs({"out": "sample.toml"}, g, None), [])
+        self.assertTrue(os.path.exists(os.path.join(g, "in", "sample.yaml")))
+        self.assertFalse(os.path.exists(os.path.join(g, "out", "sample.yaml")))
+        self.assertTrue(os.path.exists(os.path.join(g, "out", "sample.toml")))
+
+
+def types_ns():
+    """A stand-in for the creator: _check_plan only needs _validate_spec from it."""
+    import types
+    return types.SimpleNamespace(_validate_spec=lambda d, new=True: None)
+
+
 if __name__ == "__main__":
     unittest.main()
 
