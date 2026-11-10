@@ -166,6 +166,17 @@ def _script_of(argv, box):
     return None
 
 
+def _stamps(box):
+    """(mtime, size) of every file in the sandbox folder but mini's own, by relative path."""
+    out = {}
+    for d, dirs, fs in os.walk(box):
+        dirs[:] = [x for x in dirs if os.path.relpath(os.path.join(d, x), box) != ws.META]
+        for f in fs:
+            st = os.stat(os.path.join(d, f))
+            out[os.path.relpath(os.path.join(d, f), box)] = (st.st_mtime_ns, st.st_size)
+    return out
+
+
 def _record(a, box, n):
     """Keep what the run saw (its working directory before it ran) so a kept tool can be tested on it."""
     dest = os.path.join(a.run_dir, "scripts", f"{n:03d}")
@@ -194,7 +205,7 @@ def run(call, args):
     a.calls += 1
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{NAME}")
     os.makedirs(box)
-    record = None
+    record, touched = None, []
     try:
         names = list(args.get("files") or [])
         if not names and small_project(a.folder):
@@ -209,12 +220,15 @@ def run(call, args):
                 script, record = ran, _record(a, box, a.calls)
         elif script:
             record = _record(a, box, a.calls)
+        before = _stamps(box)
         res = a.sandbox.run(argv, box, purpose=NAME, image=image)
         items, refused = ws.changes(a.folder, box)
+        after = _stamps(box)            # what it wrote, even when that equals the folder's file (a rerun)
+        touched = sorted(r for r, st in after.items() if before.get(r) != st)
         if record:
-            for rel, src in items:
+            for rel in touched:
                 os.makedirs(os.path.dirname(os.path.join(record, "out", rel)), exist_ok=True)
-                shutil.copyfile(src, os.path.join(record, "out", rel))
+                shutil.copyfile(os.path.join(box, rel), os.path.join(record, "out", rel))
         made = ws.new_dirs(a.folder, box)
         written = a._change([rel for rel, _ in items], lambda: ws.export(a.folder, items)) if items else []
         made = ws.make_dirs(a.folder, made)
@@ -225,7 +239,7 @@ def run(call, args):
     ok = res["exit_code"] == 0
     a.last_script = {"script": script, "command": args.get("command"), "files": args.get("files") or [], "ok": ok,
                      "packages": project_packages(a.folder), "record": record if ok else None,
-                     "written": [rel for rel, _ in items], "output": res["output"][-4000:]}
+                     "written": touched, "output": res["output"][-4000:]}
     text = f"exit {res['exit_code']}" + (" (timed out)" if res.get("timed_out") else "") + "\n" + show(res["output"], 4000)
     if written:
         text += "\nFiles written to the folder: " + ", ".join(written)

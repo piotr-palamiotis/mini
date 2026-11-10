@@ -77,6 +77,17 @@ class KeepTest(unittest.TestCase):
         self.assertEqual(open(os.path.join(folder, "total.txt")).read(), "12.50\n")
         self.assertIsNone(agent.registry.get("csv_total"))
 
+    def test_a_rerun_that_writes_the_same_file_again_can_be_kept(self):
+        steps = script()
+        steps.insert(3, steps[2])               # the same script again: total.txt is unchanged in the folder
+        folder = git_folder({"sales.csv": "qty,price\n2,1.25\n4,2.5\n"})
+        agent = Agent(temp_config(), backend=fake_backend(steps), label="keeprerun", workspace=folder)
+        s = agent.run_task("Write the total of sales.csv (qty * price) to total.txt and keep it as a tool.")
+        self.assertEqual(s["status"], "success", s["error"])
+        m = agent.registry.get("csv_total")
+        self.assertTrue(m and m["test_results"]["passed"])
+        self.assertEqual(open(os.path.join(m["_dir"], "golden", "out", "total.txt")).read(), "12.50\n")
+
 
 class SchemaShapeTest(unittest.TestCase):
     def test_fields_next_to_type_go_into_properties(self):

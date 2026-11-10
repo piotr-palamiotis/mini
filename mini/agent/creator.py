@@ -268,7 +268,7 @@ class Creator:
         outs = d.get("outputs")
         if outs is not None:
             outs = [os.path.normpath(str(o)) for o in outs] if isinstance(outs, list) else None
-            if not outs or any(o not in wrote for o in outs):
+            if outs is None or (wrote and not outs) or any(o not in wrote for o in outs):
                 return (f"outputs must list the files the tool makes, from the files the script wrote: "
                         f"{', '.join(wrote) or '(none)'}.")
             d["outputs"] = outs
