@@ -98,6 +98,12 @@ class FileCapabilityTest(unittest.TestCase):
         self.assertIn("updated", self.act("edit_file", path="src/n.py", old="y", new="w"))
         self.assertIn("Wrote", self.act("write_file", path="new.txt", content="x"))
 
+    def test_a_task_that_names_no_output_file_changes_its_inputs_in_place(self):
+        u = {"inputs": ["a.txt", "src/"], "outputs": ["The function is renamed and the check passes."]}
+        self.assertEqual(self.a._input_files(u), set())
+        self.assertEqual(self.a._input_files({**u, "outputs": ["report.md (the summary)"]}), {"a.txt", "src/m.py", "src/n.py"})
+        self.assertEqual(self.a._input_files({**u, "outputs": ["out/"]}), {"a.txt", "src/m.py", "src/n.py"})
+
     def test_edit_by_text_and_by_lines(self):
         self.assertIn("a.txt updated", self.act("edit_file", path="a.txt", old="two", new="2"))
         self.assertEqual(self.read("a.txt"), "one\n2\nthree\n")

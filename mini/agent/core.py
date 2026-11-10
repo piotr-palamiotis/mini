@@ -77,6 +77,7 @@ T_KEEP = fn("keep_tool", "Keep the last run_code script that ran without an erro
 T_FINISH = fn("finish", "The task is done. answer: the reply to the user, with any list or result written out in it. "
               "files: only deliverable files you wrote or changed in the folder; leave it out when the answer is text "
               "(names a tool returned are not files).", {"answer": S, "files": ARR}, ["answer"])
+PATH_LIKE = re.compile(r"^(?:[\w.-]+/)*[\w.-]*(?:\.\w{1,8}|/)$")   # a.csv, out/, reports/x.md
 CONTROL_TOOLS = [T_BUG, T_KEEP, T_NEED, T_FINISH]         # the pipeline's own calls; everything else is a core capability
 
 
@@ -685,8 +686,9 @@ class Agent:
                     for d, _, fs in os.walk(full):
                         out |= {os.path.relpath(os.path.join(d, f), self.folder) for f in fs}
             return out
-        if not self.folder:
-            return set()
+        if not self.folder or not any(PATH_LIKE.match(str(x).strip().strip("`'\"").split(" ")[0].rstrip(",:;"))
+                                      for x in u.get("outputs") or []):
+            return set()                # no output file named: the task changes its files in place (rename, fix)
         return files(u.get("inputs") or []) - files(u.get("outputs") or [])
 
     def guard_inputs(self, rels):
