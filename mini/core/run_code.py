@@ -74,6 +74,37 @@ def _module_hint(a, module):
     return text
 
 
+# shared libraries a pip package loads at import, by the name the error gives: the apt package of the sandbox's base
+# image (Debian 13, where many library packages carry a t64 suffix)
+APT_LIBS = {"zbar": "libzbar0t64", "libzbar": "libzbar0t64", "libgl": "libgl1", "libglib-2.0": "libglib2.0-0t64",
+            "libgthread-2.0": "libglib2.0-0t64", "libxcb": "libxcb1", "libsm": "libsm6", "libxext": "libxext6",
+            "libxrender": "libxrender1", "libgomp": "libgomp1", "libmagic": "libmagic1t64", "libcairo": "libcairo2",
+            "libpango-1.0": "libpango-1.0-0", "libsndfile": "libsndfile1", "libgdal": "libgdal36",
+            "libpq": "libpq5", "libzmq": "libzmq5", "libtesseract": "libtesseract5", "libdmtx": "libdmtx0t64",
+            "libexpat": "libexpat1", "libfontconfig": "libfontconfig1", "libfreetype": "libfreetype6"}
+X_LIBS = ("libgl", "libxcb", "libsm", "libxext", "libxrender", "libgthread-2.0", "libglib-2.0")
+
+
+def _library_hint(output):
+    """A pip package that needs a system library the image lacks: name the apt package (or a pip build without it)."""
+    m = (re.search(r"([\w.+-]+?)\.so(?:\.[\d.]+)?: cannot open shared object file", output)
+         or re.search(r"Unable to find (\w+) shared library", output)
+         or re.search(r"(?:could not|cannot|unable to) (?:find|load) (?:the )?(?:library )?['\"]?(lib[\w.+-]+?)(?:\.so)?['\"]?\b",
+                      output, re.I))
+    if not m:
+        return ""
+    lib = m.group(1).lower()
+    pkg = APT_LIBS.get(lib) or APT_LIBS.get(re.sub(r"[\d.]+$", "", lib))
+    text = (f"\nThe system library {m.group(1)} is missing: pip installs Python packages only. Run again with packages "
+            f"{{\"apt\": [\"{pkg}\"]}} (packages approved before stay installed)" if pkg else
+            f"\nThe system library {m.group(1)} is missing: pip installs Python packages only. Add its apt package to "
+            f"packages ({{\"apt\": [...]}}); the sandbox is Debian 13, where library packages are often named with a t64 "
+            f"suffix (e.g. libzbar0t64)")
+    if lib in X_LIBS or re.sub(r"[\d.]+$", "", lib) in X_LIBS:
+        text += "; for OpenCV, pip opencv-python-headless instead of opencv-python needs no display libraries"
+    return text + ". Or use a pure-Python package that needs no system library."
+
+
 def project_packages(folder):
     try:
         return validate_packages(json.load(open(os.path.join(folder, PACKAGES_FILE))))
@@ -106,7 +137,7 @@ def ensure_packages(a, wanted):
         try:
             image = a.sandbox.ensure_image(have)
         except PolicyError as e:
-            return None, f"installing the packages failed: {str(e)[-1500:]}"
+            return None, f"installing the packages failed: {str(e)[-1500:]}" + _apt_note(str(e))
         os.makedirs(os.path.join(a.folder, ws.META), exist_ok=True)
         json.dump(have, open(os.path.join(a.folder, PACKAGES_FILE), "w"), indent=1)
         a.log.emit("packages", scope="project", packages=have, added=new)
@@ -115,6 +146,15 @@ def ensure_packages(a, wanted):
         return a.sandbox.ensure_image(have), ""
     except PolicyError as e:
         return None, f"installing the packages failed: {str(e)[-1500:]}"
+
+
+def _apt_note(err):
+    gone = re.findall(r"Unable to locate package ([\w.+-]+)", err) + re.findall(
+        r"Package '?([\w.+-]+)'? has no installation candidate", err)
+    if not gone:
+        return ""
+    return (f"\nNo apt package named {', '.join(sorted(set(gone)))} in the sandbox's Debian 13: many library packages "
+            f"there end in t64 (libzbar0 is libzbar0t64, libglib2.0-0 is libglib2.0-0t64). Retry with the Debian 13 name.")
 
 
 def _script_of(argv, box):
@@ -199,6 +239,8 @@ def run(call, args):
     missing = re.search(r"No module named '([\w.]+)'", res["output"]) if not ok else None
     if missing:
         text += _module_hint(a, missing.group(1))
+    elif not ok:
+        text += _library_hint(res["output"])
     if ok and script and record:
         text += ("\nIf this script is worth keeping for later tasks, call `keep_tool`: it becomes a tool, tested on this "
                  "run.")
