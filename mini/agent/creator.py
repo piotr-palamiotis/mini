@@ -278,9 +278,13 @@ class Creator:
         outs = d.get("outputs")
         if outs is not None:
             outs = [os.path.normpath(str(o)) for o in outs] if isinstance(outs, list) else None
-            if outs is None or (wrote and not outs) or any(o not in wrote for o in outs):
+            named = {os.path.normpath(v) for v in _strings(ex) if v}
+            results = [w for w in wrote if os.path.normpath(w) not in named]   # a file the example gives is a sample
+            if outs is None or (results and not outs) or any(o not in wrote for o in outs):
                 return (f"outputs must list the files the tool makes, from the files the script wrote: "
-                        f"{', '.join(wrote) or '(none)'}.")
+                        f"{', '.join(wrote) or '(none)'}" + (f" (a sample the script made for the tool to read, "
+                        f"like {next(iter(sorted(named & set(map(os.path.normpath, wrote)))))}, is an input: leave "
+                        f"it out)" if named & set(map(os.path.normpath, wrote)) else "") + ".")
             d["outputs"] = outs
         return self._validate_spec({**d, "edge_cases": []}, new=True)
 
@@ -1215,9 +1219,10 @@ def _strings(v):
 def _self_made_inputs(example, golden, outputs):
     """Files the example inputs name that the script wrote and did not find, and that are not among the tool's
     outputs (a sample it made, then worked on): moved from the run's results to its inputs, so the kept tool's test
-    starts with them. Without outputs nothing tells a sample from a result, and nothing moves. Returns their paths."""
+    starts with them. With outputs unknown (None) nothing tells a sample from a result, and nothing moves; with none
+    (an empty list) the tool writes no file, so every file the example names is a sample. Returns their paths."""
     moved = []
-    if not outputs:
+    if outputs is None:
         return moved
     outs = {os.path.normpath(str(o)) for o in outputs}
     for rel in (os.path.normpath(x) for x in _strings(example) if x):

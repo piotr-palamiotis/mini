@@ -109,6 +109,16 @@ class PlanRedoesTheRunTest(unittest.TestCase):
         self.assertIn("does not use app.yaml", err)
         self.assertIn("test.yaml", err)
 
+    def test_a_sample_the_script_made_is_not_an_output(self):
+        from mini.agent.creator import Creator
+        script = "make_sample('made.png')\nprint(read('made.png'))\n"
+        plan = dict(PLAN, input_schema={"type": "object", "properties": {"image": {"type": "string"}}},
+                    example_inputs={"image": "made.png"}, outputs=[])
+        self.assertIsNone(Creator._check_plan(types_ns(), dict(plan), ["made.png"], script))
+        err = Creator._check_plan(types_ns(), dict(plan), ["made.png", "result.txt"], script)
+        self.assertIn("result.txt", err)
+        self.assertIn("is an input", err)
+
     def test_a_sample_input_the_script_made_is_the_tests_input(self):
         import tempfile
         from mini.agent.creator import _self_made_inputs
@@ -120,6 +130,8 @@ class PlanRedoesTheRunTest(unittest.TestCase):
         self.assertEqual(_self_made_inputs({"path": "sample.yaml", "out": "sample.toml", "other": ["app.yaml", 3]}, g,
                                            ["sample.toml"]), ["sample.yaml"])
         self.assertEqual(_self_made_inputs({"out": "sample.toml"}, g, None), [])
+        open(os.path.join(g, "out", "made.png"), "w").write("png")
+        self.assertEqual(_self_made_inputs({"image": "made.png"}, g, []), ["made.png"])    # a tool that writes no file
         self.assertTrue(os.path.exists(os.path.join(g, "in", "sample.yaml")))
         self.assertFalse(os.path.exists(os.path.join(g, "out", "sample.yaml")))
         self.assertTrue(os.path.exists(os.path.join(g, "out", "sample.toml")))
