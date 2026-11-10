@@ -35,22 +35,24 @@ def _inputs(agent):
     return sorted((first + rest)[:MAX_FILES])
 
 
+def head(folder, rel):
+    """The first lines of a file in the folder (text), or its size and that it is binary; "" when it is not a file."""
+    full = os.path.join(folder, rel)
+    if not os.path.isfile(full):
+        return ""
+    size = os.path.getsize(full)
+    if not _is_text(full):
+        return f"{rel} ({size} bytes, binary)"
+    with open(full, encoding="utf-8", errors="replace") as f:
+        lines = [ln for _, ln in zip(range(PREVIEW_LINES), f)]
+    text = "".join(lines)[:PREVIEW_CHARS]
+    more = " (first lines)" if size > len(text.encode()) else ""
+    return f"{rel} ({size} bytes){more}:\n```\n{text.rstrip()}\n```"
+
+
 def preview(agent):
     """The first lines of each input file (text), or its size and type (binary)."""
-    out = []
-    for rel in _inputs(agent):
-        full = os.path.join(agent.folder, rel)
-        if not os.path.isfile(full):
-            continue
-        size = os.path.getsize(full)
-        if not _is_text(full):
-            out.append(f"{rel} ({size} bytes, binary)")
-            continue
-        with open(full, encoding="utf-8", errors="replace") as f:
-            lines = [ln for _, ln in zip(range(PREVIEW_LINES), f)]
-        text = "".join(lines)[:PREVIEW_CHARS]
-        more = " (first lines)" if size > len(text.encode()) else ""
-        out.append(f"{rel} ({size} bytes){more}:\n```\n{text.rstrip()}\n```")
+    out = [h for h in (head(agent.folder, rel) for rel in _inputs(agent)) if h]
     if not out:
         return ""
     return ("The task's input files as they are (design the inputs, columns and fields from these, not from a "

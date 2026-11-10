@@ -17,7 +17,7 @@ import re
 import threading
 import time
 
-from . import prompts
+from . import prompts, samples
 from .creator import _content_words, Creator, ToolFailed, trim
 from .turns import AgentStop, ModelGaveUp, RestartRequested, Turns, fn
 from ..core import Call, load as load_catalog
@@ -485,7 +485,7 @@ class Agent:
                                                                    context=ctx, tools=listing(), core=self.core.listing(),
                                                                    files=self.list_work(),
                                                                    built=prompts.BUILT.format(names=", ".join(built)) if built else "")}]
-        finish_rejections = 0
+        finish_rejections, reviewed = 0, False
         offered = self.core.tools() + CONTROL_TOOLS
         while True:
             t = Turns(self, "execute", msgs, offered, implicit=self._implicit_finish)
@@ -512,6 +512,13 @@ class Agent:
                         self.log.emit("watchdog", name="finish_check", problem=problem, rejections=finish_rejections)
                         t.result(name, "Not finished: " + problem)
                         continue
+                    if not reviewed:
+                        reviewed = True
+                        review = self._review_outputs(task)
+                        if review:
+                            self.log.emit("watchdog", name="finish_review", files=self.produced_files())
+                            t.result(name, review)
+                            continue
                     answer = args.get("answer", "")
                     self.log.emit("phase", phase="done", answer=answer, outputs=self.produced_files())
                     return answer
@@ -761,6 +768,19 @@ class Agent:
             return ("your plan produces a file, but no file was written in the folder. Use write_file "
                     "(or a tool) to create it, then finish with its path in files.")
         return ""
+
+    def _review_outputs(self, task):
+        """Once per task, before it ends: the task's words next to the head of each file it wrote, so the model
+        checks the form (structure, names, spacing, format) and stray files. "" when off or nothing was written."""
+        fin = self.cfg.get("finish") or {}
+        if not fin.get("review_outputs", True):
+            return ""
+        heads = [h for h in (samples.head(self.folder, rel) for rel in self.produced_files()) if h]
+        if not heads:
+            return ""
+        n = fin.get("review_max_files", 8)
+        more = f"\n\n(and {len(heads) - n} more)" if len(heads) > n else ""
+        return prompts.REVIEW_OUTPUTS.format(task=task, heads="\n\n".join(heads[:n]) + more)
 
     def _repair(self, creator, args, task, ctx):
         name = args.get("name", "")

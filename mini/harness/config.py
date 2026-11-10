@@ -41,6 +41,10 @@ DEFAULTS = {
     "thinking": {                            # thinking per step
         "parse": False, "gap": False, "spec": True, "code": True, "fix": True, "execute": True, "write": False,
     },
+    "finish": {
+        "review_outputs": True,              # before finish, show the task next to the head of each file it wrote, once
+        "review_max_files": 8,
+    },
     "gap": {
         "judge": True,                       # judge the registry's best matches for a task one tool at a time
         "candidates": 5,                     # how many of them
