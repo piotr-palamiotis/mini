@@ -8,8 +8,11 @@ from mini.agent.core import Agent
 from tests.helpers import call, fake_backend, git_folder, step, temp_config
 
 ASKS = "a list of strings"
-OK = [{"file": "names.json", "task_asks": ASKS, "file_has": "a list of strings", "matches": True}]
-BAD = [{"file": "names.json", "task_asks": ASKS, "file_has": "a list of objects", "matches": False}]
+OK = [{"file": "names.json", "sample": '"x"', "task_asks": ASKS, "file_has": "a JSON array of texts", "matches": True}]
+BAD = [{"file": "names.json", "sample": '{"name": "x"}', "task_asks": ASKS, "file_has": "a list of objects",
+        "matches": False}]
+COPIED = [dict(BAD[0], file_has=ASKS, matches=True)]
+MADE_UP = [dict(OK[0], sample='"y"')]
 
 
 def finish(checks=None):
@@ -46,6 +49,15 @@ class FinishReviewTest(unittest.TestCase):
         self.assertIn('[{"name": "x"}]', results[0])                    # the head of the file, next to the task
         self.assertIn(ASKS, results[0])
         self.assertIn("a list of objects", results[1])
+
+    def test_a_check_must_quote_the_file_and_describe_it_in_its_own_words(self):
+        fix = [finish(MADE_UP), finish(COPIED), step(call("write_file", path="names.json", content='["x"]\n')),
+               finish(OK)]
+        s, folder, results, reviews = self.run_task(steps(*fix))
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertIn("sample is not in the file", results[1])
+        self.assertIn("repeats the task's words", results[2])
+        self.assertEqual(open(os.path.join(folder, "names.json")).read(), '["x"]\n')
 
     def test_a_file_with_no_check_is_named(self):
         stray = [step(call("write_file", path="test.txt", content="t\n")), finish(OK)]

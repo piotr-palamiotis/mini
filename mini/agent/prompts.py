@@ -338,9 +338,11 @@ The files this task wrote or changed:
 {heads}
 
 Call finish again with checks: one per file, each with
+- sample: the file's first entry or first line, copied exactly as the file above has it (leave it out for a binary
+  file),
 - task_asks: the form the task asks for this file, quoting its words (the structure: a list, an object, rows,
   columns; the names of fields and columns, their order, spacing, number format, units),
-- file_has: the form the file above actually has, described the same way,
+- file_has: the form the sample shows, described the same way, in your own words,
 - matches: true only if file_has is exactly task_asks.
 A file the task did not ask for (a test or scratch file): delete it instead of checking it. If a file does not
 match, fix it first."""

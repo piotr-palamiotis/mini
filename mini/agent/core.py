@@ -79,7 +79,8 @@ T_FINISH = fn("finish", "The task is done. answer: the reply to the user, with a
               "(names a tool returned are not files). checks: only when the harness asks for them, one per file.",
               {"answer": S, "files": ARR, "checks": {"type": "array", "items": {
                   "type": "object", "required": ["file", "task_asks", "file_has", "matches"], "properties": {
-                      "file": S, "task_asks": S, "file_has": S, "matches": {"type": "boolean"}}}}}, ["answer"])
+                      "file": S, "sample": S, "task_asks": S, "file_has": S, "matches": {"type": "boolean"}}}}},
+              ["answer"])
 PATH_LIKE = re.compile(r"^(?:[\w.-]+/)*[\w.-]*(?:\.\w{1,8}|/)$")   # a.csv, out/, reports/x.md
 CONTROL_TOOLS = [T_BUG, T_KEEP, T_NEED, T_FINISH]         # the pipeline's own calls; everything else is a core capability
 
@@ -788,10 +789,24 @@ class Agent:
         norm = lambda f: os.path.normpath(str(f or "").strip().lstrip("./") or ".")
         got = {norm(c.get("file")): c for c in checks if isinstance(c, dict)}
         unchecked = [f for f in files[:n] if norm(f) not in got]
-        wrong = [c for f, c in got.items() if f in map(norm, files) and c.get("matches") is not True]
-        if not unchecked and not wrong:
-            return ""
+        bare = lambda t: re.sub(r"\W+", "", str(t or "")).lower()
         out = []
+        for f in files[:n]:
+            c = got.get(norm(f))
+            if not c:
+                continue
+            if samples.is_text(os.path.join(self.folder, f)):
+                body = bare(open(os.path.join(self.folder, f), encoding="utf-8", errors="replace").read(200_000))
+                if not bare(c.get("sample")) or bare(c.get("sample")) not in body:
+                    out.append(f"{f}: sample is not in the file. Copy its first entry or first line exactly as the file "
+                               "has it, then describe file_has from that sample.")
+                    continue
+            if bare(c.get("file_has")) and bare(c.get("file_has")) in bare(c.get("task_asks")):
+                out.append(f"{f}: file_has repeats the task's words. Describe the form the sample "
+                           f"{trim(str(c.get('sample') or ''), 200)!r} shows, then compare it with task_asks.")
+        wrong = [c for f, c in got.items() if f in map(norm, files) and c.get("matches") is not True]
+        if not unchecked and not wrong and not out:
+            return ""
         for c in wrong:
             out.append(f"{c.get('file')}: the task asks for {c.get('task_asks')!r} but the file has "
                        f"{c.get('file_has')!r}. Change it to what the task asks, then finish with checks again.")

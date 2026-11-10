@@ -11,7 +11,7 @@ PREVIEW_LINES = 12
 PREVIEW_CHARS = 1200
 
 
-def _is_text(path):
+def is_text(path):
     with open(path, "rb") as f:
         head = f.read(4096)
     if b"\0" in head:
@@ -41,7 +41,7 @@ def head(folder, rel):
     if not os.path.isfile(full):
         return ""
     size = os.path.getsize(full)
-    if not _is_text(full):
+    if not is_text(full):
         return f"{rel} ({size} bytes, binary)"
     with open(full, encoding="utf-8", errors="replace") as f:
         lines = [ln for _, ln in zip(range(PREVIEW_LINES), f)]
@@ -71,7 +71,7 @@ def copy(agent, files_dir):
             continue
         size = os.path.getsize(full)
         if size > MAX_FILE:
-            if not (rel.lower().endswith(LINE_FILES) and _is_text(full)):
+            if not (rel.lower().endswith(LINE_FILES) and is_text(full)):
                 continue
             with open(full, "rb") as f:
                 data = b"".join(ln for _, ln in zip(range(KEEP_LINES), f))
@@ -105,7 +105,7 @@ def retyped(files_dir, test_text, window=32, need=3):
     out = []
     for p, _ in listing(files_dir):
         full = os.path.join(files_dir, "samples", p)
-        if not _is_text(full):
+        if not is_text(full):
             continue
         text = open(full, encoding="utf-8", errors="replace").read(800)
         hits = sum(1 for i in range(0, max(len(text) - window, 0) + 1, window // 2) if text[i:i + window] in test_text)
@@ -125,7 +125,7 @@ def tests_note(files_dir):
     shown, left = [], SHOW_CHARS
     for p, n in got:
         full = os.path.join(files_dir, "samples", p)
-        if n <= left and _is_text(full):
+        if n <= left and is_text(full):
             shown.append(f"samples/{p}:\n```\n{open(full, encoding='utf-8', errors='replace').read().rstrip()}\n```")
             left -= n
     body = ("\n\n" + "\n\n".join(shown)) if shown else ""
