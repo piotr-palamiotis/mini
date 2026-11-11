@@ -61,6 +61,7 @@ class KeepTest(unittest.TestCase):
         tests = [e for e in events if e["kind"] == "test_run"]
         self.assertEqual([t["passed"] for t in tests], [True])          # the harness's test, first try
         self.assertTrue(any(e["kind"] == "invoke" and e.get("ok") is True and e["tool"] == "csv_total" for e in events))
+        self.assertIn(("", "total.txt"), agent.kept_jobs["csv_total"]["shapes"])  # a later script writing it is told
 
     def test_nothing_to_keep_without_a_successful_script(self):
         a = Agent(temp_config(), label="keep0", workspace=git_folder({"a.txt": "x\n"}))

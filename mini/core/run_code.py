@@ -61,6 +61,9 @@ IMPORT_NAMES = {"pil": "pillow", "yaml": "pyyaml", "cv2": "opencv-python", "skle
 def _module_hint(a, module):
     """A package the run lacks: name it for the packages input, and an installed tool that already has it."""
     top = module.split(".")[0].lower()
+    if top in a.registry.names():
+        return (f"\n{top} is an installed tool, not a Python module a script can import. Run it with `invoke_tool` "
+                f"(name {top!r}); a script cannot call it.")
     pkg = IMPORT_NAMES.get(top, top)
     built = getattr(a, "built_names", None) or []
     have = []
@@ -219,6 +222,32 @@ def _same_note(a, same, written):
                  f"script on one input that prints repr() of each intermediate value (what each library call returns, "
                  f"before you index, convert or format it), and compare it with what the task expects.")
     return text
+
+
+def job_of(script, written):
+    """What a script does, to recognise it later: its own top-level functions and the files it wrote."""
+    try:
+        funcs = {n.name for n in ast.parse(script or "").body if isinstance(n, ast.FunctionDef)} - {"main"}
+    except (SyntaxError, ValueError):
+        funcs = set()
+    # a file in a subfolder stands for its kind (qr/*.png); one at the top only for itself
+    return {"funcs": funcs, "shapes": {(os.path.dirname(w), os.path.splitext(w)[1] if os.path.dirname(w) else w)
+                                       for w in written or []}}
+
+
+def _kept_note(a, script, touched):
+    """A script that redoes the job of a tool kept in this task: run the tool (or report its bug) instead."""
+    now = job_of(script, touched)
+    told = a.__dict__.setdefault("kept_told", {})
+    for name, job in (getattr(a, "kept_jobs", None) or {}).items():
+        if told.get(name, 0) >= 2 or not (now["funcs"] & job["funcs"] or now["shapes"] & job["shapes"]):
+            continue
+        told[name] = told.get(name, 0) + 1
+        a.log.emit("watchdog", name="kept_tool_redone", tool=name, funcs=sorted(now["funcs"] & job["funcs"]))
+        return (f"\nThis script does the job of {name}, the tool kept for this task. Run that step with `invoke_tool` "
+                f"(name {name!r}) instead of its code; if {name} gives a wrong result, call `report_tool_bug` and it is "
+                f"repaired as a new version.")
+    return ""
 
 
 def project_packages(folder):
@@ -397,6 +426,8 @@ def run(call, args):
         text += _library_hint(res["output"])
     text += _probe_note(a, hidden)
     text += _same_note(a, same, written)
+    if script:
+        text += _kept_note(a, script, touched)
     if ok and script and record:
         text += ("\nIf this script is worth keeping for later tasks, call `keep_tool`: it becomes a tool, tested on this "
                  "run.")

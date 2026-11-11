@@ -22,6 +22,7 @@ from .creator import _content_words, Creator, ToolFailed, trim
 from .turns import AgentStop, ModelGaveUp, RestartRequested, Turns, fn
 from ..core import Call, load as load_catalog
 from ..core._tools import describe_tool
+from ..core.run_code import job_of
 from ..harness import checkpoint as ckpt, gates, hwmon, journal, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.backends import Endpoint, has_model, make_backend
@@ -110,6 +111,7 @@ class Agent:
         self.task_inputs = set()                 # relative paths the task reads and does not change (guard_inputs)
         self.built_names, self.need_reminded = [], False
         self.invoked_any = set()                 # tools invoke_tool actually ran in this task (ok or not)
+        self.kept_jobs, self.kept_told = {}, {}  # tools kept from a script in this task: what that script did
         self.task_text = ""
         self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
         if backend is not None:
@@ -484,6 +486,7 @@ class Agent:
         self.wd.reset_task()
         self.built_names, self.need_reminded = list(built), False
         self.invoked_any, self.keep_reminded = set(), False
+        self.kept_jobs, self.kept_told = {}, {}
         self.log.emit("phase", phase="execute", tools=tools)
         listing = lambda: "\n".join(describe_tool(self.registry.get(n)) for n in dict.fromkeys(tools)) or "(none)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
@@ -625,6 +628,7 @@ class Agent:
         self.last_script = None
         tools.append(m["name"])
         self.built_names.append(m["name"])
+        self.kept_jobs[m["name"]] = job_of(s.get("script"), s.get("written"))
         text, _ = self.act("invoke_tool", {"name": m["name"], "inputs": dict(getattr(creator, "example", {}) or {})})
         return (f"Kept as the tool {m['name']} v{m['version']}: its test is the script's run, and it just ran once on "
                 f"your files with the example inputs:\n{trim(text, 800)}\n" + describe_tool(m))

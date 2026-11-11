@@ -124,5 +124,30 @@ class SameResultTest(unittest.TestCase):
             self.assertNotIn("4 different", run_code.run(call, {}))   # the same script again is not a new attempt
 
 
+class KeptToolRedoneTest(unittest.TestCase):
+    """A script that does again what a tool kept in this task does: run the tool instead."""
+    def test_same_function_or_same_kind_of_file_names_the_kept_tool_twice_at_most(self):
+        folder = git_folder({"a.txt": "x\n"})
+        a = Agent(temp_config(), label="kept", workspace=folder)
+        a.kept_jobs = {"make_qr": run_code.job_of("def make(t, p):\n    pass\n", ["qr/test.png"]),
+                       "read_qr": run_code.job_of("def decode_qr_image(p):\n    return p\ndef main():\n    pass\n", [])}
+
+        def fake(argv, box, **kw):
+            if "png" in open(os.path.join(box, run_code.SCRIPT)).read():
+                os.makedirs(os.path.join(box, "qr"), exist_ok=True)
+                open(os.path.join(box, "qr", "SKU1.png"), "wb").write(b"\x89PNG")
+            return {"exit_code": 0, "output": "ok\n"}
+
+        def run(script):
+            call = types.SimpleNamespace(agent=a, content="```python\n" + script + "```\n")
+            with mock.patch.object(a.sandbox, "run", side_effect=fake):
+                return run_code.run(call, {})
+        self.assertIn("job of make_qr", run("x = 'png'\n"))
+        self.assertIn("job of read_qr", run("def decode_qr_image(p):\n    return 1\n"))
+        self.assertNotIn("job of", run("def main():\n    print(1)\n"))   # main is everyone's
+        run("y = 'png'\n")
+        self.assertNotIn("job of make_qr", run("z = 'png'\n"))         # told twice, not more
+
+
 if __name__ == "__main__":
     unittest.main()

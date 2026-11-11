@@ -24,6 +24,13 @@ class ModuleHintTest(unittest.TestCase):
         self.assertIn('packages {"pip": ["pillow"]}', h)
         self.assertIn("get_image_metadata already has it", h)
 
+    def test_an_import_of_an_installed_tool_says_to_invoke_it(self):
+        a = types.SimpleNamespace(registry=Reg({"generate_qr_code": ["qrcode"]}), built_names=["generate_qr_code"])
+        h = _module_hint(a, "generate_qr_code")
+        self.assertIn("installed tool", h)
+        self.assertIn("invoke_tool", h)
+        self.assertNotIn("pip", h)
+
     def test_no_tool_has_it(self):
         a = types.SimpleNamespace(registry=Reg({"xlsx_x": ["openpyxl"]}), built_names=[])
         self.assertNotIn("already has it", _module_hint(a, "yaml"))
