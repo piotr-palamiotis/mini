@@ -69,6 +69,7 @@ DEFAULTS = {
     },
     "watchdogs": {
         "identical_call_repeat": 3,
+        "same_result_scripts": 3,            # different scripts that wrote the same content to a file: a stuck fix
         "passing_test_reruns": 2,
         "file_rewrites": 3,
         "fail_streak_restart": 3,

@@ -5,6 +5,7 @@ The sandbox starts from the base image (Python and its standard library). A run 
 run in the folder gets the same image. Each successful script run is recorded (script, inputs it saw, files it
 wrote, output) so it can be kept as a tool whose test is that run (keep_tool)."""
 import ast
+import hashlib
 import json
 import os
 import re
@@ -182,6 +183,44 @@ def _probe_note(a, failed):
     return text
 
 
+def _same_results(a, script, box, touched):
+    """Files this run wrote with content that earlier, different scripts wrote too: (path, how many scripts, text).
+    A fix that keeps producing the same file has not reached the cause."""
+    seen = a.__dict__.setdefault("results_seen", {})            # (path, content hash) -> script hashes
+    sh = hashlib.sha256(script.encode()).hexdigest()
+    out = []
+    for rel in touched:
+        try:
+            data = open(os.path.join(box, rel), "rb").read()
+        except OSError:
+            continue
+        try:
+            head = data[:4000].decode("utf-8")[:300]
+        except UnicodeDecodeError:
+            head = None                                         # binary: rewritten unchanged, never "stuck"
+        scripts = seen.setdefault((rel, hashlib.sha256(data).hexdigest()), set())
+        scripts.add(sh)
+        out.append((rel, len(scripts) if head is not None else 0, head))
+    return out
+
+
+def _same_note(a, same, written):
+    limit = a.cfg["watchdogs"].get("same_result_scripts", 3)
+    text = ""
+    unchanged = [rel for rel, n, _ in same if rel not in written]
+    if unchanged:
+        text += "\nWritten with the same content the folder already had (unchanged): " + ", ".join(unchanged)
+    stuck = [(rel, n, head) for rel, n, head in same if n >= limit]
+    if stuck:
+        rel, n, head = stuck[0]
+        a.log.emit("watchdog", name="same_result", path=rel, scripts=n, limit=limit)
+        text += (f"\n{n} different scripts have now written exactly the same {rel}:\n{head}\nIf that is not what the "
+                 f"task asks for, the changes are not reaching the cause. Before changing the script again, run a short "
+                 f"script on one input that prints repr() of each intermediate value (what each library call returns, "
+                 f"before you index, convert or format it), and compare it with what the task expects.")
+    return text
+
+
 def project_packages(folder):
     try:
         return validate_packages(json.load(open(os.path.join(folder, PACKAGES_FILE))))
@@ -302,7 +341,7 @@ def run(call, args):
     a.calls += 1
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{NAME}")
     os.makedirs(box)
-    record, touched, hidden = None, [], []
+    record, touched, hidden, same = None, [], [], []
     try:
         names = list(args.get("files") or [])
         if not names and small_project(a.folder):
@@ -329,6 +368,8 @@ def run(call, args):
         made = ws.new_dirs(a.folder, box)
         written = a._change([rel for rel, _ in items], lambda: ws.export(a.folder, items)) if items else []
         made = ws.make_dirs(a.folder, made)
+        if script:
+            same = _same_results(a, script, box, [r for r in touched if r not in {x for x, _ in refused}])
         if script and not re.search(r"No module named|cannot open shared object|shared library", res["output"]):
             hidden = _probe_imports(a, script, box, image, res["output"])
     except (OSError, PolicyError) as e:
@@ -355,6 +396,7 @@ def run(call, args):
     elif not ok:
         text += _library_hint(res["output"])
     text += _probe_note(a, hidden)
+    text += _same_note(a, same, written)
     if ok and script and record:
         text += ("\nIf this script is worth keeping for later tasks, call `keep_tool`: it becomes a tool, tested on this "
                  "run.")

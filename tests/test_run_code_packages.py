@@ -98,5 +98,31 @@ class ImportProbeTest(unittest.TestCase):
         self.assertEqual(len(self.runs), 1)
 
 
+class SameResultTest(unittest.TestCase):
+    """Different scripts that keep writing the same file: the fix is not reaching the cause."""
+    def test_the_third_script_with_the_same_result_is_told_to_look_at_its_values(self):
+        folder = git_folder({"a.txt": "x\n"})
+        a = Agent(temp_config(), label="same", workspace=folder)
+
+        def fake(argv, box, **kw):
+            open(os.path.join(box, "decoded.json"), "w").write('[{"raw": "S"}]')
+            open(os.path.join(box, "q.png"), "wb").write(b"\x89PNG\x00\xff\xfe")
+            return {"exit_code": 0, "output": "Saved decoded.json\n"}
+        outs = []
+        for i in range(3):
+            call = types.SimpleNamespace(agent=a, content=f"```python\nprint({i})\n```\n")
+            with mock.patch.object(a.sandbox, "run", side_effect=fake):
+                outs.append(run_code.run(call, {}))
+        self.assertNotIn("unchanged", outs[0])
+        self.assertIn("same content the folder already had (unchanged): decoded.json, q.png", outs[1])
+        self.assertNotIn("different scripts", outs[1])
+        self.assertIn('3 different scripts have now written exactly the same decoded.json:\n[{"raw": "S"}]', outs[2])
+        self.assertIn("repr()", outs[2])
+        self.assertNotIn("same q.png", outs[2])                 # a binary file is never reported as stuck
+        call = types.SimpleNamespace(agent=a, content="```python\nprint(0)\n```\n")
+        with mock.patch.object(a.sandbox, "run", side_effect=fake):
+            self.assertNotIn("4 different", run_code.run(call, {}))   # the same script again is not a new attempt
+
+
 if __name__ == "__main__":
     unittest.main()
