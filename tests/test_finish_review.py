@@ -71,6 +71,31 @@ class FinishReviewTest(unittest.TestCase):
         self.assertEqual(open(os.path.join(folder, "names.json")).read(), '["x"]\n')
         self.assertEqual(len(reviews), 2)
 
+    def test_one_check_covers_a_set_of_files_in_a_folder(self):
+        parts = [step(call("write_file", path="parts/1.txt", content="p1\n")),
+                 step(call("write_file", path="parts/2.txt", content="p2\n"))]
+        part = {"file": "parts/*.txt", "sample": "p1", "task_asks": "one text per part", "file_has": "a line of text",
+                "matches": True}
+        script = steps()[:3] + parts + [finish(), finish(OK + [part])]
+        s, _, results, reviews = self.run_task(script)
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertIn("parts/*.txt: 2 files like this one", results[0])
+        self.assertEqual(len(reviews), 1)
+
+    def test_the_judge_looks_at_a_checked_file_while_another_file_still_lacks_a_check(self):
+        judge = lambda ok, why: step(call("judge_form", matches=ok, why=why))
+        objects = [dict(OK[0], sample='{"name": "x"}', file_has="entries with a name")]
+        script = steps()[:3] + [step(call("write_file", path="other.txt", content="o\n")), finish(), finish(objects),
+                                judge(False, "objects, not strings."),
+                                step(call("delete_file", path="other.txt")),
+                                step(call("write_file", path="names.json", content='["x"]\n')),
+                                finish(OK), judge(True, "a list of strings.")]
+        s, folder, results, reviews = self.run_task(script, **{"finish.judge": True})
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertIn("no check for other.txt", results[1])
+        self.assertIn("objects, not strings.", results[1])
+        self.assertEqual(open(os.path.join(folder, "names.json")).read(), '["x"]\n')
+
     def test_a_file_with_no_check_is_named(self):
         stray = [step(call("write_file", path="test.txt", content="t\n")), finish(OK)]
         s, _, results, reviews = self.run_task(steps(*stray, step(call("delete_file", path="test.txt")), finish(OK)))

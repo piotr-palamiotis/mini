@@ -11,6 +11,8 @@ moves a task to another model by itself: a task that fails on its tier fails. Th
 """
 import contextlib
 import copy
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -486,7 +488,7 @@ class Agent:
         self.wd.reset_task()
         self.built_names, self.need_reminded = list(built), False
         self.invoked_any, self.keep_reminded = set(), False
-        self.kept_jobs, self.kept_told = {}, {}
+        self.kept_jobs, self.kept_told, self.judge_seen = {}, {}, {}
         self.log.emit("phase", phase="execute", tools=tools)
         listing = lambda: "\n".join(describe_tool(self.registry.get(n)) for n in dict.fromkeys(tools)) or "(none)"
         msgs = [{"role": "system", "content": prompts.SYSTEM},
@@ -785,52 +787,89 @@ class Agent:
                     "(or a tool) to create it, then finish with its path in files.")
         return ""
 
+    @staticmethod
+    def _units(files):
+        """The written files as units to check: files in one subfolder with one extension are a set (qr/*.png), checked
+        once through any of them; any other file is its own unit. [(label, members)]"""
+        groups = {}
+        for f in files:
+            d, ext = os.path.dirname(f), os.path.splitext(f)[1]
+            groups.setdefault((d, ext) if d else (f, None), []).append(f)
+        return [(f"{d}/*{ext}" if ext is not None and len(m) > 1 else m[0], m) for (d, ext), m in groups.items()]
+
+    def _judged(self, task, f):
+        """The fresh judge's verdict on a text file, asked once per content of the file."""
+        try:
+            key = (f, hashlib.sha256(open(os.path.join(self.folder, f), "rb").read()).hexdigest())
+        except OSError:
+            return {"matches": True, "why": ""}
+        cache = self.__dict__.setdefault("judge_seen", {})
+        if key not in cache:
+            cache[key] = self._judge_form(task, f)
+        return cache[key]
+
     def _review_outputs(self, task, checks, rounds):
         """Before the task ends, the model checks each file it wrote against the task's words: finish carries one check
-        per file (what the task asks, what the file has, whether they match). A file that does not match, or has no
-        check, keeps the task going; after 3 rounds it may finish. "" when off, done or nothing was written."""
+        per file or set of files (what the task asks, what the file has, whether they match), and a fresh judge looks
+        at each text file whose check passed. A file that does not match, or has no check, keeps the task going; after
+        3 rounds it may finish, once each text file has been judged. "" when off, done or nothing was written."""
         fin = self.cfg.get("finish") or {}
         files = [r for r in self.produced_files() if os.path.isfile(os.path.join(self.folder, r))]
-        if not fin.get("review_outputs", True) or not files or rounds >= 3:
+        if not fin.get("review_outputs", True) or not files:
             return ""
+        judge = lambda f: fin.get("judge", True) and samples.is_text(os.path.join(self.folder, f))
         n = fin.get("review_max_files", 8)
+        units = self._units(files)[:n]
+        if rounds >= 4:
+            return ""
+        if rounds == 3:                         # out of rounds: still no text file ends unjudged (once more at most)
+            bad = [(m[0], self._judged(task, m[0])) for _, m in units if judge(m[0])]
+            return "\n".join(f"{f} does not have the form the task asks for: {v['why']} Fix it, then finish."
+                             for f, v in bad if not v["matches"])
         if rounds == 0 or not isinstance(checks, list) or not checks:
-            heads = [samples.head(self.folder, rel) for rel in files[:n]]
-            more = f"\n\n(and {len(files) - n} more: {', '.join(files[n:])})" if len(files) > n else ""
+            heads = [samples.head(self.folder, m[0]) + (f"\n({label}: {len(m)} files like this one)" if len(m) > 1 else "")
+                     for label, m in units]
+            rest = [f for _, m in self._units(files)[n:] for f in m]
+            more = f"\n\n(and {len(rest)} more: {', '.join(rest)})" if rest else ""
             return prompts.REVIEW_OUTPUTS.format(task=task, heads="\n\n".join(heads) + more)
         norm = lambda f: os.path.normpath(str(f or "").strip().lstrip("./") or ".")
-        got = {norm(c.get("file")): c for c in checks if isinstance(c, dict)}
-        unchecked = [f for f in files[:n] if norm(f) not in got]
+        cs = [c for c in checks if isinstance(c, dict)]
+
+        def check_for(label, members):
+            for c in cs:
+                cf = norm(c.get("file"))
+                if cf in members or cf == label or cf == os.path.dirname(members[0]) or \
+                        any(fnmatch.fnmatch(x, cf) for x in members):
+                    return c
+            return None
         bare = lambda t: re.sub(r"\W+", "", str(t or "")).lower()
-        out = []
-        for f in files[:n]:
-            c = got.get(norm(f))
+        out, unchecked = [], []
+        for label, members in units:
+            c, f = check_for(label, members), members[0]
             if not c:
+                unchecked.append(label)
                 continue
             if samples.is_text(os.path.join(self.folder, f)):
-                body = bare(open(os.path.join(self.folder, f), encoding="utf-8", errors="replace").read(200_000))
+                body = "".join(bare(open(os.path.join(self.folder, x), encoding="utf-8", errors="replace").read(200_000))
+                               for x in members)
                 if not bare(c.get("sample")) or bare(c.get("sample")) not in body:
-                    out.append(f"{f}: sample is not in the file. Copy its first entry or first line exactly as the file "
-                               "has it, then describe file_has from that sample.")
+                    out.append(f"{label}: sample is not in the file. Copy its first entry or first line exactly as the "
+                               "file has it, then describe file_has from that sample.")
                     continue
             if bare(c.get("file_has")) and bare(c.get("file_has")) in bare(c.get("task_asks")):
-                out.append(f"{f}: file_has repeats the task's words. Describe the form the sample "
+                out.append(f"{label}: file_has repeats the task's words. Describe the form the sample "
                            f"{trim(str(c.get('sample') or ''), 200)!r} shows, then compare it with task_asks.")
-        wrong = [c for f, c in got.items() if f in map(norm, files) and c.get("matches") is not True]
-        if not unchecked and not wrong and not out:
-            for f in files[:n]:                 # its own checks pass: a fresh look at each text file, task next to file
-                if fin.get("judge", True) and samples.is_text(os.path.join(self.folder, f)):
-                    v = self._judge_form(task, f)
-                    if not v["matches"]:
-                        out.append(f"{f} does not have the form the task asks for: {v['why']} Fix it, then finish "
-                                   "with checks again.")
-            return "\n".join(out)
-        for c in wrong:
-            out.append(f"{c.get('file')}: the task asks for {c.get('task_asks')!r} but the file has "
-                       f"{c.get('file_has')!r}. Change it to what the task asks, then finish with checks again.")
+            elif c.get("matches") is not True:
+                out.append(f"{label}: the task asks for {c.get('task_asks')!r} but the file has "
+                           f"{c.get('file_has')!r}. Change it to what the task asks, then finish with checks again.")
+            elif judge(f):                      # its own check passes: a fresh look, task next to file
+                v = self._judged(task, f)
+                if not v["matches"]:
+                    out.append(f"{label} does not have the form the task asks for: {v['why']} Fix it, then finish "
+                               "with checks again.")
         if unchecked:
-            out.append("no check for " + ", ".join(unchecked) + ": give one for each file the task wrote, or delete "
-                       "the file if the task did not ask for it (a test or scratch file).")
+            out.append("no check for " + ", ".join(unchecked) + ": give one for each file the task wrote (one for a "
+                       "set like qr/*.png), or delete the file if the task did not ask for it (a test or scratch file).")
         return "\n".join(out)
 
     def _judge_form(self, task, rel):
