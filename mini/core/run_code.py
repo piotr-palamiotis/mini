@@ -4,10 +4,12 @@ The sandbox starts from the base image (Python and its standard library). A run 
 (pip or apt); the user approves new ones once per project and they are kept in .mini/packages.json, so every later
 run in the folder gets the same image. Each successful script run is recorded (script, inputs it saw, files it
 wrote, output) so it can be kept as a tool whose test is that run (keep_tool)."""
+import ast
 import json
 import os
 import re
 import shutil
+import sys
 
 from ._files import show
 from ..agent import codeblocks
@@ -105,11 +107,102 @@ def _library_hint(output):
     return text + ". Or use a pure-Python package that needs no system library."
 
 
+# imports the script's third-party modules (and each package's direct submodules) in the run's image: an import that
+# fails there (a missing system library, a missing package) is named even when the script caught the error
+PROBE = r"""import importlib, json, pkgutil, sys
+out, subs = {}, {}
+def load(m, into):
+    try:
+        importlib.import_module(m)
+        return True
+    except BaseException as e:
+        into[m] = (type(e).__name__ + ": " + str(e))[:400]
+for m in json.loads(sys.argv[1]):
+    if load(m, out) and "." not in m:
+        names = [s.name for s in pkgutil.iter_modules(getattr(sys.modules[m], "__path__", None) or [])
+                 if not s.name.startswith("_") and "test" not in s.name]
+        for s in names[:30]:
+            load(m + "." + s, subs)
+print("MINI_PROBE " + json.dumps({"direct": out, "sub": subs}))
+"""
+
+
+def _imports(script, box):
+    """The modules a script imports that are neither the standard library nor files beside it."""
+    try:
+        tree = ast.parse(script)
+    except (SyntaxError, ValueError):
+        return []
+    mods = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            mods |= {x.name for x in n.names}
+        elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+            mods.add(n.module)
+    local = {os.path.splitext(f)[0] for f in os.listdir(box)} if os.path.isdir(box) else set()
+    return sorted(m for m in mods if m.split(".")[0] not in sys.stdlib_module_names and m.split(".")[0] not in local
+                  and m.split(".")[0] != "mini_io")
+
+
+def _probe_imports(a, script, box, image, output):
+    """Imports that fail in the image although the run's output does not show it: (module, error) pairs."""
+    mods = _imports(script, box)
+    cache = a.__dict__.setdefault("import_probe", {})
+    todo = [m for m in mods if (image, m) not in cache]
+    if todo:
+        d = os.path.join(box, ws.META)
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "probe.py"), "w").write(PROBE)
+        try:
+            res = a.sandbox.run(["python", "/work/" + ws.META + "/probe.py", json.dumps(todo)], box,
+                                purpose="run_code import check", image=image, timeout=120)
+            found = re.findall(r"^MINI_PROBE (.*)$", res["output"], re.M)
+            got = json.loads(found[-1]) if found else None
+        except (OSError, PolicyError, ValueError):
+            got = None
+        if got is None:
+            return []
+        for m in todo:
+            subs = {k: v for k, v in got["sub"].items() if k.startswith(m + ".") and _library_hint(v)}
+            cache[(image, m)] = ([(m, got["direct"][m])] if m in got["direct"] else []) + sorted(subs.items())
+        a.log.emit("import_probe", image=image, modules=todo, failed={m: cache[(image, m)] for m in todo})
+    bad = [(m, e) for x in mods for m, e in cache.get((image, x), [])]
+    return [(m, e) for m, e in dict(bad).items() if e.split(": ", 1)[-1][:80] not in output]
+
+
+def _probe_note(a, failed):
+    by_err = {}
+    for m, err in failed:
+        by_err.setdefault(err, []).append(m)
+    text = ""
+    for err, mods in list(by_err.items())[:3]:
+        text += f"\nIn the sandbox, importing {' and '.join(mods)} fails: {err} (the script's output does not show it)."
+        miss = re.search(r"No module named '([\w.]+)'", err)
+        text += _library_hint(err) or (_module_hint(a, miss.group(1)) if miss else "")
+    return text
+
+
 def project_packages(folder):
     try:
         return validate_packages(json.load(open(os.path.join(folder, PACKAGES_FILE))))
     except (OSError, ValueError, PolicyError):
         return {"apt": [], "pip": []}
+
+
+def _pip_name(p):
+    return re.split(r"[<>=!~\[ ;]", str(p), 1)[0].strip().lower()
+
+
+def _headless(have, want):
+    """A pip package and its -headless build cannot share an image (both install the same module): the headless one
+    wins, so a run that asks for it no longer gets the other from the folder's earlier packages. Returns (have, want,
+    removed names)."""
+    heads = {_pip_name(p)[:-len("-headless")] for p in have["pip"] + want["pip"] if _pip_name(p).endswith("-headless")}
+    gone = sorted({_pip_name(p) for p in have["pip"] + want["pip"] if _pip_name(p) in heads})
+    if not gone:
+        return have, want, []
+    keep = lambda ps: [p for p in ps if _pip_name(p) not in heads]
+    return {**have, "pip": keep(have["pip"])}, {**want, "pip": keep(want["pip"])}, gone
 
 
 def ensure_packages(a, wanted):
@@ -126,7 +219,11 @@ def ensure_packages(a, wanted):
         want = validate_packages(wanted or {})
     except PolicyError as e:
         return None, str(e)
+    have, want, swapped = _headless(have, want)
     new = {k: [p for p in want[k] if p not in have[k]] for k in ("apt", "pip")}
+    if swapped and not (new["apt"] or new["pip"]):
+        json.dump(have, open(os.path.join(a.folder, PACKAGES_FILE), "w"), indent=1)
+        a.log.emit("packages", scope="project", packages=have, removed=swapped)
     if new["apt"] or new["pip"]:
         d = a.gate.request("permissions", "run_code needs packages for this folder", {
             "pip packages (new)": new["pip"] or "-", "apt packages (new)": new["apt"] or "-",
@@ -205,7 +302,7 @@ def run(call, args):
     a.calls += 1
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{NAME}")
     os.makedirs(box)
-    record, touched = None, []
+    record, touched, hidden = None, [], []
     try:
         names = list(args.get("files") or [])
         if not names and small_project(a.folder):
@@ -232,6 +329,8 @@ def run(call, args):
         made = ws.new_dirs(a.folder, box)
         written = a._change([rel for rel, _ in items], lambda: ws.export(a.folder, items)) if items else []
         made = ws.make_dirs(a.folder, made)
+        if script and not re.search(r"No module named|cannot open shared object|shared library", res["output"]):
+            hidden = _probe_imports(a, script, box, image, res["output"])
     except (OSError, PolicyError) as e:
         return f"{NAME} failed: {e}"
     finally:
@@ -255,6 +354,7 @@ def run(call, args):
         text += _module_hint(a, missing.group(1))
     elif not ok:
         text += _library_hint(res["output"])
+    text += _probe_note(a, hidden)
     if ok and script and record:
         text += ("\nIf this script is worth keeping for later tasks, call `keep_tool`: it becomes a tool, tested on this "
                  "run.")

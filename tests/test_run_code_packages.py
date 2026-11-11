@@ -1,6 +1,7 @@
 """run_code gets the packages it names: approved once per folder, kept in .mini/packages.json."""
 import json
 import os
+import types
 import unittest
 from unittest import mock
 
@@ -47,6 +48,54 @@ class RunCodePackagesTest(unittest.TestCase):
     def test_a_missing_module_names_the_package_to_add(self):
         a = self.agent()
         self.assertIn('packages {"pip": ["pyyaml"]}', run_code._module_hint(a, "yaml"))
+
+    def test_the_headless_build_replaces_the_other_one(self):
+        a = self.agent()
+        with mock.patch.object(a.sandbox, "ensure_image", return_value="x"):
+            run_code.ensure_packages(a, {"pip": ["opencv-python", "pyzbar"]})
+            run_code.ensure_packages(a, {"pip": ["opencv-python-headless"]})
+            self.assertEqual(run_code.project_packages(self.folder)["pip"], ["opencv-python-headless", "pyzbar"])
+            run_code.ensure_packages(a, {"pip": ["opencv-python"]})       # the headless one stays
+            self.assertEqual(run_code.project_packages(self.folder)["pip"], ["opencv-python-headless", "pyzbar"])
+
+
+class ImportProbeTest(unittest.TestCase):
+    """A script that catches its own import error: the harness imports the modules in the image and names the cause."""
+    SCRIPT = ("import os\nimport pyzbar\ntry:\n    from pyzbar.pyzbar import decode\nexcept ImportError:\n"
+              "    print('Could not find decode')\n")
+
+    def setUp(self):
+        self.folder = git_folder({"a.txt": "x\n", "helper.py": "X = 1\n"})
+        self.a = Agent(temp_config(), label="probe", workspace=self.folder)
+        self.runs = []
+
+        def fake(argv, box, **kw):
+            self.runs.append(argv)
+            if "probe.py" in argv[1]:
+                return {"exit_code": 0, "output": 'MINI_PROBE {"direct": {}, "sub": {"pyzbar.pyzbar": '
+                        '"ImportError: Unable to find zbar shared library", "pyzbar.locations": "ValueError: odd"}}\n'}
+            return {"exit_code": 0, "output": "Could not find decode\n"}
+        self.fake = fake
+
+    def run_script(self, script):
+        call = types.SimpleNamespace(agent=self.a, content="```python\n" + script + "```\n")
+        with mock.patch.object(self.a.sandbox, "run", side_effect=self.fake), \
+                mock.patch.object(self.a.sandbox, "ensure_image", return_value="img"):
+            return run_code.run(call, {})
+
+    def test_a_caught_missing_library_is_named_once_per_image(self):
+        out = self.run_script(self.SCRIPT)
+        self.assertIn("importing pyzbar.pyzbar fails: ImportError: Unable to find zbar shared library", out)
+        self.assertIn('{"apt": ["libzbar0t64"]}', out)
+        self.assertNotIn("pyzbar.locations", out)              # a submodule's other errors are not the cause
+        self.assertEqual(json.loads(self.runs[1][2]), ["pyzbar", "pyzbar.pyzbar"])
+        out = self.run_script(self.SCRIPT)                      # the next run reuses the answer: no second probe
+        self.assertEqual(len(self.runs), 3)
+        self.assertIn("libzbar0t64", out)
+
+    def test_stdlib_and_the_folders_own_modules_are_not_probed(self):
+        self.run_script("import os, json\nimport helper\nprint(helper.X)\n")
+        self.assertEqual(len(self.runs), 1)
 
 
 if __name__ == "__main__":
