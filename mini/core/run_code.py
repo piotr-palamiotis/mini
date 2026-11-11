@@ -273,13 +273,27 @@ def _headless(have, want):
     return {**have, "pip": keep(have["pip"])}, {**want, "pip": keep(want["pip"])}, gone
 
 
+def _names(v):
+    """Package names as a list, from the shapes a small model sends: "x", ["x"], {"x": []}, [{"x": []}], quoted."""
+    if v is None:
+        return []
+    if isinstance(v, dict):
+        v = list(v)
+    if not isinstance(v, list):
+        v = [v]
+    out = []
+    for x in v:
+        out += [str(y).strip().strip("'\"").strip() for y in (list(x) if isinstance(x, dict) else [x])]
+    return [x for x in out if x]
+
+
 def ensure_packages(a, wanted):
     """The image for the project's packages plus wanted. New ones need the user's approval; approved ones are saved
     for the folder. Returns (image, problem)."""
     have = project_packages(a.folder)
     if wanted and not isinstance(wanted, dict):
         return None, 'packages is an object: {"pip": [...], "apt": [...]}'
-    wanted = {str(k).strip().strip("'\"").strip().lower(): v for k, v in (wanted or {}).items()}
+    wanted = {str(k).strip().strip("'\"").strip().lower(): _names(v) for k, v in (wanted or {}).items()}
     odd = [k for k in wanted if k not in ("pip", "apt")]
     if odd:                         # an unknown key was silently ignored before: nothing got installed
         return None, f'packages takes the keys "pip" and "apt", not {", ".join(map(repr, odd))}'

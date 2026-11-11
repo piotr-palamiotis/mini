@@ -49,6 +49,19 @@ class RunCodePackagesTest(unittest.TestCase):
         a = self.agent()
         self.assertIn('packages {"pip": ["pyyaml"]}', run_code._module_hint(a, "yaml"))
 
+    def test_garbled_package_shapes_are_read_as_names(self):
+        a = self.agent()
+        with mock.patch.object(a.sandbox, "ensure_image", return_value="x"):
+            self.assertEqual(run_code.ensure_packages(a, {'"pip"': [{'"PyYAML"': [], '"toml"': []}]}), ("x", ""))
+        self.assertEqual(run_code.project_packages(self.folder)["pip"], ["PyYAML", "toml"])
+
+    def test_a_garbled_key_that_starts_with_a_parameter_is_that_parameter(self):
+        from mini.core import validate
+        args, problem = validate(run_code.SCHEMA, {'packages={"pip"': {'"pip"': ["toml"]}})
+        self.assertEqual(problem, "")
+        self.assertEqual(args, {"packages": {'"pip"': ["toml"]}})
+        self.assertIn("unknown argument", validate(run_code.SCHEMA, {"pkgs": {}})[1])
+
     def test_the_headless_build_replaces_the_other_one(self):
         a = self.agent()
         with mock.patch.object(a.sandbox, "ensure_image", return_value="x"):

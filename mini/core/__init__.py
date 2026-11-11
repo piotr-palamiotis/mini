@@ -57,6 +57,11 @@ def validate(schema, args):
     if not isinstance(args, dict):
         return args, "the arguments must be an object"
     props, out, problems = schema.get("properties") or {}, {}, []
+    fixed = {}
+    for k, v in args.items():                     # a garbled key that starts with a parameter: packages={"pip"
+        m = re.match(r"\W*(\w+)", str(k))
+        fixed[m.group(1) if k not in props and m and m.group(1) in props and m.group(1) not in args else k] = v
+    args = fixed
     unknown = [k for k in args if k not in props]
     if unknown:
         problems.append(f"unknown argument{'s' if len(unknown) > 1 else ''} {', '.join(unknown)} "
