@@ -44,6 +44,8 @@ class TerminalAsker:
         if msg.get("op") != "ask":
             return None
         if not sys.stdin.isatty():
+            if msg.get("default") is not None:
+                return {"answer": msg["default"]}
             return {"error": f"no answer for {msg.get('key')}: not interactive, pass --{str(msg.get('key')).replace('_', '-')}"}
         try:
             return {"answer": self._ask(msg)}
@@ -130,6 +132,8 @@ class GateAsker:
         d = self.gate.request("question", msg.get("prompt") or msg["key"], details, options=options,
                               choices=choices if kind == "choice" else None, multi=multi)
         if not d.approved or d.choice == "cancel":
+            if d.decided_by.startswith("auto") and msg.get("default") is not None:
+                return {"answer": msg["default"]}       # nobody to ask: the tool's default, as its own test assumed
             return {"error": f"no answer for {msg['key']}: pass it in the tool inputs" if d.decided_by.startswith("auto")
                     else "the user cancelled"}
         if multi:

@@ -179,6 +179,14 @@ class AnswerStagingTest(unittest.TestCase):
         self.assertEqual(r, {"answer": ".mini/in/data.txt"})
         self.assertTrue(os.path.isfile(os.path.join(work, ".mini", "in", "data.txt")))
 
+    def test_unattended_a_question_with_a_default_gets_the_default(self):
+        from mini.harness.ask import GateAsker
+        gate = type("G", (), {"request": lambda self, *a, **k: Decision(False, "cancel", "", "auto")})()
+        ask = GateAsker(gate, None, tempfile.mkdtemp(), "t")
+        self.assertEqual(ask({"op": "ask", "key": "border", "prompt": "Border", "kind": "number", "default": 5}),
+                         {"answer": 5})
+        self.assertIn("pass it in the tool inputs", ask({"op": "ask", "key": "p", "prompt": "Path", "kind": "text"})["error"])
+
     def test_a_file_of_the_folder_keeps_its_relative_path(self):
         from mini.harness.ask import GateAsker
         folder, work = git_folder({"docs/a.txt": "a"}), tempfile.mkdtemp()
