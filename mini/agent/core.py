@@ -90,6 +90,31 @@ PATH_LIKE = re.compile(r"^(?:[\w.-]+/)*[\w.-]*(?:\.\w{1,8}|/)$")   # a.csv, out/
 CONTROL_TOOLS = [T_BUG, T_KEEP, T_NEED, T_FINISH]         # the pipeline's own calls; everything else is a core capability
 
 
+
+def form_gap(task, text):
+    """The task gives a line form in backticks, words between punctuation (`path:line: text`), and most of the
+    text's lines have that form when spacing is ignored, but some differ in spacing: what to fix, else ""."""
+    lines = [re.sub(r"^\s*(?:[-*+]\s+)?`?(.*?)`?\s*$", r"\1", ln) for ln in text.splitlines() if ln.strip()]
+    for form in re.findall(r"`([^`\n]{3,80})`", task):
+        parts = re.split(r"(\w+)", form)
+        seps = parts[2:-1:2]
+        if len(parts[1::2]) < 2 or not all(re.search(r"[^\w\s]", sp) for sp in seps):
+            continue
+        lead, tail = parts[0], parts[-1]
+        val = r"(\S(?:.*?\S)?)"                # a value does not start or end with a space
+        strict = re.compile("^" + re.escape(lead) + val + "".join(re.escape(sp) + val for sp in seps) +
+                            re.escape(tail) + "$")
+        loose_sep = lambda sp: r"\s*" + re.escape(sp.strip()) + r"\s*"
+        loose = re.compile("^" + loose_sep(lead) + "(.+?)" + "".join(loose_sep(sp) + "(.+?)" for sp in seps) +
+                           loose_sep(tail) + "$")
+        near = [ln for ln in lines if loose.match(ln)]
+        off = [ln for ln in near if not strict.match(ln)]
+        if near and len(near) * 2 >= len(lines) and off:
+            return (f"the task gives each line the form `{form}` (spaces exactly as there), but {len(off)} of "
+                    f"{len(near)} lines differ from it in spacing, e.g. {off[0]!r}. Write every line in exactly "
+                    "that form, then finish with checks again.")
+    return ""
+
 class Agent:
     def __init__(self, cfg, approval_handler=None, backend=None, tier_backends=None, start_tier=None, label="", log=None,
                  history=(), workspace=None):
@@ -817,15 +842,17 @@ class Agent:
         files = [r for r in self.produced_files() if os.path.isfile(os.path.join(self.folder, r))]
         if not fin.get("review_outputs", True) or not files:
             return ""
-        judge = lambda f: fin.get("judge", True) and samples.is_text(os.path.join(self.folder, f))
+        judge = lambda f: fin.get("judge", True) and (samples.is_text(os.path.join(self.folder, f)) or
+                                                      bool(samples.describe(os.path.join(self.folder, f))))
         n = fin.get("review_max_files", 8)
         units = self._units(files)[:n]
         if rounds >= 4:
             return ""
         if rounds == 3:                         # out of rounds: still no text file ends unjudged (once more at most)
+            gaps = [g for _, m in units for g in [self._form_gap(task, m)] if g]
             bad = [(m[0], self._judged(task, m[0])) for _, m in units if judge(m[0])]
-            return "\n".join(f"{f} does not have the form the task asks for: {v['why']} Fix it, then finish."
-                             for f, v in bad if not v["matches"])
+            return "\n".join(gaps + [f"{f} does not have the form the task asks for: {v['why']} Fix it, then finish."
+                                      for f, v in bad if not v["matches"]])
         if rounds == 0 or not isinstance(checks, list) or not checks:
             heads = [samples.head(self.folder, m[0]) + (f"\n({label}: {len(m)} files like this one)" if len(m) > 1 else "")
                      for label, m in units]
@@ -856,7 +883,10 @@ class Agent:
                     out.append(f"{label}: sample is not in the file. Copy its first entry or first line exactly as the "
                                "file has it, then describe file_has from that sample.")
                     continue
-            if bare(c.get("file_has")) and bare(c.get("file_has")) in bare(c.get("task_asks")):
+            gap = self._form_gap(task, members)
+            if gap:
+                out.append(gap)
+            elif bare(c.get("file_has")) and bare(c.get("file_has")) in bare(c.get("task_asks")):
                 out.append(f"{label}: file_has repeats the task's words. Describe the form the sample "
                            f"{trim(str(c.get('sample') or ''), 200)!r} shows, then compare it with task_asks.")
             elif c.get("matches") is not True:
@@ -871,6 +901,15 @@ class Agent:
             out.append("no check for " + ", ".join(unchecked) + ": give one for each file the task wrote (one for a "
                        "set like qr/*.png), or delete the file if the task did not ask for it (a test or scratch file).")
         return "\n".join(out)
+
+    def _form_gap(self, task, members):
+        """A line form the task spells out in backticks (`path:line: text`) that the file's lines follow except for
+        spacing: say where, since a reader skims past a missing space. "" when there is none."""
+        f = os.path.join(self.folder, members[0])
+        if not samples.is_text(f):
+            return ""
+        got = form_gap(task, open(f, encoding="utf-8", errors="replace").read(200_000))
+        return f"{members[0]}: {got}" if got else ""
 
     def _judge_form(self, task, rel):
         """One fresh question, apart from the work that made the file: the task and the file's head, does the file

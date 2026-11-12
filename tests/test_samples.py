@@ -22,7 +22,7 @@ class SamplesTest(unittest.TestCase):
         p = samples.preview(self.a)
         self.assertIn("id,qty,unit_price", p)
         self.assertIn("<rss><item>a</item></rss>", p)
-        self.assertIn("pic.jpg (4 bytes, binary)", p)
+        self.assertIn("pic.jpg (4 bytes, binary: JPEG image)", p)
         self.assertLess(p.count("\n0,0,1.5") + p.count("\n11,11"), 3)
 
     def test_small_samples_are_copied_for_the_tests(self):
