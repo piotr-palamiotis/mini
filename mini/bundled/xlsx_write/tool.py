@@ -70,10 +70,13 @@ def sheet_xml(rows, name="?"):
 
 
 def run(inputs):
+    sheets = inputs["sheets"]
+    if isinstance(sheets, dict) and isinstance(sheets.get("overwrite"), bool):   # an option put inside sheets
+        sheets = {k: v for k, v in sheets.items() if k != "overwrite"}
+        inputs = dict(inputs, overwrite=inputs.get("overwrite") or inputs["sheets"]["overwrite"])
     path = safe(inputs["path"])
     if os.path.exists(path) and not inputs.get("overwrite"):
         raise FileExistsError(f"{path} exists; pass overwrite=true to replace it (xlsx_edit changes cells in place)")
-    sheets = inputs["sheets"]
     if not isinstance(sheets, dict) or not sheets:
         raise ValueError("sheets must be an object {sheet name: rows} with at least one sheet")
     for name in sheets:

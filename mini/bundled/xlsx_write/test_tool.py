@@ -47,10 +47,12 @@ class XlsxWriteTest(unittest.TestCase):
             tool.run({"path": "a.xlsx", "sheets": {"S": [[2]]}})
         tool.run({"path": "a.xlsx", "sheets": {"S": [[2]]}, "overwrite": True})
         for sheets, msg in [({}, "at least one"), ({"a/b": [[1]]}, "bad sheet name"), ({"x" * 32: [[1]]}, "bad sheet name"),
-                            ({"S": [1]}, "list of rows"), ({"S": [[1]], "overwrite": True}, "sheet 'overwrite'.*got bool"), ({"S": [[{"a": 1}]]}, "not dict"),
+                            ({"S": [1]}, "list of rows"), ({"S": [[1]], "T": True}, "sheet 'T'.*got bool"), ({"S": [[{"a": 1}]]}, "not dict"),
                             ({"S": [[float("nan")]]}, "cannot be stored")]:
             with self.assertRaisesRegex(ValueError, msg):
                 tool.run({"path": "b.xlsx", "sheets": sheets})
+        got = tool.run({"path": "a.xlsx", "sheets": {"S": [[3]], "overwrite": True}})    # the option put inside sheets
+        self.assertEqual(got["sheets"], ["S"])
         with self.assertRaisesRegex(ValueError, "relative path"):
             tool.run({"path": "../b.xlsx", "sheets": {"S": [[1]]}})
 
