@@ -628,6 +628,10 @@ class Agent:
             tools.append(m["name"])
             self.built_names.append(m["name"])
             return "New tool installed:\n" + describe_tool(m) + f"\nRun it now with `invoke_tool` (name {m['name']!r})."
+        except (ToolFailed, ModelGaveUp) as e:    # mid-task, a build that fails costs the tool, not the task
+            self.log.emit("watchdog", name="need_failed", problem=str(e))
+            return (f"Not built: {e}. Do this step with run_code instead (a script that worked can be kept with "
+                    "keep_tool), and go on with the task.")
         finally:
             self.wd.reset_conversation()
 

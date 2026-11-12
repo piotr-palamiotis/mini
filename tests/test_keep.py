@@ -78,6 +78,22 @@ class KeepTest(unittest.TestCase):
         self.assertEqual(open(os.path.join(folder, "total.txt")).read(), "12.50\n")
         self.assertIsNone(agent.registry.get("csv_total"))
 
+    def test_a_tool_the_model_never_writes_mid_task_is_not_built_and_the_task_goes_on(self):
+        from unittest import mock
+        from mini.agent.turns import ModelGaveUp
+        steps = script()[:2] + [step(call("need_tool", need="read sales from shop.db")),
+                                step(call("write_file", path="total.txt", content="12.50\n")),
+                                step(call("finish", answer="The total is 12.50.", files=["total.txt"]))]
+        folder = git_folder({"sales.csv": "qty,price\n2,1.25\n4,2.5\n"})
+        agent = Agent(temp_config(), backend=fake_backend(steps), label="needgaveup", workspace=folder)
+        with mock.patch("mini.agent.core.Creator.create", side_effect=ModelGaveUp("no usable test_tool.py after 3 replies")):
+            s = agent.run_task("Write the total of sales.csv (qty * price) to total.txt.")
+        self.assertEqual(s["status"], "success", s["error"])
+        events = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
+        said = [e["text"] for e in events if e["kind"] == "tool_result" and e.get("name") == "need_tool"]
+        self.assertIn("Not built: no usable test_tool.py", said[0])
+        self.assertIn("run_code", said[0])
+
     def test_a_rerun_that_writes_the_same_file_again_can_be_kept(self):
         steps = script()
         steps.insert(3, steps[2])               # the same script again: total.txt is unchanged in the folder

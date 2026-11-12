@@ -368,7 +368,7 @@ class Creator:
                     continue
                 break
             else:
-                raise AgentStop("no valid spec after 3 tries at how the tool runs")
+                raise ModelGaveUp("no valid spec after 3 tries at how the tool runs")
             revision = self._review_plan()
             if not revision:
                 return
@@ -614,7 +614,7 @@ class Creator:
                                             + samples.tests_note(self.files_dir))):
             body = self._ask_file(path, prompts.CODE_FILE.format(intro=intro, path=path, what=what), "code")
             if body is None:
-                raise AgentStop(f"no usable {path} after 3 replies")
+                raise ModelGaveUp(f"no usable {path} after 3 replies")
             self._write(path, body)
             intro = ""
         a.log.emit("code", tool=self.spec["name"], files={k: open(os.path.join(self.files_dir, k)).read() for k in FILES})
