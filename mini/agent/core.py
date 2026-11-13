@@ -620,6 +620,19 @@ class Agent:
             self.log.emit("watchdog", name="built_tool_unused", built=self.built_names)
             return (f"Not built yet: {', '.join(self.built_names)} was built and installed for this task. Call "
                     "`invoke_tool` with it. If it truly cannot do what the task needs, call need_tool again.")
+        told = self.__dict__.setdefault("need_installed", set())
+        judged = bool(tools) and (self.cfg.get("gap") or {}).get("judge", True)   # off: offered = a plain search
+        for name in [n for n in dict.fromkeys(tools) if judged and n not in self.built_names and n not in told]:
+            m = self.registry.get(name)              # an installed tool offered for this task: reuse it as it is
+            if not m:
+                continue
+            v = self._judge({"goal": need, "plan": need}, m)
+            self.log.emit("gap_judge", tool=name, fits=v["fits"], step=v.get("step"), why=v.get("why"), need=need[:200])
+            if v["fits"]:
+                told.add(name)
+                return (f"Not built: {name} is installed and does this ({trim(str(v.get('why') or ''), 200)}). Call "
+                        f"`invoke_tool` with it (inspect_tool shows its inputs). If it truly cannot do this step, call "
+                        f"need_tool again and say what {name} lacks.")
         s = self.last_script
         if args.get("from_run_code") and s and s.get("ok") and s.get("script"):
             need += f"\n\nA script that already did this once in the sandbox (start from it):\n```python\n{s['script']}```"
@@ -796,10 +809,17 @@ class Agent:
                 full = self._path(f)
             except PolicyError as e:
                 return str(e)
+            if os.path.isdir(full):                 # a folder of outputs (thumbs/) is fine once it holds a file
+                if any(fs for _, _, fs in os.walk(full)):
+                    continue
+                return f"{f} is an empty folder. Write its files first, or leave it out of files."
             if not os.path.isfile(full) or os.path.getsize(full) == 0:
                 return f"{f} does not exist or is empty. Write it first. Files present: {', '.join(produced) or '(none)'}"
         built = list(dict.fromkeys(c["name"] for c in self.created))
-        unused = built if built and not self.invoked_ok.intersection(built) else []   # a rebuilt copy may replace one
+        ran = [n for n in built if n in self.invoked_ok]
+        about = lambda n: n.replace("_", " ") + " " + str((self.registry.get(n) or {}).get("description") or "")
+        # each tool built for the task runs, unless a tool that ran does the same job (a rebuilt copy replaces one)
+        unused = [n for n in built if n not in ran and not any(self._same_need(n, about(r)) for r in ran)]
         if unused:
             return (f"{' / '.join(unused)} was built for this task but never ran successfully. Call invoke_tool with it "
                     "to produce the result: output made another way (run_code, write_file) does not show the tool works. "

@@ -94,6 +94,23 @@ class KeepTest(unittest.TestCase):
         self.assertIn("Not built: no usable test_tool.py", said[0])
         self.assertIn("run_code", said[0])
 
+    def test_need_tool_for_what_an_offered_installed_tool_does_runs_that_tool_instead(self):
+        steps = [step(call("understand", goal="totals workbook", inputs=["sales.csv"], outputs=["t.xlsx"], plan="1. write")),
+                 step(call("decide_coverage", reasoning="xlsx_write writes it", use=["xlsx_write"], missing=[])),
+                 step(call("need_tool", need="write an Excel workbook with sheets of rows")),
+                 step(call("judge_tool", fits=True, step="write the workbook", why="it writes sheets of rows")),
+                 step(call("invoke_tool", name="xlsx_write", inputs={"path": "t.xlsx", "sheets": {"T": [[1]]}})),
+                 step(call("finish", answer="Done.", files=["t.xlsx"]))]
+        folder = git_folder({"sales.csv": "qty,price\n2,1.25\n"})
+        cfg = temp_config(**{"gap.judge": True, "gap.min_score": 99})    # the gap judges nothing; the model names it
+        agent = Agent(cfg, backend=fake_backend(steps), label="needinstalled", workspace=folder)
+        s = agent.run_task("Write t.xlsx.")
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertEqual(s["created"], [])
+        events = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
+        said = [e["text"] for e in events if e["kind"] == "tool_result" and e.get("name") == "need_tool"]
+        self.assertIn("Not built: xlsx_write is installed and does this", said[0])
+
     def test_a_rerun_that_writes_the_same_file_again_can_be_kept(self):
         steps = script()
         steps.insert(3, steps[2])               # the same script again: total.txt is unchanged in the folder

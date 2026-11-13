@@ -46,5 +46,14 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 2), "")   # gives way after 2 rejections
         a.invoked_ok.add("ini_to_json")
         self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0), "")
-        a.created.append({"name": "convert_ini", "version": 1})            # a second copy; one of them ran
+        a.created.append({"name": "convert_ini_json", "version": 1})       # a second copy; one of them ran
         self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0), "")
+        a.created.append({"name": "draw_bar_chart", "version": 1})         # a tool for another job must run too
+        self.assertIn("draw_bar_chart was built", a._check_finish({"answer": "done"}, {"outputs": []}, 0))
+
+    def test_a_folder_of_outputs_counts_as_written(self):
+        a = Agent(temp_config(), label="finish")
+        a.act("write_file", {"path": "thumbs/a.jpg", "content": "x"})
+        self.assertEqual(a._check_finish({"answer": "done", "files": ["thumbs/", "thumbs/a.jpg"]}, {"outputs": []}, 0), "")
+        os.makedirs(os.path.join(a.folder, "empty"))
+        self.assertIn("empty folder", a._check_finish({"answer": "done", "files": ["empty/"]}, {"outputs": []}, 0))
