@@ -111,6 +111,18 @@ class KeepTest(unittest.TestCase):
         said = [e["text"] for e in events if e["kind"] == "tool_result" and e.get("name") == "need_tool"]
         self.assertIn("Not built: xlsx_write is installed and does this", said[0])
 
+    def test_the_golden_test_takes_a_json_list_in_another_order(self):
+        import json as j
+        from mini.agent.creator import GOLDEN_TEST
+        code = GOLDEN_TEST[GOLDEN_TEST.index("def unordered"):GOLDEN_TEST.index("def test_does")]
+        ns = {"json": j}
+        exec(code, ns)
+        d = __import__("tempfile").mkdtemp()
+        path = os.path.join(d, "meta.json")
+        open(path, "w").write('[{"f": "b.jpg", "w": [2, 1]}, {"f": "a.jpg", "w": [1]}]')
+        self.assertTrue(ns["same"](path, b'[{"f": "a.jpg", "w": [1]}, {"f": "b.jpg", "w": [1, 2]}]'))
+        self.assertFalse(ns["same"](path, b'[{"f": "a.jpg", "w": [1]}, {"f": "c.jpg", "w": [1, 2]}]'))
+
     def test_a_rerun_that_writes_the_same_file_again_can_be_kept(self):
         steps = script()
         steps.insert(3, steps[2])               # the same script again: total.txt is unchanged in the folder

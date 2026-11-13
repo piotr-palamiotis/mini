@@ -357,8 +357,9 @@ Look only at the form of {file}: does it have exactly the form the task asks for
 an object, rows, columns; what each entry is; the names of fields and columns, their order, spacing, number format;
 for an image its format and pixel size, for an archive or workbook the files or sheets it holds)?
 Do not check whether the values are right, but an image's pixel size is its form: compare it with any size the
-task gives (a side of N pixels). Call `judge_form` with matches (true or false) and why: one short
-sentence naming what the task asks and what the file has."""
+task gives (a side of N pixels). What is shown above is all you get: judge the parts it shows, and do not answer
+false only because a part is not shown. Call `judge_form` with matches (true or false) and why: one short sentence
+naming what the task asks and what the file has."""
 
 BUILT = """
 Built for this task, installed and already tested: {names}. Do not rewrite its logic in run_code and do not call

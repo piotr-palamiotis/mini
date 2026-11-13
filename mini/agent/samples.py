@@ -82,6 +82,48 @@ def _jpeg(data):
     return size, dates
 
 
+def _cell(c, shared):
+    """A worksheet cell's value as text: a shared string, an inline string or the raw value."""
+    t, v = c.get("t"), next(iter(_all(c, "v")), None)
+    if t == "s" and v is not None and v.text and v.text.isdigit() and int(v.text) < len(shared):
+        return shared[int(v.text)]
+    if t == "inlineStr":
+        return "".join(x.text or "" for x in _all(c, "t"))
+    return "" if v is None or v.text is None else v.text
+
+
+def _all(el, name):
+    """Elements under el with this tag, with or without a namespace."""
+    return [e for e in el.iter() if e.tag.rsplit("}", 1)[-1] == name]
+
+
+def _sheets(z, names):
+    """Each sheet of a workbook: its name, row count and first row, e.g. 'east (11 rows; first: day, product, qty)'."""
+    import xml.etree.ElementTree as ET
+    wb = ET.fromstring(z.read("xl/workbook.xml"))
+    rels = {}
+    if "xl/_rels/workbook.xml.rels" in names:
+        for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels")):
+            target = r.get("Target") or ""
+            rels[r.get("Id")] = target.lstrip("/") if target.startswith("/") else "xl/" + target
+    shared = []
+    if "xl/sharedStrings.xml" in names:
+        shared = ["".join(x.text or "" for x in _all(si, "t"))
+                  for si in _all(ET.fromstring(z.read("xl/sharedStrings.xml")), "si")]
+    out = []
+    for sh in _all(wb, "sheet"):
+        name = sh.get("name") or "?"
+        rid = sh.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        path = rels.get(rid)
+        if not path or path not in names:
+            out.append(name)
+            continue
+        rows = _all(ET.fromstring(z.read(path)), "row")
+        first = ", ".join(_cell(c, shared) for c in _all(rows[0], "c"))[:200] if rows else ""
+        out.append(f"{name} ({len(rows)} rows" + (f"; first: {first})" if first else ")"))
+    return out
+
+
 def describe(full):
     """What a binary file is, read with the standard library: an image's format, size and EXIF dates; an archive's
     entries (a workbook's sheets). "" when it is none of these."""
@@ -104,11 +146,10 @@ def describe(full):
             with zipfile.ZipFile(full) as z:
                 names = z.namelist()
                 if "xl/workbook.xml" in names:
-                    sheets = re.findall(r'<sheet\b[^>]*\bname="([^"]*)"', z.read("xl/workbook.xml").decode("utf-8", "replace"))
-                    return f"Excel workbook, sheets: {', '.join(sheets)}"
+                    return "Excel workbook, sheets: " + "; ".join(_sheets(z, names))
             shown = ", ".join(names[:30]) + (f", ... ({len(names)} entries)" if len(names) > 30 else "")
             return f"zip archive holding: {shown}"
-    except (OSError, struct.error, zipfile.BadZipFile, KeyError, ValueError):
+    except (OSError, struct.error, zipfile.BadZipFile, KeyError, ValueError, SyntaxError):
         pass
     return ""
 

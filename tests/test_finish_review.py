@@ -173,7 +173,7 @@ class DescribeTest(unittest.TestCase):
         self.assertIn("JPEG image, 256x170, EXIF DateTimeOriginal 2026:01:10 12:30:00; EXIF DateTime 2026:01:10",
                       samples.head(d, "t.jpg"))
         self.assertIn("zip archive holding: meta.json, thumbs/a.jpg", samples.head(d, "b.zip"))
-        self.assertIn("Excel workbook, sheets: Totals, east", samples.head(d, "r.xlsx"))
+        self.assertIn("Excel workbook, sheets: Totals; east", samples.head(d, "r.xlsx"))
         open(os.path.join(d, "x.bin"), "wb").write(b"\0\1\2")
         self.assertEqual(samples.head(d, "x.bin"), "x.bin (3 bytes, binary)")
 

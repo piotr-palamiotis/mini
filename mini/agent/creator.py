@@ -67,6 +67,16 @@ class Answers(ScriptedIO):
             raise
 
 
+def unordered(v):
+    """JSON with every list's items in one fixed order: a script that listed a folder wrote them in the order the
+    folder gave, which another run need not repeat."""
+    if isinstance(v, dict):
+        return {k: unordered(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return sorted((unordered(x) for x in v), key=lambda x: json.dumps(x, sort_keys=True))
+    return v
+
+
 def same(path, want):
     got = open(path, "rb").read()
     if got == want:
@@ -77,7 +87,7 @@ def same(path, want):
         return got[:4] == want[:4] and 0.5 * len(want) <= len(got) <= 2 * len(want) + 64
     if path.endswith(".json"):
         try:
-            return json.loads(g) == json.loads(w)
+            return unordered(json.loads(g)) == unordered(json.loads(w))
         except ValueError:
             return False
     norm = lambda t: [ln.rstrip() for ln in t.replace("\\r\\n", "\\n").strip().split("\\n")]
@@ -873,7 +883,7 @@ class Creator:
                 guard = a.wd.on_call(name, args)
                 if guard == "block":
                     if a.wd.call_streak >= 3 * a.wd.w["identical_call_repeat"]:
-                        raise AgentStop(f"stuck repeating {name} with the same arguments")
+                        raise ModelGaveUp(f"stuck repeating {name} with the same arguments while building the tool")
                     t.result(name, f"BLOCKED: you made this exact call {a.wd.call_streak} times in a row, and it gave: "
                                    f"{trim(a.wd.last_text, 300)}\nIt will not run again. Change the arguments or use "
                                    "a different tool.")
