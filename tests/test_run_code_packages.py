@@ -60,6 +60,8 @@ class RunCodePackagesTest(unittest.TestCase):
         args, problem = validate(run_code.SCHEMA, {'packages={"pip"': {'"pip"': ["toml"]}})
         self.assertEqual(problem, "")
         self.assertEqual(args, {"packages": {'"pip"': ["toml"]}})
+        args, problem = validate(run_code.SCHEMA, {'packages={"pip"': ["matplotlib", "openpyxl"]})   # reg1 sales
+        self.assertEqual((args, problem), ({"packages": {"pip": ["matplotlib", "openpyxl"]}}, ""))
         self.assertIn("unknown argument", validate(run_code.SCHEMA, {"pkgs": {}})[1])
 
     def test_the_headless_build_replaces_the_other_one(self):

@@ -60,7 +60,12 @@ def validate(schema, args):
     fixed = {}
     for k, v in args.items():                     # a garbled key that starts with a parameter: packages={"pip"
         m = re.match(r"\W*(\w+)", str(k))
-        fixed[m.group(1) if k not in props and m and m.group(1) in props and m.group(1) not in args else k] = v
+        if k not in props and m and m.group(1) in props and m.group(1) not in args:
+            inner = re.match(r"\W*\w+\W*\{\W*(\w+)\W*$", str(k))   # the key also opened an object: {"pip": v}
+            if inner and props[m.group(1)].get("type") == "object" and not isinstance(v, dict):
+                v = {inner.group(1): v}
+            k = m.group(1)
+        fixed[k] = v
     args = fixed
     unknown = [k for k in args if k not in props]
     if unknown:
