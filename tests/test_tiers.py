@@ -151,6 +151,23 @@ class OpenAIBodyTest(unittest.TestCase):
             out = b.chat("m", [{"role": "user", "content": "hi"}], [], think=False, options=options)
         return sent, out
 
+    def test_a_restarting_server_is_waited_for(self):
+        import urllib.error
+        from mini.harness import backends
+        tries = []
+        def fake_urlopen(req, timeout):             # slip6: llama-server OOM-killed, systemd brought it back
+            tries.append(1)
+            if len(tries) < 3:
+                raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+            return io.BytesIO(b'data: {"choices":[{"delta":{"content":"c"},"finish_reason":"stop"}]}\ndata: [DONE]\n')
+        b = OpenAIBackend(Endpoint("openai", "http://x/v1"))
+        with mock.patch("urllib.request.urlopen", fake_urlopen), mock.patch.object(backends, "RESTART_POLL_S", 0):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [])
+        self.assertEqual((len(tries), out["raw_error"], out["content"]), (3, None, "c"))
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError(ConnectionRefusedError())), \
+                mock.patch.object(backends, "RESTART_POLL_S", 0), mock.patch.object(backends, "RESTART_WAIT_S", 0):
+            self.assertIn("unreachable", b.chat("m", [{"role": "user", "content": "hi"}], [])["raw_error"])
+
     def test_llama_server_gets_thinking_controls(self):
         sent, out = self.body()
         self.assertEqual(sent["chat_template_kwargs"], {"enable_thinking": False})

@@ -14,6 +14,9 @@ import time
 import urllib.error
 import urllib.request
 
+RESTART_WAIT_S = 180         # how long a refused connection or a 503 (model loading) is retried
+RESTART_POLL_S = 5
+
 MAX_OUTPUT_TOKENS = 8192     # hard cap per reply; protects against runaway generation inside a tool call
 REPLY_TIMEOUT_S = 300        # no data for this long ends the reply (tool calls are not streamed while being written)
 COMMENT_SHARE = 0.5           # a reply this much comment lines (past comment_cut_chars) is reasoning written as code
@@ -111,6 +114,13 @@ class OpenAIBackend(Backend):
                 out.append({"role": m["role"], "content": m.get("content", "")})
         return out
 
+    @staticmethod
+    def _pause(stop_event):
+        if stop_event is not None:
+            stop_event.wait(RESTART_POLL_S)
+        else:
+            time.sleep(RESTART_POLL_S)
+
     def chat(self, model, messages, tools, think=False, options=None, on_delta=None, stop_event=None):
         opts = {**self.ep.options, **(options or {})}
         body = {"model": model, "messages": self._convert(messages), "stream": True,
@@ -135,17 +145,26 @@ class OpenAIBackend(Backend):
                "prompt_tokens": 0, "output_tokens": 0, "secs": 0.0, "raw_error": None, "stopped": False}
         calls = {}
         t0 = time.time()
-        try:
-            r = urllib.request.urlopen(req, timeout=self.ep.timeout_s)
-        except urllib.error.HTTPError as e:
-            out["raw_error"] = f"HTTP {e.code}: {e.read()[:300]!r}"
-            return out
-        except urllib.error.URLError as e:
-            out["raw_error"] = f"unreachable: {e.reason}"
-            return out
-        except (socket.timeout, TimeoutError):
-            out.update(done_reason="timeout", secs=round(time.time() - t0, 2))
-            return out
+        while True:          # a server that restarts (OOM kill, model load) is waited for, not read as a bad reply
+            try:
+                r = urllib.request.urlopen(req, timeout=self.ep.timeout_s)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 503 and time.time() - t0 < RESTART_WAIT_S:
+                    self._pause(stop_event)
+                    continue
+                out["raw_error"] = f"HTTP {e.code}: {e.read()[:300]!r}"
+                return out
+            except urllib.error.URLError as e:
+                if isinstance(e.reason, (ConnectionRefusedError, ConnectionResetError)) and \
+                        time.time() - t0 < RESTART_WAIT_S and not (stop_event is not None and stop_event.is_set()):
+                    self._pause(stop_event)
+                    continue
+                out["raw_error"] = f"unreachable: {e.reason}"
+                return out
+            except (socket.timeout, TimeoutError):
+                out.update(done_reason="timeout", secs=round(time.time() - t0, 2))
+                return out
         try:
             for raw in r:
                 if stop_event is not None and stop_event.is_set():
