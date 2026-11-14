@@ -859,8 +859,11 @@ class Agent:
         if not key:
             return {"matches": True, "why": ""}
         cache = self.__dict__.setdefault("judge_seen", {})
-        if key not in cache:
-            cache[key] = self._judge_form(task, f)
+        if key not in cache:                    # a "yes" is asked again: any "no" refuses the file
+            for _ in range(max(1, int((self.cfg.get("finish") or {}).get("judge_votes", 2)))):
+                cache[key] = self._judge_form(task, f)
+                if not cache[key]["matches"]:
+                    break
         return cache[key]
 
     def _review_outputs(self, task, checks, rounds):
