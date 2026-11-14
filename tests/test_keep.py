@@ -202,6 +202,8 @@ class CommandScriptTest(unittest.TestCase):
         got = _script_of(["python3", "calc.py", "a.json"], box)
         self.assertTrue(got.startswith("# run as: python3 calc.py a.json\n") and got.endswith("print(1)\n"))
         self.assertIsNone(_script_of(["wc", "-l", "a.txt"], box))
+        self.assertEqual(_script_of(["python3", "-c", "print(1)"], box), "print(1)\n")    # code on the command line
+        self.assertIsNone(_script_of(["python3", "-c", "import sys; print(sys.argv)", "x"], box))
 
     def test_a_task_that_asks_for_a_tool(self):
         from mini.agent.core import ASKS_FOR_TOOL

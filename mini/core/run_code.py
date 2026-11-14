@@ -337,7 +337,10 @@ def _apt_note(err):
 
 
 def _script_of(argv, box):
-    """The source of a .py file that argv runs with python (in the sandbox folder), with the arguments noted."""
+    """The source of a .py file that argv runs with python (in the sandbox folder), with the arguments noted; or the
+    code of python -c "code" (with no arguments after it), which is a script given on the command line."""
+    if len(argv) == 3 and os.path.basename(argv[0]).startswith("python") and argv[1] == "-c" and argv[2].strip():
+        return argv[2].rstrip() + "\n"
     if len(argv) >= 2 and os.path.basename(argv[0]).startswith("python") and argv[1].endswith(".py"):
         p = os.path.join(box, argv[1].replace("/work/", "", 1).lstrip("/"))
         if os.path.isfile(p):

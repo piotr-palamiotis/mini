@@ -653,8 +653,9 @@ class Agent:
         once on the user's files with the example inputs (it writes what the script wrote, so nothing changes)."""
         s = self.last_script or {}
         if not (s.get("ok") and s.get("script") and s.get("record")):
-            return ("Nothing to keep: keep_tool keeps the last run_code script that ran without an error (a script, "
-                    "not a command). Do the work with run_code first.")
+            return ("Nothing to keep: keep_tool keeps the last run_code run, and it must be a Python script (script, "
+                    "`python file.py` or `python -c code`) that ran without an error. Run the script that does this "
+                    "step with run_code again, then call keep_tool.")
         same = [n for n in self.built_names if self._same_need(n, what)]
         if same and not getattr(self, "keep_reminded", False):
             self.keep_reminded = True               # once: a tool made for this task already does it
