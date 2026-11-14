@@ -130,6 +130,18 @@ class FinishReviewTest(unittest.TestCase):
         self.assertEqual(s["status"], "success", s["error"])
         self.assertEqual(len(reviews), 3)
 
+    def test_out_of_rounds_a_file_the_judge_refused_and_nothing_changed_is_named_as_unchanged(self):
+        judge = lambda ok, why: step(call("judge_form", matches=ok, why=why))
+        again = lambda n: step(call("finish", answer=f"Done ({n}).", files=["names.json"], checks=OK))
+        fix = [finish(OK), judge(False, "the task asks for strings; the file has objects."), again(2), again(3),
+               again(4), step(call("write_file", path="names.json", content='["x"]\n')), again(5),
+               judge(True, "a list of strings.")]
+        s, folder, results, reviews = self.run_task(steps(*fix), **{"finish.judge": True})
+        self.assertEqual(s["status"], "success", s["error"])
+        self.assertIn("Fix it, then finish.", results[3])
+        self.assertIn("It is unchanged since that was found", results[4])
+        self.assertEqual(len(reviews), 5)
+
     def test_off_in_config_means_no_review(self):
         folder = git_folder({"a.txt": "x\n"})
         agent = Agent(temp_config(), backend=fake_backend(steps()), label="review", workspace=folder)

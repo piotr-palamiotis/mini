@@ -847,11 +847,16 @@ class Agent:
             groups.setdefault((d, ext) if d else (f, None), []).append(f)
         return [(f"{d}/*{ext}" if ext is not None and len(m) > 1 else m[0], m) for (d, ext), m in groups.items()]
 
+    def _judge_key(self, f):
+        try:
+            return f, hashlib.sha256(open(os.path.join(self.folder, f), "rb").read()).hexdigest()
+        except OSError:
+            return None
+
     def _judged(self, task, f):
         """The fresh judge's verdict on a text file, asked once per content of the file."""
-        try:
-            key = (f, hashlib.sha256(open(os.path.join(self.folder, f), "rb").read()).hexdigest())
-        except OSError:
+        key = self._judge_key(f)
+        if not key:
             return {"matches": True, "why": ""}
         cache = self.__dict__.setdefault("judge_seen", {})
         if key not in cache:
@@ -871,13 +876,25 @@ class Agent:
                                                       bool(samples.describe(os.path.join(self.folder, f))))
         n = fin.get("review_max_files", 8)
         units = self._units(files)[:n]
-        if rounds >= 4:
+        if rounds >= 6:
             return ""
-        if rounds == 3:                         # out of rounds: still no text file ends unjudged (once more at most)
-            gaps = [g for _, m in units for g in [self._form_gap(task, m)] if g]
-            bad = [(m[0], self._judged(task, m[0])) for _, m in units if judge(m[0])]
-            return "\n".join(gaps + [f"{f} does not have the form the task asks for: {v['why']} Fix it, then finish."
-                                      for f, v in bad if not v["matches"]])
+        if rounds >= 3:                         # out of rounds: no file ends unjudged, nor as the judge last refused it
+            gaps = [g for _, m in units for g in [self._form_gap(task, m)] if g] if rounds == 3 else []
+            seen = set(self.__dict__.get("judge_seen") or {})
+            out = []
+            for _, m in units:
+                f = m[0]
+                if not judge(f):
+                    continue
+                v = self._judged(task, f)
+                if v["matches"]:
+                    continue
+                same = rounds > 3 and self._judge_key(f) in seen      # refused before, in this very content
+                out.append(f"{f} does not have the form the task asks for: {v['why']} " + (
+                    "It is unchanged since that was found: running the same step again writes the same file. If a "
+                    "tool made it, call report_tool_bug with that tool's name and this problem, or redo the step with "
+                    "run_code, then finish." if same else "Fix it, then finish."))
+            return "\n".join(gaps + out)
         if rounds == 0 or not isinstance(checks, list) or not checks:
             heads = [samples.head(self.folder, m[0]) + (f"\n({label}: {len(m)} files like this one)" if len(m) > 1 else "")
                      for label, m in units]
@@ -940,8 +957,9 @@ class Agent:
         """One fresh question, apart from the work that made the file: the task and the file's head, does the file
         have the form the task asks for it? An unclear answer counts as a match (the agent's own checks passed)."""
         msgs = [{"role": "system", "content": prompts.SYSTEM},
-                {"role": "user", "content": prompts.JUDGE_FORM.format(task=trim(task, 2000), file=rel,
-                                                                      head=samples.head(self.folder, rel))}]
+                {"role": "user", "content": prompts.JUDGE_FORM.format(
+                    task=trim(task, 2000), file=rel, head=samples.head(self.folder, rel),
+                    partial="" if samples.is_text(os.path.join(self.folder, rel)) else prompts.JUDGE_PARTIAL)}]
         t = Turns(self, "review", msgs, [T_FORM], think_tokens=GAP_THINK_TOKENS)
         for _ in range(2):
             c = next((c for c in t.ask()["tool_calls"] if c["name"] == "judge_form"), None)

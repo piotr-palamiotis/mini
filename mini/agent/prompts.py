@@ -357,9 +357,13 @@ Look only at the form of {file}: does it have exactly the form the task asks for
 an object, rows, columns; what each entry is; the names of fields and columns, their order, spacing, number format;
 for an image its format and pixel size, for an archive or workbook the files or sheets it holds)?
 Do not check whether the values are right, but an image's pixel size is its form: compare it with any size the
-task gives (a side of N pixels). What is shown above is all you get: judge the parts it shows, and do not answer
-false only because a part is not shown. Call `judge_form` with matches (true or false) and why: one short sentence
+task gives (a side of N pixels).{partial} Call `judge_form` with matches (true or false) and why: one short sentence
 naming what the task asks and what the file has."""
+
+# Only for a binary file, where the judge sees a description (sheets and their first rows), not the whole content: on
+# text files it made the judge pass a list of objects where the task asks for a list of texts (12/21 vs 16/21 caught).
+JUDGE_PARTIAL = (" What is shown above is all you get: judge the parts it shows, and do not answer false only because "
+                 "a part is not shown.")
 
 BUILT = """
 Built for this task, installed and already tested: {names}. Do not rewrite its logic in run_code and do not call
