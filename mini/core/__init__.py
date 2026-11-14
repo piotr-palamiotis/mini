@@ -57,14 +57,20 @@ def validate(schema, args):
     if not isinstance(args, dict):
         return args, "the arguments must be an object"
     props, out, problems = schema.get("properties") or {}, {}, []
-    fixed = {}
+    fixed, opened = {}, None
     for k, v in args.items():                     # a garbled key that starts with a parameter: packages={"pip"
         m = re.match(r"\W*(\w+)", str(k))
         if k not in props and m and m.group(1) in props and m.group(1) not in args:
             inner = re.match(r"\W*\w+\W*\{\W*(\w+)\W*$", str(k))   # the key also opened an object: {"pip": v}
-            if inner and props[m.group(1)].get("type") == "object" and not isinstance(v, dict):
-                v = {inner.group(1): v}
+            if inner and props[m.group(1)].get("type") == "object":
+                bare = lambda x: str(x).strip().strip("'\"").strip()
+                if not (isinstance(v, dict) and inner.group(1) in map(bare, v)):     # not already {"pip": ...}
+                    v = {inner.group(1): v}
+                opened = m.group(1)
             k = m.group(1)
+        elif k not in props and opened and m and m.group(1) not in props and re.fullmatch(r"\W*\w+\W*", str(k)):
+            fixed[opened][m.group(1)] = v         # the next key of that object, split off: '"apt"': []
+            continue
         fixed[k] = v
     args = fixed
     unknown = [k for k in args if k not in props]

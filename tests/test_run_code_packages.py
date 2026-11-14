@@ -64,6 +64,20 @@ class RunCodePackagesTest(unittest.TestCase):
         self.assertEqual((args, problem), ({"packages": {"pip": ["matplotlib", "openpyxl"]}}, ""))
         self.assertIn("unknown argument", validate(run_code.SCHEMA, {"pkgs": {}})[1])
 
+    def test_slip5_garbled_packages_calls_are_read_as_names(self):
+        from mini.core import validate
+        args, problem = validate(run_code.SCHEMA, {'packages={"pip"': {'"matplotlib"': [], '"pandas"': []}, '"apt"': []})
+        self.assertEqual((args, problem), ({"packages": {"pip": {'"matplotlib"': [], '"pandas"': []}, "apt": []}}, ""))
+        self.assertEqual(run_code._names(args["packages"]["pip"]), ["matplotlib", "pandas"])
+        self.assertEqual(run_code._names([{'"name"': {'"pandas"': []}}, {'"name"': "xlsxwriter"}]), ["pandas", "xlsxwriter"])
+        self.assertEqual(run_code._names('["pandas", "xlsxwriter"]'), ["pandas", "xlsxwriter"])
+
+    def test_packages_without_a_script_or_command_says_what_is_missing(self):
+        a = self.agent()
+        text = run_code.run(types.SimpleNamespace(agent=a, content=""), {"packages": {"pip": ["pandas"]}})
+        self.assertIn("no script and no command", text)
+        self.assertNotIn("not both", text)
+
     def test_the_headless_build_replaces_the_other_one(self):
         a = self.agent()
         with mock.patch.object(a.sandbox, "ensure_image", return_value="x"):

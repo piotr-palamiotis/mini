@@ -279,10 +279,18 @@ def _names(v):
         return []
     if isinstance(v, dict):
         v = list(v)
+    if isinstance(v, str) and v.strip().startswith("["):     # a JSON list sent as a string: '["pandas", "numpy"]'
+        try:
+            v = json.loads(v)
+        except ValueError:
+            pass
     if not isinstance(v, list):
         v = [v]
     out = []
     for x in v:
+        if isinstance(x, dict) and len(x) == 1 and str(next(iter(x))).strip().strip("'\"").strip() == "name":
+            out += _names(next(iter(x.values())))           # [{"name": "pandas"}], garbled to {'"name"': {'"pandas"': []}}
+            continue
         out += [str(y).strip().strip("'\"").strip() for y in (list(x) if isinstance(x, dict) else [x])]
     return [x for x in out if x]
 
@@ -374,8 +382,11 @@ def run(call, args):
     script = args.get("script")
     if not script and "```" in call.content:
         script = codeblocks.single(call.content, "script.py")[0]
-    if bool(script) == bool(args.get("command")):
+    if script and args.get("command"):
         return "Give a script (a fenced python block in the reply) or a command (argv), not both."
+    if not script and not args.get("command"):    # packages alone: the model meant to install and run nothing yet
+        return ("Not run: no script and no command. run_code installs packages only for the code it runs: send the "
+                "script in `script` (or as a fenced python block in the reply) together with `packages`.")
     argv = repair_argv(list(args.get("command") or ["python", "/work/" + SCRIPT]))
     try:
         a.sandbox.check_argv(argv)
@@ -407,6 +418,14 @@ def run(call, args):
         items, refused = ws.changes(a.folder, box)
         after = _stamps(box)            # what it wrote, even when that equals the folder's file (a rerun)
         touched = sorted(r for r, st in after.items() if before.get(r) != st)
+        inputs = getattr(a, "task_inputs", None) or set()
+        guarded = sorted(r for r in touched if os.path.normpath(r) in inputs)
+        if guarded:                     # a test script that wrote its own schema.json over the user's
+            a.log.emit("watchdog", name="input_protected", paths=guarded, by=NAME)
+            items = [x for x in items if x[0] not in guarded]
+            touched = [r for r in touched if r not in guarded]
+            refused = refused + [(r, "an input of this task, it stays as the user gave it: a sample of your own "
+                                     "needs another name") for r in guarded]
         if record:
             for rel in touched:
                 os.makedirs(os.path.dirname(os.path.join(record, "out", rel)), exist_ok=True)

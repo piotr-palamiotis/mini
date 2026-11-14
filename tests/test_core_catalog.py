@@ -215,11 +215,25 @@ class RunCodeTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, ".mini", "script.py")))
         self.assertTrue(self.a.last_script["ok"])
 
+    def test_a_script_does_not_write_over_an_input_of_the_task(self):
+        self.a.task_inputs = {"data.txt"}
+
+        def fake_run(argv, box, **kw):            # slip5 config_migrate: a test script wrote its own schema.json
+            open(os.path.join(box, "data.txt"), "w").write("9\n")
+            open(os.path.join(box, "sum.txt"), "w").write("9\n")
+            return {"exit_code": 0, "output": "ok\n"}
+        with mock.patch.object(Sandbox, "run", side_effect=fake_run):
+            text, _ = self.a.act("run_code", {"files": ["data.txt"]}, "Go.\n```python\nprint(1)\n```\n")
+        self.assertEqual(open(os.path.join(self.root, "data.txt")).read(), "3\n4\n")
+        self.assertIn("Files written to the folder: sum.txt", text)
+        self.assertIn("Not written: data.txt (an input of this task", text)
+        self.assertEqual(self.a.last_script["written"], ["sum.txt"])
+
     def test_a_command_is_checked_against_the_allowlist(self):
         with mock.patch.object(Sandbox, "run", return_value={"exit_code": 1, "output": "boom"}) as run:
             self.assertIn("exit 1", self.a.act("run_code", {"command": ["wc", "-l", "data.txt"], "files": ["data.txt"]})[0])
             self.assertIn("not on the sandbox command allowlist", self.a.act("run_code", {"command": ["rm", "-rf", "/"]})[0])
-            self.assertIn("not both", self.a.act("run_code", {})[0])
+            self.assertIn("no script and no command", self.a.act("run_code", {})[0])
         self.assertEqual(run.call_count, 1)
 
     def test_promoting_a_script_hands_it_to_the_creator(self):
