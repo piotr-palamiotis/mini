@@ -13,9 +13,13 @@ from ..harness.settings import MissingSetting
 
 NAME = "invoke_tool"
 DESCRIPTION = ("Run an installed tool in the sandbox. inputs follow its input schema; pass every input you already "
-               "know, the tool asks the user only for what is missing and saved settings are filled in.")
-SCHEMA = {"type": "object", "required": ["name", "inputs"], "properties": {
-    "name": {"type": "string"}, "inputs": {"type": "object"}}}
+               "know, the tool asks the user only for what is missing and saved settings are filled in. Long data a "
+               "script made (many rows) is not copied by hand: the script writes the inputs object as JSON to "
+               ".mini/data/NAME.json and inputs_file names it.")
+SCHEMA = {"type": "object", "required": ["name"], "properties": {
+    "name": {"type": "string"}, "inputs": {"type": "object"},
+    "inputs_file": {"type": "string", "description": "NAME.json a run_code script saved to .mini/data/: the inputs "
+                    "object; keys in inputs are added over it"}}}
 COVERS = ("invoke tool", "run tool", "call tool", "use tool")
 
 
@@ -49,13 +53,35 @@ def _fitting(a, inputs, other_than):
     return sorted(out, key=lambda t: (t not in built, t))
 
 
+def _from_file(a, ref):
+    """The inputs object a run_code script saved to .mini/data/ (in this run's folder), or (None, why not)."""
+    base = os.path.basename(str(ref).replace("\\", "/"))
+    p = os.path.join(a.run_dir, "data", base)
+    if not os.path.isfile(p):
+        have = sorted(os.listdir(os.path.join(a.run_dir, "data"))) if os.path.isdir(os.path.join(a.run_dir, "data")) else []
+        return None, (f"No saved data named {base!r}" + (f" (saved: {', '.join(have)})" if have else "")
+                      + ": a run_code script must write it to .mini/data/" + base + " first.")
+    try:
+        v = json.load(open(p))
+    except ValueError as e:
+        return None, f"{base} is not valid JSON: {e}"
+    if not isinstance(v, dict):
+        return None, f"{base} holds a {type(v).__name__}; it must be the tool's inputs object (input name -> value)."
+    return v, ""
+
+
 def run(call, args):
     a, name = call.agent, args["name"]
     m = a.registry.get(name)
     if not m:
         hint = f" {name} is a core capability: call it directly." if name in a.core else ""
         return f"No installed tool named {name!r}.{hint} Installed: {', '.join(a.registry.names()) or '(none)'}"
-    inputs = args["inputs"]
+    inputs = dict(args.get("inputs") or {})
+    if args.get("inputs_file"):
+        saved, why = _from_file(a, args["inputs_file"])
+        if saved is None:
+            return f"{name} was not run: {why}"
+        inputs = {**saved, **inputs}
     req = [k for k in ((m.get("input_schema") or {}).get("required") or []) if k not in inputs]
     if req:
         hint = ""

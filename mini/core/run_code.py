@@ -36,6 +36,8 @@ SCHEMA = {"type": "object", "required": [], "properties": {
     "packages": {"type": "object", "properties": {"pip": ARR, "apt": ARR},
                  "description": "packages this run needs beyond the standard library"}}}
 COVERS = ("run script", "run code", "run command", "execute script", "execute code", "run python")
+DATA = ws.META + "/data"                          # JSON a script saves for invoke_tool's inputs_file; kept per run
+BIG_JSON = 1500                                   # printed JSON this long is not to be copied into a tool call by hand
 RECORD_MAX = 50 * 2**20                           # a run's inputs are kept for keep_tool up to this size
 
 
@@ -356,6 +358,49 @@ def _script_of(argv, box):
     return None
 
 
+ARGV_IDLE = ("The script reads its inputs from sys.argv, and run_code gives it none: it printed its usage and did no "
+             "work. Put the real values (the task's file paths, texts, numbers) in the script itself, without sys.argv, "
+             "and run it again; keep_tool turns those values into the tool's inputs.")
+
+
+def argv_idle(script, output, written):
+    """A command-line script run with no arguments: it reads sys.argv, wrote nothing, printed only its usage (or
+    nothing). Such a run did none of the task's work, so there is nothing to keep from it."""
+    if not script or "sys.argv" not in script or written:
+        return False
+    out = (output or "").strip()
+    return not out or bool(re.match(r"(?i)usage\b", out))
+
+
+def _keep_data(a, box):
+    """JSON files the script wrote to .mini/data/: kept in the run folder, where invoke_tool's inputs_file reads them."""
+    src = os.path.join(box, DATA)
+    if not os.path.isdir(src):
+        return []
+    dst = os.path.join(a.run_dir, "data")
+    os.makedirs(dst, exist_ok=True)
+    out = []
+    for f in sorted(os.listdir(src)):
+        p = os.path.join(src, f)
+        if f.endswith(".json") and os.path.isfile(p) and not os.path.islink(p):
+            shutil.copyfile(p, os.path.join(dst, f))
+            out.append(f)
+    return out
+
+
+def _big_json(output):
+    """Whether the output prints a JSON object or list long enough that copying it by hand goes wrong."""
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"^[\[{]", output, re.M):
+        try:
+            v, end = dec.raw_decode(output, m.start())
+        except ValueError:
+            continue
+        if end - m.start() >= BIG_JSON and isinstance(v, (dict, list)):
+            return True
+    return False
+
+
 def _stamps(box):
     """(mtime, size) of every file in the sandbox folder but mini's own, by relative path."""
     out = {}
@@ -398,14 +443,14 @@ def run(call, args):
     a.calls += 1
     box = os.path.join(a.run_dir, "calls", f"{a.calls:03d}-{NAME}")
     os.makedirs(box)
-    record, touched, hidden, same = None, [], [], []
+    record, touched, hidden, same, saved = None, [], [], [], []
     try:
         names = list(args.get("files") or [])
         if not names and small_project(a.folder):
             names = ["."]                         # a small model often forgets files; the sandbox must not start empty
         ws.copy_in(a.folder, box, names, outside=a.attachments)
+        os.makedirs(os.path.join(box, DATA), exist_ok=True)     # ready for a script that saves inputs_file data
         if script:
-            os.makedirs(os.path.join(box, ws.META), exist_ok=True)
             open(os.path.join(box, SCRIPT), "w").write(script)
         if not script:                            # python path/to/x.py args: the file is the script
             ran = _script_of(argv, box)
@@ -430,6 +475,7 @@ def run(call, args):
             for rel in touched:
                 os.makedirs(os.path.dirname(os.path.join(record, "out", rel)), exist_ok=True)
                 shutil.copyfile(os.path.join(box, rel), os.path.join(record, "out", rel))
+        saved = _keep_data(a, box)
         made = ws.new_dirs(a.folder, box)
         written = a._change([rel for rel, _ in items], lambda: ws.export(a.folder, items)) if items else []
         made = ws.make_dirs(a.folder, made)
@@ -455,6 +501,13 @@ def run(call, args):
                  "prints what it finds, and writes the file it should produce.")
     if refused:
         text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
+    if saved:
+        text += ("\nSaved for invoke_tool: " + ", ".join(saved) + " (call invoke_tool with inputs_file set to that "
+                 "name; inputs adds or overrides single keys).")
+    elif ok and _big_json(res["output"]):
+        text += ("\nTo hand this data to a tool, do not copy it into the call: rows get dropped or mixed. Have the "
+                 f"script write the tool's inputs object as JSON to {DATA}/NAME.json and call invoke_tool with "
+                 "inputs_file NAME.json.")
     missing = re.search(r"No module named '([\w.]+)'", res["output"]) if not ok else None
     if missing:
         text += _module_hint(a, missing.group(1))
@@ -464,7 +517,9 @@ def run(call, args):
     text += _same_note(a, same, written)
     if script:
         text += _kept_note(a, script, touched)
-    if ok and script and record:
+    if ok and argv_idle(script, res["output"], touched):
+        text += "\n" + ARGV_IDLE
+    elif ok and script and record:
         text += ("\nIf this script is worth keeping for later tasks, call `keep_tool`: it becomes a tool, tested on this "
                  "run.")
     return text
