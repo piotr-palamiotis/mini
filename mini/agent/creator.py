@@ -226,13 +226,13 @@ class Creator:
         if made_inputs:                 # the script made its own sample input: for the test it is input, not result
             a.log.emit("info", text="kept tool's test gets the inputs the script made: " + ", ".join(made_inputs))
         keep_out = [o for o in plan.get("outputs") or [] if o not in made_inputs]
-        if keep_out:                    # scratch files the script wrote are not what the tool makes
+        if plan.get("outputs") is not None:    # scratch files and samples the script wrote are not what the tool makes
             out_dir = os.path.join(golden, "out")
             for d, _, fs in os.walk(out_dir):
                 for f in fs:
                     if os.path.relpath(os.path.join(d, f), out_dir) not in keep_out:
                         os.remove(os.path.join(d, f))
-            a.log.emit("info", text="kept tool's test checks: " + ", ".join(keep_out))
+            a.log.emit("info", text="kept tool's test checks: " + (", ".join(keep_out) or "its result only, no file"))
         spec = {"name": plan["name"], "description": plan["description"], "input_schema": plan["input_schema"],
                 "output_schema": plan.get("output_schema") or {"type": "object", "properties": {}},
                 "settings": [], "interaction": [], "ui": {}, "edge_cases": [],
@@ -289,7 +289,8 @@ class Creator:
         if outs is not None:
             outs = [os.path.normpath(str(o)) for o in outs] if isinstance(outs, list) else None
             named = {os.path.normpath(v) for v in _strings(ex) if v}
-            results = [w for w in wrote if os.path.normpath(w) not in named]   # a file the example gives is a sample
+            results = [w for w in wrote if os.path.normpath(w) not in named   # a file the example gives is a sample,
+                       and not _reread(w, script)]                          # and so is one the script wrote, then used
             if outs is None or (results and not outs) or any(o not in wrote for o in outs):
                 return (f"outputs must list the files the tool makes, from the files the script wrote: "
                         f"{', '.join(wrote) or '(none)'}" + (f" (a sample the script made for the tool to read, "
@@ -1224,6 +1225,12 @@ def _strings(v):
     if isinstance(v, dict):
         return [s for x in v.values() for s in _strings(x)]
     return []
+
+
+def _reread(path, script):
+    """The script names this file it wrote more than once: it wrote a sample, then worked on it (a test script that
+    makes test_invalid.yaml and validates it). Such a file is not a result the tool must make."""
+    return bool(script) and script.count(os.path.basename(path)) >= 2
 
 
 def _self_made_inputs(example, golden, outputs):

@@ -24,7 +24,7 @@ from .creator import _content_words, Creator, ToolFailed, trim
 from .turns import AgentStop, ModelGaveUp, RestartRequested, Turns, fn
 from ..core import Call, load as load_catalog
 from ..core._tools import describe_tool
-from ..core.run_code import job_of
+from ..core.run_code import ARGV_IDLE, argv_idle, job_of
 from ..harness import checkpoint as ckpt, gates, hwmon, journal, workspace as ws
 from ..harness.approvals import ApprovalGate
 from ..harness.backends import Endpoint, has_model, make_backend
@@ -656,6 +656,9 @@ class Agent:
             return ("Nothing to keep: keep_tool keeps the last run_code run, and it must be a Python script (script, "
                     "`python file.py` or `python -c code`) that ran without an error. Run the script that does this "
                     "step with run_code again, then call keep_tool.")
+        if argv_idle(s.get("script"), s.get("output"), s.get("written")):
+            self.log.emit("watchdog", name="keep_argv_idle", what=what[:200])
+            return "Nothing to keep: " + ARGV_IDLE
         same = [n for n in self.built_names if self._same_need(n, what)]
         if same and not getattr(self, "keep_reminded", False):
             self.keep_reminded = True               # once: a tool made for this task already does it

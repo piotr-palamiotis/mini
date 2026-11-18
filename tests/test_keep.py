@@ -165,6 +165,18 @@ class PlanRedoesTheRunTest(unittest.TestCase):
         self.assertIn("result.txt", err)
         self.assertIn("is an input", err)
 
+    def test_a_second_sample_the_script_wrote_and_used_is_not_an_output(self):
+        from mini.agent.creator import Creator
+        script = ("json.dump(S, open('test_schema.json','w'))\nyaml.dump(G, open('test_valid.yaml','w'))\n"
+                  "yaml.dump(B, open('test_invalid.yaml','w'))\n"
+                  "print(check('test_valid.yaml', 'test_schema.json'))\nprint(check('test_invalid.yaml', 'test_schema.json'))\n")
+        plan = dict(PLAN, input_schema={"type": "object", "properties": {"y": {"type": "string"}, "s": {"type": "string"}}},
+                    example_inputs={"y": "test_valid.yaml", "s": "test_schema.json"}, outputs=[])
+        wrote = ["test_invalid.yaml", "test_schema.json", "test_valid.yaml"]
+        self.assertIsNone(Creator._check_plan(types_ns(), dict(plan), wrote, script))
+        err = Creator._check_plan(types_ns(), dict(plan), wrote + ["report.txt"], script + "open('report.txt','w')\n")
+        self.assertIn("report.txt", err)                     # a file it wrote once and never used is a result
+
     def test_a_sample_input_the_script_made_is_the_tests_input(self):
         import tempfile
         from mini.agent.creator import _self_made_inputs
