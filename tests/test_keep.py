@@ -162,8 +162,8 @@ class PlanRedoesTheRunTest(unittest.TestCase):
                     example_inputs={"image": "made.png"}, outputs=[])
         self.assertIsNone(Creator._check_plan(types_ns(), dict(plan), ["made.png"], script))
         err = Creator._check_plan(types_ns(), dict(plan), ["made.png", "result.txt"], script)
-        self.assertIn("result.txt", err)
-        self.assertIn("is an input", err)
+        self.assertIn("the tool makes: result.txt", err)
+        self.assertIn("also wrote made.png", err)
 
     def test_a_second_sample_the_script_wrote_and_used_is_not_an_output(self):
         from mini.agent.creator import Creator
@@ -176,6 +176,16 @@ class PlanRedoesTheRunTest(unittest.TestCase):
         self.assertIsNone(Creator._check_plan(types_ns(), dict(plan), wrote, script))
         err = Creator._check_plan(types_ns(), dict(plan), wrote + ["report.txt"], script + "open('report.txt','w')\n")
         self.assertIn("report.txt", err)                     # a file it wrote once and never used is a result
+
+    def test_an_input_name_in_outputs_is_the_file_its_example_names(self):
+        from mini.agent.creator import Creator
+        script = "make_sheet('thumbs', 'contact.jpg')\n"
+        plan = dict(PLAN, input_schema={"type": "object", "properties": {"thumbs": {"type": "string"},
+                                                                          "output_path": {"type": "string"}}},
+                    example_inputs={"thumbs": "thumbs", "output_path": "contact.jpg"}, outputs=["output_path"])
+        d = dict(plan)
+        self.assertIsNone(Creator._check_plan(types_ns(), d, ["contact.jpg"], script))
+        self.assertEqual(d["outputs"], ["contact.jpg"])
 
     def test_a_sample_input_the_script_made_is_the_tests_input(self):
         import tempfile

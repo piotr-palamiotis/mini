@@ -287,15 +287,18 @@ class Creator:
                         + (f"; the files it works on: {', '.join(used)}" if used else "") + ".")
         outs = d.get("outputs")
         if outs is not None:
+            if isinstance(outs, list):          # ["output_path"]: the input that names the file, for the file itself
+                outs = [ex[o] if isinstance(o, str) and isinstance(ex.get(o), str) else o for o in outs]
             outs = [os.path.normpath(str(o)) for o in outs] if isinstance(outs, list) else None
             named = {os.path.normpath(v) for v in _strings(ex) if v}
             results = [w for w in wrote if os.path.normpath(w) not in named   # a file the example gives is a sample,
                        and not _reread(w, script)]                          # and so is one the script wrote, then used
             if outs is None or (results and not outs) or any(o not in wrote for o in outs):
-                return (f"outputs must list the files the tool makes, from the files the script wrote: "
-                        f"{', '.join(wrote) or '(none)'}" + (f" (a sample the script made for the tool to read, "
-                        f"like {next(iter(sorted(named & set(map(os.path.normpath, wrote)))))}, is an input: leave "
-                        f"it out)" if named & set(map(os.path.normpath, wrote)) else "") + ".")
+                samples = [w for w in wrote if w not in results]
+                return (f"outputs must list the files the tool makes: {', '.join(results) or '(none)'}"
+                        + (f". The script also wrote {', '.join(samples)}: samples it made for the tool to read, "
+                           f"inputs, not outputs: leave them out" if samples else "")
+                        + ". Give file paths, not input names.")
             d["outputs"] = outs
         return self._validate_spec({**d, "edge_cases": []}, new=True)
 
