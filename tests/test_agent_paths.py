@@ -57,3 +57,47 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual(a._check_finish({"answer": "done", "files": ["thumbs/", "thumbs/a.jpg"]}, {"outputs": []}, 0), "")
         os.makedirs(os.path.join(a.folder, "empty"))
         self.assertIn("empty folder", a._check_finish({"answer": "done", "files": ["empty/"]}, {"outputs": []}, 0))
+
+
+class NamedToolsTest(unittest.TestCase):
+    TASK = ("Build the tools you need for this: one that writes Excel workbooks and one that draws bar charts. "
+            "From the sales table make report.xlsx and chart.png.")
+
+    def test_the_tools_a_task_names_are_counted(self):
+        from mini.agent.core import named_tools
+        self.assertEqual(named_tools(self.TASK), ["writes Excel workbooks", "draws bar charts"])
+        self.assertEqual(named_tools("Build the tools you need for this, using an image library: one that makes "
+                                     "thumbnails, one that reads image metadata, and one that makes a contact sheet. "
+                                     "For every image ..."),
+                         ["makes thumbnails", "reads image metadata", "makes a contact sheet"])
+        self.assertEqual(len(named_tools("Build two tools for this. Then convert a.yaml.")), 2)
+        self.assertEqual(named_tools("Make a tool that converts an INI file to JSON, then use it."), [])
+        self.assertEqual(named_tools("Fix the bug in greet.py: one that prints twice."), [])
+
+    def test_finish_needs_each_named_tool_to_have_run(self):
+        a = Agent(temp_config(), label="finish")
+        a.task_text = self.TASK
+        a.invoked_ok.add("xlsx_write")
+        a.invoked_any.add("xlsx_write")
+        msg = a._check_finish({"answer": "done"}, {"outputs": []}, 0)
+        self.assertIn("asks for 2 tools", msg)
+        self.assertIn("one that draws bar charts", msg)
+        self.assertIn("1 ran successfully (xlsx_write)", msg)
+        a.invoked_ok.add("draw_bar_chart")
+        self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0), "")
+
+
+class NeedJudgeTest(unittest.TestCase):
+    def test_need_tool_judges_installed_tools_on_the_request_alone(self):
+        from unittest import mock
+        a = Agent(temp_config(), label="need")
+        a.cfg["gap"] = {**(a.cfg.get("gap") or {}), "judge": True}
+        a.task_text = NamedToolsTest.TASK
+        seen = []
+        with mock.patch.object(a.registry, "get", return_value={"name": "xlsx_write", "version": 1}), \
+                mock.patch.object(a, "_judge", side_effect=lambda u, m, need="": seen.append(need) or {"fits": False}), \
+                mock.patch.object(a.core, "covering", return_value=None):
+            creator = mock.Mock()
+            creator.create.side_effect = __import__("mini.agent.turns", fromlist=["ModelGaveUp"]).ModelGaveUp("x")
+            a._need(creator, {"need": "A tool to draw a bar chart."}, a.task_text, "", ["xlsx_write"])
+        self.assertEqual(seen, ["A tool to draw a bar chart."])

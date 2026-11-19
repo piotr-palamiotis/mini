@@ -54,6 +54,16 @@ Can this tool, as it is, do one of the task's steps? Call `judge_tool` with fits
 does, in the task's words; empty when it does not fit) and why (one short sentence). A tool that does something
 nearby but not this step does not fit."""
 
+GAP_NEED = """While doing the user's task, the agent asks for a tool that does this:
+{need}
+
+An installed tool:
+{tool}
+
+Can this tool, as it is, do what is asked above? Judge only that request: a tool that does another step of the task
+(or something nearby) does not fit. Call `judge_tool` with fits (true or false), step (what of the request it does;
+empty when it does not fit) and why (one short sentence)."""
+
 GAP_PICK = """The user's task:
 {task}
 

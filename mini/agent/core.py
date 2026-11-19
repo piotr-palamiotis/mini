@@ -68,6 +68,23 @@ T_JUDGE = fn("judge_tool", "Say whether this one tool can do a step of the task.
 T_SCREEN = fn("shortlist", "Name the installed tools that could do a step of the task.", {"names": ARR}, ["names"])
 T_CHOOSE = fn("choose_tools", "Pick the tools to use among the ones that fit.", {"use": ARR, "why": S}, ["use"])
 ASKS_FOR_TOOL = re.compile(r"\b(build|make|create|write|develop)\b[^.]{0,60}?\btools?\b", re.I)
+NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5}
+
+
+def named_tools(task):
+    """The tools a task asks for by description ("Build the tools you need: one that makes X and one that reads Y"),
+    as their descriptions; "Build two tools" alone gives that many empty ones. [] when it names no count."""
+    m = ASKS_FOR_TOOL.search(task or "")
+    if not m:
+        return []
+    sentence = re.split(r"(?<=[.!?])\s", task[m.start():], maxsplit=1)[0]
+    parts = [p.strip(" ,;:") for p in re.split(r"\bone that\b", sentence, flags=re.I)[1:]]
+    parts = [re.sub(r"(,?\s*\band\b|,)\s*$", "", p).strip(" ,;:.") for p in parts]
+    n = re.search(r"\b(two|three|four|five)\s+tools\b", sentence, re.I)
+    count = max(len(parts), NUMBER_WORDS[n.group(1).lower()] if n else 0)
+    return (parts + [""] * count)[:count] if count >= 2 else []
+
+
 GAP_CANDIDATES = 5              # registry tools judged one by one for a task (the best search matches)
 T_FORM = fn("judge_form", "Say whether this file has the form the task asks for it.", {
     "matches": {"type": "boolean"}, "why": S}, ["matches", "why"])
@@ -469,10 +486,12 @@ class Agent:
             t.user(f"Call shortlist with names: a list of names from {', '.join(sorted(names))} (or an empty list).")
         return candidates
 
-    def _judge(self, u, m):
-        msgs = [{"role": "system", "content": prompts.SYSTEM},
-                {"role": "user", "content": prompts.GAP_ONE.format(
-                    task=trim(self.task_text, 1500), goal=u.get("goal", ""), plan=u.get("plan", ""), tool=describe_tool(m))}]
+    def _judge(self, u, m, need=""):
+        """Does installed tool m do a step of the task (u: the understanding), or, with need, that one request?"""
+        ask = (prompts.GAP_NEED.format(need=trim(need, 1500), tool=describe_tool(m)) if need else
+               prompts.GAP_ONE.format(task=trim(self.task_text, 1500), goal=u.get("goal", ""), plan=u.get("plan", ""),
+                                      tool=describe_tool(m)))
+        msgs = [{"role": "system", "content": prompts.SYSTEM}, {"role": "user", "content": ask}]
         t = Turns(self, "gap", msgs, [T_JUDGE], think_tokens=GAP_THINK_TOKENS)
         for _ in range(3):
             reply = t.ask()
@@ -626,7 +645,7 @@ class Agent:
             m = self.registry.get(name)              # an installed tool offered for this task: reuse it as it is
             if not m:
                 continue
-            v = self._judge({"goal": need, "plan": need}, m)
+            v = self._judge({}, m, need=need)        # the request alone: the whole task fits any tool somewhere
             self.log.emit("gap_judge", tool=name, fits=v["fits"], step=v.get("step"), why=v.get("why"), need=need[:200])
             if v["fits"]:
                 told.add(name)
@@ -831,6 +850,14 @@ class Agent:
         if ASKS_FOR_TOOL.search(self.task_text or "") and not (built or self.built_names or self.invoked_any):
             return ("the task asks for a tool, and none was made or used. Call `keep_tool` on the run_code script that "
                     "did the work (it becomes a tool tested on that run), or run an installed tool with invoke_tool.")
+        wanted = named_tools(self.task_text)
+        worked = sorted(self.invoked_ok)
+        if len(wanted) > len(worked):               # "one that makes X and one that reads Y": each one is a tool
+            asked = "; ".join(f"one that {w}" for w in wanted if w) or f"{len(wanted)} tools"
+            return (f"the task asks for {len(wanted)} tools ({asked}), and {len(worked)} ran successfully"
+                    + (f" ({', '.join(worked)})" if worked else "") + ". For each one missing, call `keep_tool` on a "
+                    "run_code script that does only that step (one script per tool), or run an installed tool that "
+                    "does it with invoke_tool.")
         promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
         # a promised deliverable: "save/write/create ... file", or a file name with an extension. "A list of files in
         # this folder" is an answer, not a file.
