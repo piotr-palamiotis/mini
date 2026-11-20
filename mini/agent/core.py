@@ -540,7 +540,7 @@ class Agent:
                                                                    context=ctx, tools=listing(), core=self.core.listing(),
                                                                    files=self.list_work(),
                                                                    built=prompts.BUILT.format(names=", ".join(built)) if built else "")}]
-        finish_rejections, reviews = 0, 0
+        finish_rejections, tool_rejections, reviews = 0, 0, 0
         offered = self.core.tools() + CONTROL_TOOLS
         while True:
             t = Turns(self, "execute", msgs, offered, implicit=self._implicit_finish)
@@ -561,10 +561,14 @@ class Agent:
                 note = "\nWarning: same call as before. A third identical call in a row will be blocked." if guard == "warn" else ""
                 self.log.emit("tool_call", step="execute", name=name, args=args)
                 if name == "finish":
-                    problem = self._check_finish(args, understanding, finish_rejections)
+                    problem = self._check_finish(args, understanding, finish_rejections, tool_rejections)
                     if problem:
-                        finish_rejections += 1
-                        self.log.emit("watchdog", name="finish_check", problem=problem, rejections=finish_rejections)
+                        if self.finish_kind == "tools":
+                            tool_rejections += 1
+                        else:
+                            finish_rejections += 1
+                        self.log.emit("watchdog", name="finish_check", problem=problem, check=self.finish_kind,
+                                      rejections=finish_rejections + tool_rejections)
                         t.result(name, "Not finished: " + problem)
                         continue
                     review = self._review_outputs(task, args.get("checks"), reviews)
@@ -667,6 +671,24 @@ class Agent:
         finally:
             self.wd.reset_conversation()
 
+    def _kept_elsewhere(self, what, s):
+        """The files keep_tool's description names that this task made, but not in the last script's run, when nothing
+        the last script wrote is named in it: the description is of an earlier script. [] when it may fit."""
+        written = [w.replace("\\", "/") for w in s.get("written") or []]
+        if not written:
+            return []
+        words = [w for w in re.findall(r"[a-z0-9]+", what.lower()) if len(w) >= 3]
+        def said(token):                        # thumbs ~ thumbnails, zip ~ zips, bundle ~ bundles
+            return any(w[:n] == token[:n] for w in words for n in [min(len(w), len(token), 5)])
+        tokens = {t for p in written for t in re.split(r"[^a-z0-9]+", p.lower()) if len(t) >= 3}
+        if any(said(t) for t in tokens):
+            return []
+        named = re.findall(r"[\w.-]+/|[\w-]+\.[A-Za-z0-9]{2,4}\b", what)
+        made = [n for n in dict.fromkeys(named)
+                if any(c == n or c.startswith(n if n.endswith("/") else n + "/") for c in self.changed)
+                and not any(w == n or w.startswith(n) for w in written)]
+        return made
+
     def _keep(self, creator, what, task, ctx, tools):
         """keep_tool: the last successful script becomes a tool, tested on its own run; then the installed tool runs
         once on the user's files with the example inputs (it writes what the script wrote, so nothing changes)."""
@@ -678,6 +700,15 @@ class Agent:
         if argv_idle(s.get("script"), s.get("output"), s.get("written")):
             self.log.emit("watchdog", name="keep_argv_idle", what=what[:200])
             return "Nothing to keep: " + ARGV_IDLE
+        other = self._kept_elsewhere(what, s)
+        if other and not s.get("mismatch_told"):
+            s["mismatch_told"] = True              # once per run: the description may still be right
+            self.log.emit("watchdog", name="keep_mismatch", what=what[:200], wrote=(s.get("written") or [])[:10])
+            return (f"Not kept: keep_tool keeps the last run_code script, and it wrote "
+                    f"{', '.join((s.get('written') or [])[:5])}, while you describe a tool that makes "
+                    f"{', '.join(other)}, which an earlier script made. Run the script that makes those with run_code "
+                    "again (it writes the same files), then call keep_tool right after it. If the last script is the "
+                    "one to keep, call keep_tool again with what it does.")
         same = [n for n in self.built_names if self._same_need(n, what)]
         if same and not getattr(self, "keep_reminded", False):
             self.keep_reminded = True               # once: a tool made for this task already does it
@@ -822,10 +853,28 @@ class Agent:
         """The files this task wrote or changed in the folder, relative to it."""
         return sorted(self.changed)
 
-    def _check_finish(self, args, understanding, rejections):
-        """Harness-side check of a finish call. Returns a problem or "" (after 2 rejections the agent may finish)."""
-        if rejections >= 2:
-            return ""
+    def _check_finish(self, args, understanding, rejections, tool_rejections=0):
+        """Harness-side check of a finish call. Returns a problem or "". The check that each tool the task names has
+        run keeps its own budget: after 2 rejections of each kind the agent may finish. self.finish_kind says which
+        kind the problem is ("general" or "tools")."""
+        self.finish_kind = "general"
+        problem = "" if rejections >= 2 else self._finish_problem(args, understanding)
+        if problem or tool_rejections >= 2:
+            return problem
+        self.finish_kind = "tools"
+        wanted = named_tools(self.task_text)
+        worked = sorted(self.invoked_ok)
+        if len(wanted) > len(worked):               # "one that makes X and one that reads Y": each one is a tool
+            asked = "; ".join(f"one that {w}" for w in wanted if w) or f"{len(wanted)} tools"
+            return (f"the task asks for {len(wanted)} tools ({asked}), and {len(worked)} ran successfully"
+                    + (f" ({', '.join(worked)})" if worked else "") + ". For each one missing, call `keep_tool` on a "
+                    "run_code script that does only that step (one script per tool), or run an installed tool that "
+                    "does it with invoke_tool.")
+        return ""
+
+    def _finish_problem(self, args, understanding):
+        """The general finish checks: named files exist, built tools ran, a tool was made when asked, a promised file
+        was written."""
         produced = self.produced_files()
         for f in args.get("files") or []:
             try:
@@ -850,14 +899,6 @@ class Agent:
         if ASKS_FOR_TOOL.search(self.task_text or "") and not (built or self.built_names or self.invoked_any):
             return ("the task asks for a tool, and none was made or used. Call `keep_tool` on the run_code script that "
                     "did the work (it becomes a tool tested on that run), or run an installed tool with invoke_tool.")
-        wanted = named_tools(self.task_text)
-        worked = sorted(self.invoked_ok)
-        if len(wanted) > len(worked):               # "one that makes X and one that reads Y": each one is a tool
-            asked = "; ".join(f"one that {w}" for w in wanted if w) or f"{len(wanted)} tools"
-            return (f"the task asks for {len(wanted)} tools ({asked}), and {len(worked)} ran successfully"
-                    + (f" ({', '.join(worked)})" if worked else "") + ". For each one missing, call `keep_tool` on a "
-                    "run_code script that does only that step (one script per tool), or run an installed tool that "
-                    "does it with invoke_tool.")
         promised = " ".join(str(x) for x in (understanding.get("outputs") or []) + (understanding.get("side_effects") or []))
         # a promised deliverable: "save/write/create ... file", or a file name with an extension. "A list of files in
         # this folder" is an answer, not a file.

@@ -52,6 +52,7 @@ class KeepDuplicateTest(unittest.TestCase):
                                   last_script={"ok": True, "script": "x", "record": "/r"},
                                   registry=types.SimpleNamespace(get=lambda n: {"description": "Convert a YAML file to TOML."}))
         a._same_need = lambda tool, need: Agent._same_need(a, tool, need)
+        a._kept_elsewhere = lambda what, s: []
         out = Agent._keep(a, None, "convert a YAML file to a TOML file", "task", "", [])
         self.assertIn("yaml_to_toml was made for this task and already does this", out)
         self.assertTrue(a.keep_reminded)

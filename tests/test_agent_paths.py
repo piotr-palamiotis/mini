@@ -83,6 +83,9 @@ class NamedToolsTest(unittest.TestCase):
         self.assertIn("asks for 2 tools", msg)
         self.assertIn("one that draws bar charts", msg)
         self.assertIn("1 ran successfully (xlsx_write)", msg)
+        self.assertEqual(a.finish_kind, "tools")
+        self.assertIn("asks for 2 tools", a._check_finish({"answer": "done"}, {"outputs": []}, 2, 0))  # own budget
+        self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0, 2), "")              # gives way
         a.invoked_ok.add("draw_bar_chart")
         self.assertEqual(a._check_finish({"answer": "done"}, {"outputs": []}, 0), "")
 
