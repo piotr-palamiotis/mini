@@ -29,7 +29,12 @@ Read the task carefully. Call the tool `understand` with:
 - outputs: what the user should get back
 - side_effects: changes outside this conversation (messages sent, files written, ...); empty if none
 - ambiguities: anything unclear and the assumption you will make for each
-- plan: short numbered steps"""
+- plan: short numbered steps
+
+When the message is conversation and not a task (a greeting, thanks, a question about you or about what happened
+earlier in this conversation, a general question you can answer from what you know), call `reply` with your answer
+instead. No plan is shown then and nothing runs. Anything that needs a file, the folder, the web, a calculation or a
+program is a task: call `understand`."""
 
 GAP_SCREEN = """The user's task:
 {task}

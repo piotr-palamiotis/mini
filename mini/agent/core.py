@@ -66,6 +66,8 @@ def normalize_understanding(u):
 T_UNDERSTAND = fn("understand", "State your understanding of the task.", {
     "goal": S, "inputs": ARR, "outputs": ARR, "side_effects": ARR, "ambiguities": ARR, "plan": S},
     ["goal", "inputs", "outputs", "plan"])
+T_REPLY = fn("reply", "Answer a message that is conversation, not a task. No plan, no tools.", {
+    "text": S}, ["text"])
 T_COVERAGE = fn("decide_coverage", "Decide which installed tools cover the task and which capabilities are missing.", {
     "reasoning": S, "use": ARR, "missing": ARR}, ["reasoning", "use", "missing"])
 T_JUDGE = fn("judge_tool", "Say whether this one tool can do a step of the task.", {
@@ -276,9 +278,12 @@ class Agent:
         self.task_text = task
         try:
             understanding = self.parse(task)
-            self.task_inputs = self._input_files(understanding)
-            covered = self.gap(understanding)
-            answer = self.execute(task, understanding, covered)
+            if "reply" in understanding:          # conversation, not a task: answered as it is, nothing to confirm
+                answer = understanding["reply"]
+            else:
+                self.task_inputs = self._input_files(understanding)
+                covered = self.gap(understanding)
+                answer = self.execute(task, understanding, covered)
             status = "success"
         except (AgentStop, ToolFailed, PolicyError) as e:
             error = str(e)
@@ -323,12 +328,21 @@ class Agent:
         files = self.list_work()
         msgs = [{"role": "system", "content": prompts.SYSTEM},
                 {"role": "user", "content": prompts.PARSE.format(task=task, context=ctx + "\n\nThe folder:\n" + files)}]
-        t = Turns(self, "parse", msgs, [T_UNDERSTAND])
+        t = Turns(self, "parse", msgs, [T_UNDERSTAND, T_REPLY])
         for _ in range(4):
             reply = t.ask()
             call = reply["tool_calls"][0]
             for extra in reply["tool_calls"][1:]:
                 t.result(extra["name"], "ignored")
+            if call["name"] == "reply":
+                text = str(call["arguments"].get("text") or "").strip()
+                if text and not self.attachments:
+                    self.log.emit("phase", phase="conversation")
+                    t.result("reply", "ok")
+                    return {"reply": text}
+                t.result("reply", "This message comes with files, so it is a task: call understand."
+                         if self.attachments else "Write the reply in text, or call understand for a task.")
+                continue
             if call["name"] != "understand" or not call["arguments"].get("goal"):
                 t.result(call["name"], "Call understand with goal, inputs, outputs and plan.")
                 continue
