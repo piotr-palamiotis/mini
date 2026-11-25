@@ -159,6 +159,31 @@ class FinishReviewTest(unittest.TestCase):
         self.assertEqual(agent.run_task("Write names.json.")["status"], "success")
 
 
+class JudgeSeesTest(unittest.TestCase):
+    def ask(self, text):
+        """The prompt the form judge got for a file holding text."""
+        folder = git_folder({"greet.py": text})
+        backend = fake_backend([step(call("judge_form", matches=True, why="ok"))])
+        seen = []
+        chat = backend.chat
+        backend.chat = lambda model, messages, *a, **k: seen.append(messages[-1]["content"]) or chat(model, messages, *a, **k)
+        agent = Agent(temp_config(), backend=backend, label="judge", workspace=folder)
+        agent._judge_form("Add a --upper flag to greet.py.", "greet.py")
+        return seen[0]
+
+    def test_a_small_file_is_shown_whole_and_judged_as_it_is(self):
+        small = "import argparse\n" + "".join(f"# line {i}\n" for i in range(20)) + "p.add_argument('--upper')\n"
+        got = self.ask(small)
+        self.assertIn("--upper", got)                                 # the line under the old 12-line cut
+        self.assertNotIn("(first lines)", got)
+        self.assertNotIn("do not answer false only because", got)
+
+    def test_a_file_too_long_to_show_says_so_and_parts_not_shown_do_not_refuse_it(self):
+        got = self.ask("".join(f"x = {i}\n" for i in range(400)))
+        self.assertIn("(first lines)", got)
+        self.assertIn("do not answer false only because", got)
+
+
 class FormGapTest(unittest.TestCase):
     def test_only_a_form_of_words_between_punctuation_that_the_lines_nearly_follow(self):
         from mini.agent.core import form_gap

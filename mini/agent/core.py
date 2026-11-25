@@ -96,6 +96,7 @@ GAP_CANDIDATES = 5              # registry tools judged one by one for a task (t
 T_FORM = fn("judge_form", "Say whether this file has the form the task asks for it.", {
     "matches": {"type": "boolean"}, "why": S}, ["matches", "why"])
 GAP_THINK_TOKENS = 700          # each judgement is one small question
+JUDGE_LINES, JUDGE_CHARS = 200, 8000   # the form judge sees a text file up to this size whole
 T_BUG = fn("report_tool_bug", "An installed tool has a bug. It goes back to the creation loop as a new version.",
            {"name": S, "problem": S}, ["name", "problem"])
 T_NEED = fn("need_tool", "Build a tool from a spec, for a capability a run_code script cannot try in the sandbox: it "
@@ -994,12 +995,15 @@ class Agent:
         return f"{members[0]}: {got}" if got else ""
 
     def _judge_form(self, task, rel):
-        """One fresh question, apart from the work that made the file: the task and the file's head, does the file
-        have the form the task asks for it? An unclear answer counts as a match (the agent's own checks passed)."""
+        """One fresh question, apart from the work that made the file: the task and the file (whole when it is small,
+        else its head), does the file have the form the task asks for it? An unclear answer counts as a match (the
+        agent's own checks passed). A judge shown only the head of a 366-byte greet.py refused it five times for a
+        flag it defined below the cut."""
+        head = samples.head(self.folder, rel, JUDGE_LINES, JUDGE_CHARS)
+        cut = not samples.is_text(os.path.join(self.folder, rel)) or "(first lines)" in head.split("\n", 1)[0]
         msgs = [{"role": "system", "content": prompts.SYSTEM},
                 {"role": "user", "content": prompts.JUDGE_FORM.format(
-                    task=trim(task, 2000), file=rel, head=samples.head(self.folder, rel),
-                    partial="" if samples.is_text(os.path.join(self.folder, rel)) else prompts.JUDGE_PARTIAL)}]
+                    task=trim(task, 2000), file=rel, head=head, partial=prompts.JUDGE_PARTIAL if cut else "")}]
         t = Turns(self, "review", msgs, [T_FORM], think_tokens=GAP_THINK_TOKENS)
         for _ in range(2):
             c = next((c for c in t.ask()["tool_calls"] if c["name"] == "judge_form"), None)

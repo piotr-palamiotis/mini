@@ -154,9 +154,9 @@ def describe(full):
     return ""
 
 
-def head(folder, rel):
+def head(folder, rel, max_lines=PREVIEW_LINES, max_chars=PREVIEW_CHARS):
     """The first lines of a file in the folder (text), or its size and what it is (binary); "" when it is not a
-    file."""
+    file. A text file that was cut says "(first lines)"."""
     full = os.path.join(folder, rel)
     if not os.path.isfile(full):
         return ""
@@ -165,8 +165,8 @@ def head(folder, rel):
         what = describe(full)
         return f"{rel} ({size} bytes, binary" + (f": {what})" if what else ")")
     with open(full, encoding="utf-8", errors="replace") as f:
-        lines = [ln for _, ln in zip(range(PREVIEW_LINES), f)]
-    text = "".join(lines)[:PREVIEW_CHARS]
+        lines = [ln for _, ln in zip(range(max_lines), f)]
+    text = "".join(lines)[:max_chars]
     more = " (first lines)" if size > len(text.encode()) else ""
     return f"{rel} ({size} bytes){more}:\n```\n{text.rstrip()}\n```"
 
