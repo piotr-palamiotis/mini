@@ -39,6 +39,7 @@ from ..harness.watchdogs import Watchdogs
 S = {"type": "string"}
 ARR = {"type": "array", "items": S}
 MIN_IMPLICIT_ANSWER = 200
+SAMPLING_KEYS = ("seed", "top_k", "top_p", "min_p", "repeat_penalty", "presence_penalty")   # optional, per tier
 
 
 def as_list(v):
@@ -222,6 +223,9 @@ class Agent:
         tc = self.cfg[tier]
         self.tier, self.backend, self.model = tier, self._backend_for(tier), tc["model"]
         self.model_options = {"temperature": tc["temperature"]}
+        # Set these to sample every model the same way (a GGUF may carry its own top_k/top_p defaults) and, with a
+        # seed, to make a run repeatable.
+        self.model_options.update({k: tc[k] for k in SAMPLING_KEYS if tc.get(k) is not None})
         if tc.get("thinking_controls") is False:
             self.model_options["thinking_controls"] = False
         if tier not in self.tiers_used:

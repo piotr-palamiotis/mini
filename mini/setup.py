@@ -483,6 +483,8 @@ def build_llama(cfg, ui):
             if host and not shutil.which(host):
                 missing.append(host)
             flags = ["-DGGML_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=native"] + ([f"-DCMAKE_CUDA_HOST_COMPILER={host}"] if host else [])
+            if shutil.which("glslc") and os.path.exists("/usr/include/vulkan/vulkan.h"):
+                flags.append("-DGGML_VULKAN=ON")   # one build for NVIDIA (CUDAn) and other GPUs (Vulkann)
     if missing:
         pk = {"g++": "build-essential"}
         raise SetupError("missing build tools; run: sudo apt install " +
