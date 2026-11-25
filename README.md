@@ -60,9 +60,12 @@ of the model server at startup and on `/status`.
 **Getting models** (two separate steps):
 
 - **Download** from Hugging Face into the models folder: `mini models search WORDS`, `mini models files OWNER/NAME`
-  (its quantizations and sizes), `mini models download OWNER/NAME Q4_K_M [--mmproj] [--name N]`. In the UI:
-  `/download WORDS` searches, `/download OWNER/NAME [QUANT]` downloads (a card asks which when you leave it out),
-  `/models` lists the folder and the downloads. A download runs in its own systemd user unit
+  (its quantizations and sizes), `mini models download OWNER/NAME Q4_K_M [--mmproj] [--name N]`. In the UI,
+  `/download [WORDS]` opens the **Models** view: a search box that searches again as you type, the results on the
+  left (parameters, architecture, context, vision, downloads, likes), and on the right the chosen model's facts
+  (license, base model, last update) and its model card (the README, without its HTML and images). At the
+  bottom: the quantization (each marked whether it fits your GPUs' VRAM), the vision projector, and Download.
+  `/download OWNER/NAME QUANT` downloads straight away; `/models` lists the folder and the downloads. A download runs in its own systemd user unit
   (`mini-download-*`), so closing mini or a crash does not stop it; progress shows in the status bar. It writes
   `.part` files and resumes where it stopped (`mini models resume ID`, also after a reboot), checks the sha256 the
   Hub lists and the free disk space, and only then moves the file into place. Public models only (no login).

@@ -142,20 +142,45 @@ class ModelsUITest(unittest.TestCase):
                     self.assertIn("/model tiny-1gpu", notes)
         asyncio.run(go())
 
-    def test_download_words_search(self):
+    def test_models_view_searches_as_you_type_and_downloads(self):
         from mini import models
+        from mini.ui.modelbrowser import ModelBrowser
         app = self.app()
+        hit = {"id": "o/tiny-GGUF", "downloads": 5, "likes": 1, "updated": "2026-01-01", "params": 1_000_000_000,
+               "arch": "llama", "context": 8192, "vision": False, "license": "mit", "base": "", "gated": False, "size": 0}
+        option = {"name": "tiny-Q4_K_M", "quant": "Q4_K_M", "files": [{"path": "tiny-Q4_K_M.gguf", "size": 10}], "size": 10}
+        searched, started = [], []
 
         async def go():
-            with mock.patch.object(models, "search", return_value=[("o/tiny-GGUF", 5)]):
+            with mock.patch.object(models, "browse", side_effect=lambda q, *a, **k: searched.append(q) or [hit]), \
+                    mock.patch.object(models, "info", return_value=hit), \
+                    mock.patch.object(models, "tree", return_value=[]), \
+                    mock.patch.object(models, "choices", return_value=([option], [])), \
+                    mock.patch.object(models, "readme", return_value="# Tiny\n\nA *small* model."), \
+                    mock.patch.object(models, "download", side_effect=lambda cfg, repo, q, n, v: started.append((repo, q, v))
+                                      or {"name": "tiny", "size": 10}), \
+                    mock.patch.object(ModelBrowser, "_read_vram", lambda self: self.app.call_from_thread(self.vram_known, 0)):
                 async with app.run_test(size=(180, 50)) as pilot:
-                    await pilot.press(*"/download tiny")
+                    await pilot.press(*"/download")
                     await pilot.press("enter")
+                    mb = app.query_one(ModelBrowser)
+                    await pilot.press(*"tiny")                      # typed into the search box
+                    for _ in range(40):
+                        await pilot.pause(0.1)
+                        if searched[-1:] == ["tiny"] and mb.repo in mb.cache:
+                            break
+                    self.assertEqual(searched[-1], "tiny", "the search runs again once typing pauses")
+                    self.assertLess(len(searched), 4, "not once per key")
+                    self.assertIn("1B", str(app.query_one("#mb-info").render()))
+                    self.assertEqual(app.query_one("#mb-quant").value, "tiny-Q4_K_M")
+                    await pilot.click("#mb-download")
                     for _ in range(30):
                         await pilot.pause(0.1)
-                        if "o/tiny-GGUF" in " ".join(str(w.render()) for w in app.query(".note")):
+                        if started:
                             break
-                    self.assertIn("o/tiny-GGUF", " ".join(str(w.render()) for w in app.query(".note")))
+                    self.assertEqual(started, [("o/tiny-GGUF", "tiny-Q4_K_M", False)])
+                    await pilot.press("escape")
+                    self.assertEqual(app.query_one("#views").active, "tab-stream")
         asyncio.run(go())
 
 

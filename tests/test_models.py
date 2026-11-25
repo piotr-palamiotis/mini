@@ -17,6 +17,26 @@ BLOB = {"m-Q4_K_M.gguf": os.urandom(300_000), "m-Q8_0-00001-of-00002.gguf": os.u
         "mtp-m-Q4_0.gguf": os.urandom(1000)}
 
 
+RECORD = {"id": "o/m", "downloads": 1234, "likes": 5, "lastModified": "2026-07-01T00:00:00.000Z",
+          "pipeline_tag": "image-text-to-text", "tags": ["gguf", "license:apache-2.0", "base_model:org/base"],
+          "gguf": {"total": 30_700_000_000, "architecture": "gemma4", "context_length": 131072}}
+CARD = """---
+license: mit
+---
+<div align="center"><img src="logo.png"><a href="x">Docs</a></div>
+
+    Indented by HTML, not code.
+
+# Model
+
+![chart](c.png) Use it **well**.
+
+```sh
+    llama-server -m x   # code keeps its indent
+```
+"""
+
+
 class Hub(BaseHTTPRequestHandler):
     seen = []                                # (path, Range header) of every file request
     honour_range = True
@@ -26,6 +46,13 @@ class Hub(BaseHTTPRequestHandler):
             rows = [{"type": "file", "path": n, "size": len(b), "lfs": {"oid": hashlib.sha256(b).hexdigest()}}
                     for n, b in BLOB.items()] + [{"type": "file", "path": "README.md", "size": 10}]
             return self._send(200, json.dumps(rows).encode())
+        if self.path.startswith("/api/models?"):
+            Hub.seen.append(("search", self.path))
+            return self._send(200, json.dumps([RECORD]).encode())
+        if self.path == "/api/models/o/m":
+            return self._send(200, json.dumps({**RECORD, "cardData": {"license": "mit", "base_model": "org/base"}}).encode())
+        if self.path == "/o/m/raw/main/README.md":
+            return self._send(200, CARD.encode())
         if self.path.startswith("/api/models/"):
             return self._send(401, b"{}")
         name = self.path.rsplit("/", 1)[-1]
@@ -83,6 +110,22 @@ class ModelsTest(unittest.TestCase):
         with self.assertRaises(models.DownloadError) as e:
             models.tree("o/private")
         self.assertIn("login", str(e.exception))
+
+    def test_search_info_and_card(self):
+        hit = models.browse("gemma", limit=5)[0]
+        self.assertEqual({k: hit[k] for k in ("id", "params", "arch", "context", "vision", "license", "updated")},
+                         {"id": "o/m", "params": 30_700_000_000, "arch": "gemma4", "context": 131072, "vision": True,
+                          "license": "apache-2.0", "updated": "2026-07-01"})
+        q = Hub.seen[-1][1]
+        self.assertIn("search=gemma", q)
+        self.assertIn("filter=gguf", q)
+        self.assertIn("expand%5B%5D=gguf", q)
+        self.assertNotIn("search=", models.browse("") and Hub.seen[-1][1], "empty: the most downloaded of all")
+        self.assertEqual((models.info("o/m")["license"], models.info("o/m")["base"]), ("mit", "org/base"))
+        card = models.readme("o/m")
+        self.assertEqual(card, "Docs\n\nIndented by HTML, not code.\n\n# Model\n\nUse it **well**.\n\n"
+                               "```sh\n    llama-server -m x   # code keeps its indent\n```")
+        self.assertEqual(models.short_number(30_700_000_000), "30.7B")
 
     def test_one_file_goes_in_as_name_gguf(self):
         job = self.run_job(self.options[0])

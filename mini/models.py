@@ -56,10 +56,83 @@ def _get_json(url, timeout=20):
         raise DownloadError(f"Hugging Face is not reachable: {e}") from e
 
 
+EXPAND = ("downloads", "likes", "lastModified", "pipeline_tag", "tags", "gguf")
+
+
+def browse(query="", limit=40, sort="downloads"):
+    """GGUF repositories matching query (all of them when empty), with what a list shows: [{id, downloads, likes,
+    updated, vision, params, arch, context, license}]."""
+    q = [("filter", "gguf"), ("sort", sort), ("limit", limit)] + [("expand[]", e) for e in EXPAND]
+    if query.strip():
+        q.insert(0, ("search", query.strip()))
+    return [summary(m) for m in _get_json(f"{HUB}/api/models?{urllib.parse.urlencode(q)}")]
+
+
 def search(query, limit=15):
     """[(repo, downloads)]: GGUF repositories matching query, most downloaded first."""
-    q = urllib.parse.urlencode({"search": query, "filter": "gguf", "sort": "downloads", "limit": limit})
-    return [(m["id"], m.get("downloads") or 0) for m in _get_json(f"{HUB}/api/models?{q}")]
+    return [(m["id"], m["downloads"]) for m in browse(query, limit)]
+
+
+def summary(m):
+    """The facts about a repository from the Hub's model record (a search hit or /api/models/REPO)."""
+    tags, g = m.get("tags") or [], m.get("gguf") or {}
+    card = m.get("cardData") or {}
+    lic = card.get("license") or next((t.split(":", 1)[1] for t in tags if t.startswith("license:")), "")
+    base = card.get("base_model") or next((t.split(":", 1)[1] for t in tags if t.startswith("base_model:")
+                                           and t.count(":") == 1), "")
+    return {"id": m["id"], "downloads": m.get("downloads") or 0, "likes": m.get("likes") or 0,
+            "updated": (m.get("lastModified") or "")[:10], "params": g.get("total") or 0,
+            "arch": g.get("architecture") or "", "context": g.get("context_length") or 0,
+            "vision": m.get("pipeline_tag") == "image-text-to-text", "license": lic if isinstance(lic, str) else "",
+            "base": base if isinstance(base, str) else ", ".join(base), "gated": bool(m.get("gated")),
+            "size": g.get("totalFileSize") or 0}
+
+
+def info(repo):
+    """summary() of one repository from its full record."""
+    return summary(_get_json(f"{HUB}/api/models/{repo}"))
+
+
+def readme(repo, limit=60_000):
+    """The model card as markdown the terminal can show: no front matter, no HTML (logos, badges, layout)."""
+    req = urllib.request.Request(f"{HUB}/{repo}/raw/main/README.md", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            text = r.read(limit * 2).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return "" if e.code == 404 else f"(the model card could not be read: {e.code})"
+    except OSError as e:
+        return f"(the model card could not be read: {e})"
+    return clean_card(text)[:limit]
+
+
+def clean_card(text):
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)                 # YAML front matter
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", "", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</?(p|div|h\d|li|ul|ol|table|tr|center|details|summary)\b[^>]*>", "\n", text)
+    text = re.sub(r"(?i)<img\b[^>]*>", "", text)
+    text = re.sub(r"<[^>\n]+>", "", text)                                        # every other tag: keep its text
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)[ \t]*", "", text)                      # markdown images
+    for a, b in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
+        text = text.replace(a, b)
+    lines, fenced = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            line = line.lstrip()
+        elif not fenced and line.startswith("    ") and not re.match(r"\s*([-*+]|\d+\.)\s", line):
+            line = line.lstrip()                       # text that sat inside indented HTML, not a code block
+        lines.append(line.rstrip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def short_number(n):
+    for unit, size in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if n >= size:
+            return f"{n / size:.1f}".rstrip("0").rstrip(".") + unit
+    return str(n)
 
 
 def tree(repo, revision="main"):

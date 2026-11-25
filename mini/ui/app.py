@@ -31,6 +31,7 @@ from ..harness import checkpoint
 from ..harness import config as config_mod
 from ..harness import workspace as ws
 from . import commands, settingsform
+from .modelbrowser import ModelBrowser
 from . import session as session_mod
 from .session import Session
 from .toolform import ToolForm
@@ -573,6 +574,8 @@ class MiniApp(App):
                         yield Button("Accept staged", id="accept", variant="success")
                         yield Button("Discard staged", id="discard", variant="error")
                     yield RichLog(id="reg-detail", wrap=True, min_width=1)
+                with TabPane("Models", id="tab-models"):
+                    yield ModelBrowser(self, id="model-browser")
                 with TabPane("Tools", id="tab-tools"):
                     yield DataTable(id="tools-table", cursor_type="row")
                     yield RichLog(id="tools-detail", wrap=True, min_width=1)
@@ -1131,8 +1134,9 @@ class MiniApp(App):
 
     def cmd_download(self, args):
         ref = (args.get("repo") or "").strip()
-        if not ref:
-            self.chat("/download WORDS searches Hugging Face for GGUF models; /download OWNER/NAME [QUANT] downloads one")
+        if not ref or "/" not in ref.split()[0]:          # the Models view: search as you type, preview, download
+            self.show_view("tab-models")
+            self.query_one(ModelBrowser).opened(ref)
             return
         quant = args.get("quant")
         if "/" in ref.split()[0] and len(ref.split()) > 1:      # /download OWNER/NAME Q4_K_M
@@ -1314,6 +1318,8 @@ class MiniApp(App):
             self.query_one("#prompt", Input).focus()
         elif pane == "tab-tools":
             self.refresh_tools()
+        elif pane == "tab-models":
+            self.query_one(ModelBrowser).opened()
 
     def check_action(self, action, parameters):
         if action == "back":
