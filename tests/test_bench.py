@@ -31,6 +31,12 @@ class TasksTest(unittest.TestCase):
         for t in ts:
             self.assertTrue(t.prompt and t.files and "print('PASS')" in t.check, t.name)
 
+    def test_time_limits_are_the_ones_bench2_ran_with(self):
+        limits = {t.name: t.timeout for t in bench.tasks()}
+        self.assertEqual((limits["bin_records"], limits["format_tool"], limits["gz_report"]), (3600, 3600, 1500))
+        self.assertEqual(limits["csv_revenue"], 1500)
+        self.assertTrue(all(limits[t.name] == 3600 for t in bench.tasks(["tools", "hard", "expert"])))
+
     def test_selection_by_suite_and_task(self):
         got = [t.name for t in bench.tasks(["expert", "csv_revenue"])]
         self.assertEqual(got[:3], ["expert_bugfix", "expert_schedule", "expert_fifo"])

@@ -9,8 +9,12 @@ HEAD = ("import os, sys, re, json, glob\nW, A = sys.argv[1], open(sys.argv[2]).r
         "def fail(m): print('FAIL', m); sys.exit(1)\n")
 
 
+LONG = {"bin_records": 3600, "format_tool": 3600}    # working out a format takes a while (bench2 gave them 3600 s)
+
+
 def task(name, prompt, files, check):
-    SUITE.add(name, prompt.strip(), files, HEAD + textwrap.dedent(check) + "\nprint('PASS')\n")
+    SUITE.add(name, prompt.strip(), files, HEAD + textwrap.dedent(check) + "\nprint('PASS')\n",
+              timeout=LONG.get(name, 1500))
 
 
 
