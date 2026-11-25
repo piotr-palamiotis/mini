@@ -38,7 +38,7 @@ class CatalogTest(unittest.TestCase):
             "mode": {"type": "string", "enum": ["a", "b"]}, "files": {"type": "array", "items": {"type": "string"}}}}
         self.assertEqual(core.validate(schema, {"path": "x", "depth": "2", "on": "true", "files": "f"}),
                          ({"path": "x", "depth": 2, "on": True, "files": ["f"]}, ""))
-        _, problem = core.validate(schema, {"depth": "deep", "mode": "c", "files": [1], "extra": 1})
+        _, problem = core.validate(schema, {"depth": "deep", "mode": "c", "files": [None], "extra": 1})
         for part in ("unknown argument extra", "path is required", "depth must be an integer",
                      "mode must be one of a, b", "every item of files must be a string"):
             self.assertIn(part, problem)

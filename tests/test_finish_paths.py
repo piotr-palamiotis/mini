@@ -22,6 +22,9 @@ class FinishPaths(unittest.TestCase):
         self.assertEqual(as_list("write a.txt"), ["write a.txt"])
         u = normalize_understanding({"goal": "g", "side_effects": "-", "outputs": ["x"]})
         self.assertEqual((u["side_effects"], u["outputs"], u["inputs"]), ([], ["x"], []))
+        # gemma-4 31B sends the plan as a list of steps; gap() joins these fields as text
+        u = normalize_understanding({"goal": "g", "plan": ["1. read", "2. write"], "outputs": ["a", ["b"]]})
+        self.assertEqual((u["plan"], u["outputs"]), ("1. read\n2. write", ["a", '["b"]']))
 
     def test_exit_command(self):
         c, args, problem = Commands().parse("/exit")

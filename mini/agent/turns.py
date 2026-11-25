@@ -8,6 +8,7 @@ import json
 import re
 import time
 
+from ..core import coerce
 from ..harness.eventlog import ReplyStream
 from ..harness.gates import Stopped
 
@@ -167,10 +168,26 @@ class Turns:
                           if verdict == "empty" else
                           "You must call a tool now. Available: " + ", ".join(t["function"]["name"] for t in self.tools))
                 continue
+            self._coerce_calls(reply["tool_calls"])
             self.messages.append({"role": "assistant", "content": reply.get("content") or "",
                                   "tool_calls": [{"function": {"name": c["name"], "arguments": c["arguments"]}}
                                                  for c in reply["tool_calls"]]})
             return reply
+
+    def _coerce_calls(self, calls):
+        """Each call's arguments in the shapes its schema declares (core.coerce), whichever model sent them; every
+        change is logged, so which model sends which shape can be counted."""
+        schemas = {t["function"]["name"]: t["function"].get("parameters") for t in self.tools if "function" in t}
+        for c in calls:
+            spec, args = schemas.get(c.get("name")), c.get("arguments")
+            if not isinstance(spec, dict) or not isinstance(args, dict):
+                continue
+            fixed = coerce(spec, args)
+            changed = sorted(k for k in fixed if fixed[k] != args.get(k))
+            if changed:
+                self.a.log.emit("watchdog", name="coerced", step=self.step, tool=c["name"], fields=changed,
+                                model=self.a.model)
+                c["arguments"] = fixed
 
     def _limit_reached(self):
         a = self.a

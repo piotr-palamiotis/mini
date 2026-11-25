@@ -54,7 +54,13 @@ def as_list(v):
 def normalize_understanding(u):
     u = dict(u)
     for k in ("inputs", "outputs", "side_effects", "ambiguities"):
-        u[k] = as_list(u.get(k))
+        u[k] = [x if isinstance(x, str) else json.dumps(x) for x in as_list(u.get(k))]
+    for k in ("goal", "plan"):   # some models send the plan as a list of steps
+        v = u.get(k)
+        if isinstance(v, (list, tuple)):
+            u[k] = "\n".join(x if isinstance(x, str) else json.dumps(x) for x in v)
+        elif v is not None and not isinstance(v, str):
+            u[k] = json.dumps(v)
     return u
 
 

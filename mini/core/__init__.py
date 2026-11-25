@@ -10,6 +10,7 @@ load() finds every module, so adding a capability means adding one file. Modules
 shared helpers, not capabilities.
 """
 import importlib
+import json
 import pkgutil
 import re
 
@@ -90,19 +91,64 @@ def validate(schema, args):
     return out, "; ".join(problems)
 
 
-def _check(key, spec, v):
-    t = spec.get("type")
+def _text(x):
+    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+
+
+def coerce(spec, v):
+    """v converted to the type spec declares, the same way for every model: models differ in the shape they pick for
+    the same field (a plan as text or as a list of steps, one object or a list of one). Only the shape changes, never
+    the content. Goes into array items and object properties. A value that cannot be converted is left as it is, for
+    the validator to name."""
+    t = spec.get("type") if isinstance(spec, dict) else None
+    if v is None or not isinstance(t, str):
+        return v
+    if t == "string":
+        if isinstance(v, (list, tuple)):
+            if len(v) <= 1:
+                return _text(v[0]) if v else ""            # a list of one (or none) where text is expected
+            if "enum" not in spec and all(isinstance(x, str) and " " in x.strip() for x in v):
+                return "\n".join(v)                       # lines or steps of prose; several paths or names stay a list
+            return v
+        if isinstance(v, dict):
+            return json.dumps(v, ensure_ascii=False)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return str(v)
+        return v
     if t in ("integer", "number") and isinstance(v, str):
         try:
-            v = int(v) if t == "integer" else float(v)
+            f = float(v.strip())
+            return int(f) if t == "integer" and f.is_integer() else f if t == "number" else v
+        except ValueError:
+            return v
+    if t == "boolean" and isinstance(v, str) and v.strip().lower() in ("true", "false"):
+        return v.strip().lower() == "true"
+    if t in ("array", "object") and isinstance(v, str) and v.strip()[:1] in ("[", "{"):
+        try:
+            v = json.loads(v)                              # JSON sent as a string
         except ValueError:
             pass
-    elif t == "boolean" and isinstance(v, str) and v.lower() in ("true", "false"):
-        v = v.lower() == "true"
-    elif t == "array" and isinstance(v, str):
-        v = [v]                                   # one value where a list is expected
-    elif t == "string" and isinstance(v, list) and len(v) <= 1 and all(isinstance(x, str) for x in v):
-        v = v[0] if v else ""                     # a list of one (or none) where a string is expected
+    if t == "array":
+        items = spec.get("items") if isinstance(spec.get("items"), dict) else {}
+        if isinstance(v, (str, int, float, bool)) or (isinstance(v, dict) and items.get("type") == "object"):
+            v = [v]                                        # one value where a list is expected (a dict that is not
+                                                           # an item may be a garbled form a repair reads)
+        if isinstance(v, list) and isinstance(spec.get("items"), dict):
+            v = [coerce(spec["items"], x) for x in v]
+        return v
+    if t == "object":
+        if isinstance(v, list) and len(v) == 1 and isinstance(v[0], dict):
+            v = v[0]                                       # a list of one object where the object is expected
+        props = spec.get("properties")
+        if isinstance(v, dict) and isinstance(props, dict):
+            v = {k: coerce(props[k], x) if k in props else x for k, x in v.items()}
+        return v
+    return v
+
+
+def _check(key, spec, v):
+    t = spec.get("type")
+    v = coerce(spec, v)
     if t in TYPES and (not isinstance(v, TYPES[t]) or (t in ("integer", "number") and isinstance(v, bool))):
         return v, f"{key} must be {'an' if t[0] in 'aeio' else 'a'} {t}"
     if "enum" in spec and v not in spec["enum"]:
