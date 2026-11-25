@@ -59,6 +59,42 @@ class TasksTest(unittest.TestCase):
             self.assertIn("FAIL", r.stdout)
 
 
+class ProvenanceTest(unittest.TestCase):
+    """calc_* checks: a number the model typed must have been printed by a program (or be in a file one wrote)."""
+
+    def check(self, events):
+        from mini.bench.suites import calc
+        w = tempfile.mkdtemp()
+        os.makedirs(os.path.join(w, ".mini", "runs", "r1"))
+        with open(os.path.join(w, ".mini", "runs", "r1", "log.jsonl"), "w") as f:
+            for e in [{"kind": "run_start", "task": "t"}] + events:
+                f.write(json.dumps(e) + "\n")
+        out = os.path.join(w, "..", "a.out")
+        open(out, "w").close()
+        p = os.path.join(w, "..", "prov.py")
+        with open(p, "w") as f:
+            f.write(calc.HEAD + "\nfrom_program([(2565.74, 2)], 'batch A')\nprint('PASS')\n")
+        return subprocess.run([sys.executable, "-I", p, w, out], capture_output=True, text=True).stdout.strip()
+
+    def test_a_file_rewritten_by_keep_tool_is_program_output(self):
+        ev = [{"kind": "tool_call", "step": "execute", "name": "run_code", "args": {"script": "..."}},
+              {"kind": "files_changed", "paths": ["totals_A.csv"]},
+              {"kind": "tool_result", "step": "execute", "name": "run_code", "text": "Files written: totals_A.csv"},
+              {"kind": "tool_call", "step": "execute", "name": "keep_tool", "args": {"what": "invoice totals"}},
+              {"kind": "files_changed", "paths": ["totals_A.csv"]},
+              {"kind": "tool_result", "step": "execute", "name": "keep_tool", "text": "Kept as the tool x v1"},
+              {"kind": "tool_call", "step": "execute", "name": "read_file", "args": {"path": "totals_A.csv"}},
+              {"kind": "tool_result", "step": "execute", "name": "read_file", "text": "A-001,2565.74,221.14"},
+              {"kind": "tool_call", "step": "execute", "name": "finish", "args": {"answer": "A-001 net 2565.74"}}]
+        self.assertEqual(self.check(ev), "PASS")
+
+    def test_a_number_no_program_printed_fails(self):
+        ev = [{"kind": "tool_call", "step": "execute", "name": "read_file", "args": {"path": "invoices/a.json"}},
+              {"kind": "tool_result", "step": "execute", "name": "read_file", "text": '{"qty": 3, "price": 855.25}'},
+              {"kind": "tool_call", "step": "execute", "name": "finish", "args": {"answer": "net 2565.74"}}]
+        self.assertIn("computed by the model", self.check(ev))
+
+
 class ResultsTest(unittest.TestCase):
     def test_every_run_is_a_row_and_averages_come_from_the_rows(self):
         cfg = bench_cfg()

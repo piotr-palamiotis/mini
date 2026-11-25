@@ -4,4 +4,4 @@ __version__ goes up with every fix or change to how mini works on a task (patch 
 Bench results are stamped with it, and the statistics count only the current version: a change can make a model
 pass or fail differently, so results from before it are not mixed in (mini/bench/results.py)."""
 
-__version__ = "0.25.1"
+__version__ = "0.25.2"

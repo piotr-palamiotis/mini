@@ -12,7 +12,7 @@ HEAD = r'''import os, sys, re, json, glob, csv, io
 W, A = sys.argv[1], open(sys.argv[2]).read()
 def fail(m): print('FAIL', m); sys.exit(1)
 
-PROGRAM = ('run_code', 'invoke_tool')                   # their results are program output
+PROGRAM = ('run_code', 'invoke_tool', 'keep_tool')      # their results are program output (keep_tool runs the kept tool)
 TYPED = ('write_file', 'edit_file', 'replace', 'replace_lines', 'append_file', 'run_code', 'invoke_tool', 'finish')
 NUM = re.compile(r'-?\d+(?:\.\d+)?')                  # plain numbers; CSV commas separate them
 GROUPED = re.compile(r'-?\d{1,3}(?:,\d{3})+(?:\.\d+)?')  # and 1,234.56 read whole as well
