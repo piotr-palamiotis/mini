@@ -1,7 +1,7 @@
 """Configuration. Every cap, budget and watchdog threshold lives here. Stdlib only.
 
 Two layers: <project>/config/mini.toml holds the shared settings (in git), and ~/.config/mini/mini.toml this
-machine's own (model, presets, GPU, paths, providers: never in git), laid over it. Every change mini makes (setup,
+machine's own (model, presets, GPU, paths: never in git), laid over it. Every change mini makes (setup,
 presets, the settings screen) goes to the machine file. --config PATH or $MINI_CONFIG names one file instead, read
 alone and written to (tests, benches). Values missing everywhere fall back to DEFAULTS, so an old file keeps
 working when new keys appear.
@@ -14,16 +14,12 @@ import tomllib
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULTS = {
-    "local": {
-        "backend": "openai",                 # openai = any OpenAI-compatible server (llama.cpp llama-server, ...)
-        "url": "http://127.0.0.1:8080/v1",
-        "model": "gemma4-12b",
+    "local": {                               # the model mini runs on: llama-server, built and run by mini setup
+        "backend": "openai",                 # llama-server speaks the OpenAI-compatible API (tests use "fake")
+        "url": "",                           # empty: http://127.0.0.1:<[llamacpp] port>/v1
+        "model": "gemma4-12b",               # used when no preset is active; a preset's model takes its place
         "temperature": 0.6,
-        "use": [],                           # local backends in order of preference, from [backends.<name>];
-                                             # a task runs on the first that answers and has its model.
-                                             # Empty: the backend/url/model above.
     },
-    "backends": {},                          # name -> {backend, url, model}; written by mini setup
     "llamacpp": {                            # the llama.cpp install mini setup manages
         "dir": "~/llama.cpp",                # source checkout and build of the pinned release
         "models_dir": "~/models",            # GGUF files: NAME.gguf, or NAME/ with the model and its mmproj-*.gguf
@@ -36,7 +32,8 @@ DEFAULTS = {
         "extra_args": "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024",
     },
     # Named ways to run llama-server, e.g. [presets.rtx3070]: gpu, device, model, ctx, models_max, extra_args.
-    # The preset named in [llamacpp] preset is laid over [llamacpp]; `mini preset use NAME` switches.
+    # The preset named in [llamacpp] preset is laid over [llamacpp] and its model is the one mini uses;
+    # `mini preset use NAME` or /model NAME in the UI switches.
     "presets": {},
     "workspace": {                           # the folder mini is launched in is where it works (a git repository)
         "refuse": ["~", "/"],                # too broad to work in: mini does not start a task there
@@ -99,28 +96,6 @@ DEFAULTS = {
         "auto_approve": [],                  # kinds approved in auto mode: confirm, plan, permissions, install, consult, cap, question
         "auto_choice": {"confirm": "proceed", "cap": "hint"},
     },
-    # Cloud tiers through an OpenAI-compatible gateway (OmniRoute). The model names are gateway combos, so the
-    # actual models are chosen in the gateway's dashboard, not here. The key comes from api_key_env or ~/.config/mini/env.
-    "free": {
-        "enabled": False,                    # computed by load(): on when the config file has a [free] section
-        "backend": "openai",
-        "url": "http://127.0.0.1:20128/v1",
-        "model": "mini-free",
-        "api_key_env": "OMNIROUTE_API_KEY",
-        "temperature": 0.4,
-        "thinking_controls": False,          # do not send llama.cpp-only thinking fields to the gateway
-        "tokens_per_run": 3000000,
-    },
-    "paid": {
-        "enabled": False,                    # computed by load(): on when the config file has a [paid] section
-        "backend": "openai",
-        "url": "http://127.0.0.1:20128/v1",
-        "model": "mini-paid",
-        "api_key_env": "OMNIROUTE_API_KEY",
-        "temperature": 0.4,
-        "thinking_controls": False,
-        "tokens_per_run": 2000000,
-    },
     "consult": {
         "enabled": True,                     # when the attempt budget runs out, ask the user for advice first
         "extra_attempts": 3,                 # attempts granted after the user gives advice
@@ -158,21 +133,11 @@ def _merge(base, over):
     return out
 
 
-TIERS = ("local", "free", "paid")
 CONFIG_DIR = os.path.expanduser("~/.config/mini")
-ENV_FILE = os.path.join(CONFIG_DIR, "env")
 USER_FILE = os.path.join(CONFIG_DIR, "mini.toml")     # this machine's settings, laid over SHARED_FILE
 SHARED_FILE = os.path.join(ROOT, "config", "mini.toml")
 USER_HEADER = ("# mini settings for this machine, laid over config/mini.toml in the mini folder. mini setup, mini preset\n"
-               "# and the settings screen write here. Keep secrets in ~/.config/mini/env, not here.\n")
-
-
-def local_candidates(cfg):
-    """[(name, local config)] in order of preference: [local] use, each merged over [local]."""
-    names = [n for n in cfg["local"].get("use") or [] if n in cfg.get("backends", {})]
-    if not names:
-        return [("local", dict(cfg["local"]))]
-    return [(n, {**cfg["local"], **cfg["backends"][n]}) for n in names]
+               "# and the settings screen write here.\n")
 
 
 def llama_settings(cfg):
@@ -180,23 +145,6 @@ def llama_settings(cfg):
     lc = dict(cfg["llamacpp"])
     lc.update((cfg.get("presets") or {}).get(lc.get("preset") or "") or {})
     return lc
-
-
-def secret(name):
-    """A credential from the environment, else from ~/.config/mini/env (KEY=VALUE lines). Never from the repo."""
-    if not name:
-        return ""
-    if os.environ.get(name):
-        return os.environ[name]
-    try:
-        with open(ENV_FILE) as f:
-            for line in f:
-                k, _, v = line.strip().partition("=")
-                if k.strip() == name and not line.lstrip().startswith("#"):
-                    return v.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return ""
 
 
 class Config(dict):
@@ -223,10 +171,18 @@ def load(path=None):
             with open(f, "rb") as fh:
                 data = _merge(data, tomllib.load(fh))
     cfg = Config(_merge(DEFAULTS, data))
-    for t in ("free", "paid"):         # a cloud tier is on when it is configured (its section exists), unless switched off
-        cfg[t]["enabled"] = isinstance(data.get(t), dict) and data[t].get("enabled", True) is not False
     cfg.path, cfg.source, cfg.files = source or USER_FILE, source, files
-    cfg["local"] = local_candidates(cfg)[0][1]       # [local] shows the preferred backend's url and model
+    resolve_local(cfg)
+    return cfg
+
+
+def resolve_local(cfg):
+    """[local] url and model from the llama-server settings: its port, and the active preset's model."""
+    if not cfg["local"].get("url"):
+        cfg["local"]["url"] = f"http://127.0.0.1:{cfg['llamacpp']['port']}/v1"
+    model = llama_settings(cfg).get("model")
+    if model:
+        cfg["local"]["model"] = model
     return cfg
 
 

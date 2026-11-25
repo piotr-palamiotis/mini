@@ -75,7 +75,7 @@ class PipelineTest(unittest.TestCase):
         agent = Agent(cfg, backend=fake_backend(script(src)), label="pipeline")
         s = agent.run_task("How many lines does a.txt have?", [src])
         self.assertEqual(s["status"], "success", s["error"])
-        self.assertEqual(s["created"][0]["attempts"], {"local": 2})
+        self.assertEqual(s["created"][0]["attempts"], 2)
         m = agent.registry.get("count_text_lines")
         self.assertTrue(m["test_results"]["passed"])
         self.assertEqual(m["created_by"]["provider"], "local")

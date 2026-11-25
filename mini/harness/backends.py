@@ -1,5 +1,5 @@
 """Model backends. Each turns a chat request into one normalized reply. Stdlib only.
-Every real backend speaks the OpenAI-compatible API: llama.cpp's llama-server locally, the gateway for the cloud.
+The real backend is llama.cpp's llama-server, built and run by mini setup; it speaks the OpenAI-compatible API.
 
 Normalized reply:
   {"content": str, "thinking": str, "tool_calls": [{"name": str, "arguments": dict}],
@@ -36,18 +36,14 @@ THINK_BUDGET_MESSAGE = " Thinking budget reached. Stop reasoning and act now on 
 
 
 class Endpoint:
-    def __init__(self, type, url, options=None, api_key_env="", max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S, think_max_chars=0,
+    def __init__(self, type, url, options=None, max_tokens=MAX_OUTPUT_TOKENS, timeout_s=REPLY_TIMEOUT_S, think_max_chars=0,
                  think_budget_tokens=0, max_tokens_tools=0, comment_cut_chars=0):
-        self.type, self.url, self.options, self.api_key_env = type, url.rstrip("/"), dict(options or {}), api_key_env
+        self.type, self.url, self.options = type, url.rstrip("/"), dict(options or {})
         self.max_tokens, self.timeout_s = max_tokens, timeout_s
         self.think_max_chars = think_max_chars        # 0 = no cap; thinking past this with no answer or call ends the reply
         self.think_budget_tokens = think_budget_tokens  # 0 = none; llama-server closes thinking here and the model answers
         self.max_tokens_tools = max_tokens_tools        # 0 = max_tokens; cap for replies that may call tools (thinking included)
         self.comment_cut_chars = comment_cut_chars      # 0 = off; a call or reply past this, mostly comments, is cut
-
-    def api_key(self):
-        from .config import secret
-        return secret(self.api_key_env)
 
 
 class Backend:
@@ -88,10 +84,7 @@ class OpenAIBackend(Backend):
             return [m["id"] for m in json.loads(r.read()).get("data", [])]
 
     def _headers(self):
-        h = {"Content-Type": "application/json"}
-        if self.ep.api_key():
-            h["Authorization"] = "Bearer " + self.ep.api_key()
-        return h
+        return {"Content-Type": "application/json"}
 
     @staticmethod
     def _convert(messages):
@@ -129,15 +122,14 @@ class OpenAIBackend(Backend):
             body["max_tokens"] = min(body["max_tokens"], self.ep.max_tokens_tools)
         if tools:
             body["tools"] = tools
-        if opts.pop("thinking_controls", True):          # llama-server fields; a gateway may reject them
-            kw = dict(opts.pop("chat_template_kwargs", {}))
-            kw.setdefault("enable_thinking", bool(think))
-            body["chat_template_kwargs"] = kw
-            if not think:
-                body["reasoning_budget_tokens"] = 0
-            elif self.ep.think_budget_tokens:      # the server ends thinking at the budget, so the reply still has an answer
-                body["reasoning_budget_tokens"] = self.ep.think_budget_tokens
-                body["reasoning_budget_message"] = THINK_BUDGET_MESSAGE
+        kw = dict(opts.pop("chat_template_kwargs", {}))      # llama-server's thinking fields
+        kw.setdefault("enable_thinking", bool(think))
+        body["chat_template_kwargs"] = kw
+        if not think:
+            body["reasoning_budget_tokens"] = 0
+        elif self.ep.think_budget_tokens:      # the server ends thinking at the budget, so the reply still has an answer
+            body["reasoning_budget_tokens"] = self.ep.think_budget_tokens
+            body["reasoning_budget_message"] = THINK_BUDGET_MESSAGE
         body.update({k: v for k, v in opts.items() if k in ("temperature", "top_p", "top_k", "min_p", "repeat_penalty",
                                                               "presence_penalty", "seed", "reasoning_budget_tokens")})
         req = urllib.request.Request(self.ep.url + "/chat/completions", data=json.dumps(body).encode(), headers=self._headers())
@@ -256,14 +248,10 @@ BACKENDS = {"openai": OpenAIBackend, "fake": FakeBackend}
 
 
 def has_model(entry, timeout=3):
-    """Does the server in entry ({backend, url, model, api_key_env}) answer and list entry's model?"""
+    """Does the server in entry ({url, model}) answer and list entry's model?"""
     import urllib.request
-    from .config import secret
     try:
-        key = secret(entry.get("api_key_env", ""))
-        req = urllib.request.Request(entry["url"].rstrip("/") + "/models",
-                                     headers={"Authorization": "Bearer " + key} if key else {})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(entry["url"].rstrip("/") + "/models", timeout=timeout) as r:
             body = json.loads(r.read())
         names = [m.get("id") or m.get("name") for m in body.get("data") or body.get("models") or []]
         return entry["model"] in names

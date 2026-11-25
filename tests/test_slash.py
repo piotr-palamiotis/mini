@@ -35,6 +35,8 @@ def tools(*extra):
     return [EMAIL, {"name": "status", "description": "clashes with /status", "version": 1, "input_schema": {}}, *extra]
 
 
+PRESETS = ["rtx", "big", "cpu"]                        # /model completes and checks the preset names
+
 class RegistryTest(unittest.TestCase):
     def test_core_commands_and_tools_from_one_description(self):
         c = Commands(tools())
@@ -56,7 +58,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual([c.get(n).mode for n in ("no-inputs", "has-inputs", "talks")], ["ask", "form", "ask"])
 
     def test_parse_flags_values_and_positionals(self):
-        c = Commands(tools())
+        c = Commands(tools(), PRESETS)
         cmd, args, problem = c.parse('/send-email --to anna@example.com --subject "Hi there" --copies 2 --html '
                                      '--attachments a.pdf b.pdf --priority=high --headers \'{"X":"1"}\'')
         self.assertEqual(problem, "")
@@ -67,7 +69,7 @@ class RegistryTest(unittest.TestCase):
         self.assertIn("not a number", c.parse("/send-email --copies many")[2])
         self.assertIn("one of", c.parse("/send-email --priority urgent")[2])
         self.assertIn("needs a value", c.parse("/send-email --to")[2])
-        self.assertEqual(c.parse("/model paid")[1], {"tier": "paid"})
+        self.assertEqual(c.parse("/model big")[1], {"preset": "big"})
         self.assertIn("one of", c.parse("/model fast")[2])
         self.assertEqual(c.parse("/undo r1 a.txt")[1], {"target": ["r1", "a.txt"]})
         self.assertEqual(c.parse("/attach my notes.txt")[1], {"path": "my notes.txt"})
@@ -87,7 +89,7 @@ class RegistryTest(unittest.TestCase):
 
 class CompletionTest(unittest.TestCase):
     def setUp(self):
-        self.c = Commands(tools())
+        self.c = Commands(tools(), PRESETS)
         self.d = tempfile.mkdtemp()
         for rel in ("report.pdf", "notes.txt", "docs/a.pdf", ".hidden", ".git/config"):
             os.makedirs(os.path.dirname(os.path.join(self.d, rel)) or self.d, exist_ok=True)
@@ -100,7 +102,7 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(len(self.labels("/")), len(self.c.all()))
         got = self.c.complete("/mo", self.d)
         self.assertEqual(got[0][:2], ("/model ", "/model"))
-        self.assertIn("session", got[0][2])
+        self.assertIn("preset", got[0][2])
         self.assertEqual(self.labels("/send"), ["/send-email"])
         self.assertEqual(self.labels("task"), [])
 
@@ -112,9 +114,9 @@ class CompletionTest(unittest.TestCase):
         self.assertNotIn("--to", self.labels("/send-email --to x --"))  # given once already
         self.assertEqual(self.labels("/send-email --priority "), ["low", "normal", "high"])
         self.assertEqual(self.labels("/send-email --priority h"), ["high"])
-        self.assertEqual(self.labels("/model "), ["local", "free", "paid"])
-        self.assertEqual(self.labels("/model paid "), [])
-        self.assertEqual(self.c.complete("/model p", self.d)[0][0], "/model paid ")
+        self.assertEqual(self.labels("/model "), PRESETS)
+        self.assertEqual(self.labels("/model big "), [])
+        self.assertEqual(self.c.complete("/model b", self.d)[0][0], "/model big ")
 
     def test_file_paths_relative_to_the_folder(self):
         self.assertEqual(self.labels("/attach "), ["docs/", "notes.txt", "report.pdf"])   # no hidden, no .git
@@ -258,6 +260,7 @@ class SlashUITest(unittest.TestCase):
     def app(self, folder=None):
         cfg = temp_config(**{"approvals.confirm_first": False})
         cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")
+        cfg["presets"] = {n: {"model": n} for n in PRESETS}
         install(cfg)
         app = MiniApp(cfg, backend_factory=lambda: None)
         if folder:
@@ -276,11 +279,11 @@ class SlashUITest(unittest.TestCase):
                 await pilot.press(*"mo")
                 await pilot.press("tab")
                 self.assertEqual(prompt.value, "/model ")
-                self.assertEqual([label for _, label, _ in app.sugg], ["local", "free", "paid"])
+                self.assertEqual([label for _, label, _ in app.sugg], PRESETS)
                 self.assertIsNone(app.sugg_i)                                           # Enter would run /model
                 await pilot.press("down", "down")
-                await pilot.press("enter")                                              # picks "free"
-                self.assertEqual(prompt.value, "/model free ")
+                await pilot.press("enter")                                              # picks "big"
+                self.assertEqual(prompt.value, "/model big ")
                 await pilot.press("escape")                                             # closes the list
                 self.assertFalse(app.sugg)
                 prompt.value = "/he"

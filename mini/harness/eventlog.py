@@ -19,7 +19,7 @@ Blocks (what the UI shows as one block): start / chunk / end, linked by id.
 Chunks go to subscribers only, not to the files.
 
 Other kinds: run_start, run_end, phase, model_reply, tool_call, tool_result, registry_state, gap, spec, code,
-  test_run, attempt, watchdog, approval, sandbox, install, invoke, tier, cap, error, info
+  test_run, attempt, watchdog, approval, sandbox, install, invoke, cap, error, info
 """
 import json
 import os

@@ -1,6 +1,5 @@
-"""Model tiers: local -> free moves by itself (attempts or time used up) and the conversation carries over;
-paid is only used when the user picks it; with no tier left the user is asked, then the run stops.
-Uses scripted backends per tier plus the real sandbox."""
+"""The attempt budget: when it is used up the user is asked for advice, then the run stops; a task never moves to
+another model. Plus the stuck-loop watchdog and the request llama-server gets. Scripted models plus the real sandbox."""
 import io
 import json
 import os
@@ -28,12 +27,6 @@ def local_failing():
             LESSON]
 
 
-def fixes_and_finishes():
-    return [step(call("replace", path="tool.py", old=TOOL_FIX_OLD, new=TOOL_FIX_NEW), call("run_tests")),
-            step(call("invoke_tool", name="count_text_lines", inputs={"path": "in/a.txt"})),
-            step(call("finish", answer="2 lines"))]
-
-
 def recording(backend):
     """Keep the messages each chat call saw."""
     backend.seen = []
@@ -45,9 +38,8 @@ def recording(backend):
     return backend
 
 
-def run(cfg, local, others=None, handler=None, start_tier=None):
-    agent = Agent(cfg, backend=local, tier_backends=others or {}, approval_handler=handler, start_tier=start_tier,
-                  label="tiers")
+def run(cfg, local, handler=None):
+    agent = Agent(cfg, backend=local, approval_handler=handler, label="budget")
     src = os.path.join(agent.run_dir, "a.txt")
     open(src, "w").write("a\nb\n")
     return agent, agent.run_task("count lines", [src])
@@ -58,41 +50,16 @@ def events(agent, kind=None):
     return [e for e in ev if kind is None or e["kind"] == kind]
 
 
-class TiersTest(unittest.TestCase):
+class BudgetTest(unittest.TestCase):
     def cfg(self, **over):
         return temp_config(**{"caps.attempts_per_tool": 2, **over})
 
-    def test_local_failure_never_moves_to_another_model(self):
-        free = fake_backend(fixes_and_finishes())
-        agent, s = run(self.cfg(**{"free.enabled": True, "paid.enabled": True}), fake_backend(local_failing() + [LESSON]),
-                       {"free": free, "paid": fake_backend([])})
-        self.assertEqual(s["status"], "failed")                      # auto mode refuses the consult dialog: stop
-        self.assertEqual(s["tiers"]["used"], ["local"])
-        self.assertEqual(events(agent, "tier"), [])
-        self.assertTrue(free.script, "the free model was never asked")
-
-    def test_no_tier_left_asks_then_stops(self):
+    def test_budget_used_up_asks_then_stops(self):
         agent, s = run(self.cfg(), fake_backend(local_failing() + [LESSON]))
         self.assertEqual(s["status"], "failed")
         self.assertIn("tests still fail after 2 attempts", s["error"])
-        self.assertEqual(s["tiers"]["used"], ["local"])
         consult = [e for e in events(agent, "approval") if e["req"] == "consult" and e["phase"] == "requested"]
-        self.assertEqual(consult[0]["options"], ["send advice", "stop"], "paid is off: not offered")
-
-    def test_paid_only_when_the_user_picks_it(self):
-        offered = []
-        def handler(kind, title, details, options):
-            if kind == "consult":
-                offered.append(options)
-                return Decision(True, "use paid", "", "user")
-            return Decision(True, options[0], "", "user")
-        paid = fake_backend(fixes_and_finishes())
-        cfg = self.cfg(**{"paid.enabled": True, "approvals.mode": "ask", "consult.enabled": False})
-        agent, s = run(cfg, fake_backend(local_failing()), {"paid": paid}, handler=handler)
-        self.assertEqual(s["status"], "success", s["error"])
-        self.assertEqual(offered, [["use paid", "stop"]])
-        self.assertEqual([(e["tier"], e["decided_by"]) for e in events(agent, "tier")], [("paid", "user")])
-        self.assertEqual(agent.registry.get("count_text_lines")["created_by"]["provider"], "paid")
+        self.assertEqual(consult[0]["options"], ["send advice", "stop"])
 
     def test_consult_advice_extends_the_budget(self):
         asked = []
@@ -111,18 +78,10 @@ class TiersTest(unittest.TestCase):
         agent, s = run(self.cfg(**{"approvals.mode": "ask"}), fake_backend(script), handler=handler)
         self.assertEqual(s["status"], "success", s["error"])
         self.assertEqual(asked[0]["question"], "How should lines be counted?")
-        self.assertEqual(asked[0]["attempts used"], '{"local": 2}')
+        self.assertEqual(asked[0]["attempts used"], "2")
         self.assertTrue(any(e.get("budget") == 5 and e.get("passed") for e in events(agent, "attempt")))
         fixed = [l for l in agent.lessons.all() if l["outcome"] == "fixed"]
         self.assertEqual(fixed[0]["user_advice"], "count with str.splitlines() instead of split")
-
-    def test_start_tier(self):
-        paid = fake_backend([step(call("understand", goal="g", inputs=[], outputs=["n"], plan="1")),
-                             step(call("decide_coverage", reasoning="none needed", use=[], missing=[])),
-                             step(call("finish", answer="done"))])
-        agent, s = run(self.cfg(**{"paid.enabled": True}), fake_backend([]), {"paid": paid}, start_tier="paid")
-        self.assertEqual(s["status"], "success", s["error"])
-        self.assertEqual(s["tiers"], {"start": "paid", "used": ["paid"], "tokens": {"paid": 360}})
 
 
 class StuckLoopTest(unittest.TestCase):
@@ -227,12 +186,6 @@ class OpenAIBodyTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", fake_urlopen):
             b.chat("m", [{"role": "user", "content": "hi"}], [], think=True)
         self.assertEqual(sent["max_tokens"], 8192, "text-only turns keep the full cap")
-
-    def test_gateway_gets_no_llama_fields(self):
-        sent, _ = self.body(thinking_controls=False)
-        self.assertNotIn("chat_template_kwargs", sent)
-        self.assertNotIn("reasoning_budget_tokens", sent)
-        self.assertNotIn("thinking_controls", sent)
 
 
 if __name__ == "__main__":

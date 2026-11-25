@@ -57,31 +57,41 @@ class UITest(unittest.TestCase):
         asyncio.run(go())
         self.assertEqual(seen, ["confirm", "plan", "install"])
 
-    def test_model_command_sticks_to_the_session(self):
-        cfg = temp_config(**{"approvals.confirm_first": False, "paid.enabled": True})
+    def test_model_switches_the_preset(self):
+        """/model is the preset picker: the preset says which model and hardware llama-server runs, for every session."""
+        from mini.harness.config import dumps, set_values
+        cfg = temp_config(**{"approvals.confirm_first": False, "llamacpp.preset": "a"})
+        cfg["presets"] = {"a": {"model": "m-a"}, "b": {"model": "m-b"}}
         cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")
-        quick = lambda: fake_backend([step(call("understand", goal="g", inputs=[], outputs=["n"], plan="1")),
-                                      step(call("decide_coverage", reasoning="none needed", use=[], missing=[])),
-                                      step(call("finish", answer="done"))])
-        app = MiniApp(cfg, backend_factory=quick)
-        used = []
+        open(cfg.path, "w").write(dumps({k: v for k, v in cfg.items()}))
+        app = MiniApp(cfg, backend_factory=lambda: fake_backend([]))
+        switched = []
+
+        def switcher(c, name, ui):
+            switched.append(name)
+            set_values(c.path, {"llamacpp": {"preset": name}})
+        app.preset_switcher = switcher
 
         async def go():
             async with app.run_test(size=(180, 50)) as pilot:
-                await pilot.press(*"/model paid")
+                await pilot.press(*"/model nope")
                 await pilot.press("enter")
-                self.assertIn("paid", str(app.query_one("#status").render()))
-                for _ in range(2):
-                    await pilot.press(*"say done")
-                    await pilot.press("enter")
-                    for _ in range(100):
-                        await pilot.pause(0.1)
-                        if not app.busy:
-                            break
-                    used.append(app.agent.start_tier)
-                self.assertIn("paid", str(app.query_one("#status").render()))
+                self.assertEqual(switched, [], "an unknown preset is refused")
+                app.busy = True
+                await pilot.press(*"/model b")
+                await pilot.press("enter")
+                self.assertEqual(switched, [], "not while a task runs: llama-server restarts")
+                app.busy = False
+                await pilot.press(*"/model b")
+                await pilot.press("enter")
+                for _ in range(50):
+                    await pilot.pause(0.1)
+                    if not app.switching and switched:
+                        break
+                self.assertEqual(switched, ["b"])
+                self.assertEqual((app.cfg["llamacpp"]["preset"], app.cfg["local"]["model"]), ("b", "m-b"))
+                self.assertIn("m-b", str(app.query_one("#status").render()))
         asyncio.run(go())
-        self.assertEqual(used, ["paid", "paid"])           # /model is the session's model until changed
 
 
 class ViewsTest(unittest.TestCase):

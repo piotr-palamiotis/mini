@@ -2,7 +2,7 @@
 
 LOCAL: the local model serves one reply at a time (llama-server has one slot). Replies from different sessions take
 turns in arrival order; llama-server swaps the context itself (its prompt cache, models loaded on demand), mini
-holds the model for one reply only. Cloud tiers are not gated.
+holds the model for one reply only.
 
 FOLDER: file changes in the user's folder (and their git checkpoint) happen one at a time.
 

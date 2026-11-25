@@ -10,7 +10,7 @@ When a capability is missing, it writes a spec, the code and the tests, runs the
 asks you to approve the install, and then finishes the task with the new tool. The next session finds the
 tool in the registry and reuses it.
 
-Inference is local first. A cloud model is only used after the local model runs out of time or attempts.
+Inference is local only: mini builds and runs its own llama.cpp server, and no task data leaves the machine.
 
 mini has two parts:
 
@@ -30,9 +30,8 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 `mini setup` goes through each piece, says what is missing, and asks before it changes anything:
 
 1. **Sandbox:** podman (prints the `sudo apt` command if missing) and the sandbox image (builds it).
-2. **Local models:** a checklist of local backends: llama.cpp, and any other OpenAI-compatible server
-   (LM Studio, vLLM, ...). Tick several and pick which comes first: each task runs on the first one that
-   answers with its model, so the others are a fallback (`[local] use`, `[backends.*]`).
+2. **The model server:** mini uses one model server, which it builds and runs itself: llama.cpp's
+   `llama-server`. Nothing else has to be installed or configured, and nothing outside it is used.
    - **llama.cpp** is built in `[llamacpp] dir` (setup asks where) from exactly the release mini is tested
      with, **`b11567` (commit `972b5fc`)**, for the GPU backend of the active preset (Vulkan, CUDA or CPU; each in
      its own `build*` folder, so both can exist). The pin lives in `mini/setup.py` (`LLAMA_TAG`,
@@ -48,20 +47,15 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
    - **Presets** (`[presets.NAME]`) are named ways to run it: `gpu` (vulkan | cuda | cpu), `device`, `model`,
      `ctx`, `models_max`, `extra_args`. `[llamacpp] preset` is the active one, laid over `[llamacpp]`.
      `mini preset list`, `mini preset add NAME --gpu cuda --device CUDA0 --model M --ctx N [--args A]`,
-     `mini preset use NAME` (builds that backend if missing, rewrites the service, restarts it, points the
-     local tier at the preset's model). CUDA needs `sudo apt install nvidia-cuda-toolkit`. On 8 GB the 12B QAT
+     `mini preset use NAME` or `/model NAME` in the UI (builds that backend if missing, rewrites the service,
+     restarts it; the preset's model is the one mini uses). CUDA needs `sudo apt install nvidia-cuda-toolkit`. On 8 GB the 12B QAT
      model fits with the vision projector kept on the CPU (`--no-mmproj-offload`) up to about 49k context;
      the `rtx3070` preset uses 40960 for headroom.
    - Setup picks the GPU and the context size and runs the router as a systemd user service started at boot.
      It prints the `sudo apt` line for missing build tools.
 3. **Start at boot:** user services keep running without a login (`loginctl enable-linger`).
-4. **Cloud tiers (optional):** installs OmniRoute with npm if missing, runs it as a user service bound to
-   127.0.0.1 with an API key required, walks you through the dashboard (providers, an API key, the combos
-   `mini-free` and `mini-paid`), checks the key and saves it to `~/.config/mini/env` (mode 600). You can
-   also rename the combos or turn a tier off.
-
 It never replaces a systemd unit it did not write without asking (and keeps a `.bak`). The UI shows the state
-of each tier at startup and on `/status`.
+of the model server at startup and on `/status`.
 
 **Models from Ollama:** `scripts/ollama-export DEST` prints the commands that move an Ollama store's GGUF
 files into the models folder layout (instant on the same disk, no copies); run them with
@@ -79,9 +73,9 @@ Configuration comes in two layers (every key is documented in `mini/harness/conf
 
 - `config/mini.toml` (in git): the shared settings, the same on every machine.
 - `~/.config/mini/mini.toml` (never in git): this machine's own settings, laid over the shared file: the model,
-  the GPU and presets, the llama.cpp and models folders, the backends and the cloud tiers. Everything mini
+  the GPU and presets, and the llama.cpp and models folders. Everything mini
   changes (`mini setup`, `mini preset`, the UI's Config tab) is written here, so a `git pull` never conflicts
-  with your settings and they never end up in a commit. Secrets go in `~/.config/mini/env`.
+  with your settings and they never end up in a commit.
 - `--config PATH` or `$MINI_CONFIG` names one file instead, read alone and written to (tests and benches).
 
 The UI's Config tab is a form for the common settings (switches, dropdowns, number fields) that saves only what
@@ -125,12 +119,11 @@ and presets are managed with `mini preset` and `mini setup`.
 | Repeated passing test | 2 unchanged reruns, still passing | Straight to review |
 | File rewritten too often | More than 3 full rewrites of one file | Forced `explain` step: what fails, why, next change |
 | Failed attempts in a row | 3 failing test runs after edits | Fresh conversation with spec, current files and failing output. Counts toward the 10 attempts. |
-| Attempt budget | 10 attempts on one tool, per model tier | Local: the task moves to free. Then a dialog: advice, paid, or stop |
+| Attempt budget | 10 attempts on one tool | Dialog: advice (a few more attempts) or stop |
 | Unparseable tool call | Parse or JSON error | "Resend as one small call", up to 5x. Not an attempt. |
 | Empty reply / lost call | No tool call | One nudge. Not an attempt. |
 | Runaway output | 8,192 tokens or 300 s per reply | The reply is discarded with "make smaller changes" |
-| Local time budget | 15 min of local model time per task | The task moves to free and stays there |
-| Time and turn limits | 20 min or 30 turns per tool creation / execution phase | Dialog: hint, restart, paid, stop |
+| Time and turn limits | 20 min or 30 turns per tool creation / execution phase | Dialog: hint, restart, stop |
 | Hard run cap | 3600 s per run, 1.5M local tokens per run | Stop |
 | Command policy | argv allowlist | Commands are argv lists and never touch a shell. Denials are logged. |
 | Hardware | Swap grows by more than 250 MiB (`[watchdogs] swap_watch`, on by default) | Abort the run. The baseline is taken after the model is loaded. Growth is recorded even when the watchdog is off. |
@@ -222,25 +215,15 @@ one is missing, which **questions** it asks and in what order, what it confirms 
   the current directory is its folder (a git repository) and the files it writes land there, checkpointed like
   a task's.
 
-## Model tiers
+## The model
 
-| Tier | What | When |
-|---|---|---|
-| `local` | llama.cpp `llama-server` (router over your models folder) on this machine | Every session starts here; `/model` changes it |
-| `free` | OmniRoute combo `mini-free`: free cloud models with failover | Only when you pick it (`/model free`). Exists only when `[free]` is in the config |
-| `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Exists only when `[paid]` is in the config |
+mini runs on one model server, `llama-server` from the pinned llama.cpp release, which `mini setup` builds and
+runs as a user service over your models folder. A **preset** is a named way to run it: the model, the GPU
+build and devices, the context size and extra arguments (`[presets.NAME]` in `~/.config/mini/mini.toml`).
 
-- A cloud tier is on only when its section (`[free]`, `[paid]`) is in the config (`mini setup` writes it to
-  `~/.config/mini/mini.toml`;
-  `enabled = false` in a section switches it off again). With neither, nothing leaves the machine. mini never
-  moves a task to another model by itself: a task that fails on its tier fails. `/model` changes the tier of the
-  current session.
-- Config: `[local]`, `[free]`, `[paid]` (this machine's values in `~/.config/mini/mini.toml`). Free and paid are OpenAI-compatible
-  endpoints; the actual models behind `mini-free` and `mini-paid` are chosen in OmniRoute's dashboard.
-- The OmniRoute API key is read from `$OMNIROUTE_API_KEY` or `~/.config/mini/env` (`OMNIROUTE_API_KEY=...`). It is
-  never in the repo and never reaches a sandbox.
-- A switch keeps the conversation: the new model carries on from where the old one stopped. After a used-up
-  attempt budget it gets a fresh conversation with the spec, the files and the last failure instead.
-- Every switch is logged as a `tier` event and shown in the UI, including that task data now leaves the machine.
-  Tools record which tier built them (`created_by.provider`, `escalated_from`) and attempts per tier.
-- `mini run --model free` runs on another tier.
+- The active preset (`[llamacpp] preset`) decides which model every task uses. Without one, `[local] model`.
+- `/model` in the UI lists the presets; `/model NAME` switches to one in the middle of a conversation. It
+  restarts `llama-server`, so it waits until no task is running, and it applies to every session.
+  `mini preset use NAME` does the same from the terminal.
+- A task never moves to another model by itself: a task that fails, fails, and the user decides what next.
+- Tools record the model and preset that built them (`created_by`).

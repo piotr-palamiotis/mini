@@ -26,11 +26,10 @@ class LayersTest(unittest.TestCase):
 
     def test_machine_file_is_laid_over_the_shared_one(self):
         os.makedirs(os.path.dirname(self.user))
-        open(self.user, "w").write('[local]\nmodel = "mine"\n\n[free]\nmodel = "f"\n')
+        open(self.user, "w").write('[local]\nmodel = "mine"\n\n[llamacpp]\npreset = "p"\n\n[presets.p]\nctx = 9\n')
         cfg = config_mod.load()
         self.assertEqual((cfg["local"]["model"], cfg["local"]["temperature"], cfg["caps"]["task_turns"]), ("mine", 0.5, 7))
-        self.assertTrue(cfg["free"]["enabled"], "a tier configured in the machine file is on")
-        self.assertFalse(cfg["paid"]["enabled"])
+        self.assertEqual(config_mod.llama_settings(cfg)["ctx"], 9, "the machine's preset")
         self.assertEqual(cfg.path, self.user)
 
     def test_changes_go_to_the_machine_file_only(self):

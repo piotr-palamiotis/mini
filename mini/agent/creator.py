@@ -4,7 +4,7 @@ Enforced in code:
   - an attempt is one generate/fix of the code followed by a test run; the budget is caps.attempts_per_tool
   - as soon as the tests pass, editing stops and the install gate opens (no extra tests or refactors)
   - restarts after a fail streak happen inside the budget and do not reset it
-  - after the budget: local moves to the free tier by itself; then the user can advise, pick paid, or stop
+  - after the budget: the user can advise (a few more attempts) or stop
   - a permission or package increase always goes through the approval gate
   - a spec that does what a core capability (mini/core) does is rejected
 """
@@ -1053,14 +1053,13 @@ class Creator:
             a.log.emit("tool_call", step="step_back", name=c["name"], args=c["arguments"])
             t.result(c["name"], "Noted. Make that one change now, then run the tests.")
 
-    # ================================================================== budget, tiers, install
+    # ================================================================== budget, install
     def _consult_user(self):
-        """Budget used up and no automatic move left: ask the user. Returns "advice" (the budget was extended),
-        "paid" (the user picked the paid tier for this task) or None (stop)."""
+        """Budget used up: ask the user. Returns "advice" (the budget was extended) or None (stop)."""
         a = self.a
         cc = a.cfg["consult"]
         can_advise = cc["enabled"] and self.consults < cc["max_rounds"]
-        if not can_advise and not a.offer_paid():
+        if not can_advise:
             return None
         recurring = sorted(self.errors.items(), key=lambda x: -x[1])[:5]
         q = None
@@ -1083,19 +1082,13 @@ class Creator:
             q = {"building": self.spec["description"], "keeps_failing": recurring[0][0] if recurring else "the tests",
                  "tried": f"{a.wd.attempts} attempts", "question": "What should I change so that it works?"}
         self.consults += 1
-        options = (("send advice",) if can_advise else ()) + (("use paid",) if a.offer_paid() else ()) + ("stop",)
-        details = {"tool": self.spec["name"], "model": f"{a.tier} ({a.model})", "building": q["building"],
+        options = ("send advice", "stop")
+        details = {"tool": self.spec["name"], "model": a.model, "building": q["building"],
                    "keeps failing": q["keeps_failing"], "already tried": q["tried"],
                    "recurring errors": "; ".join(f"{s} (x{n})" for s, n in recurring) or "-",
-                   "attempts used": json.dumps(a.wd.tier_attempts), "question": q["question"]}
-        if can_advise:
-            details["send advice"] = f"{cc['extra_attempts']} more attempts with your advice (write it in the note)"
-        if a.offer_paid():
-            details["use paid"] = f"the paid model ({a.cfg['paid']['model']}) takes over for the rest of this task"
+                   "attempts used": str(a.wd.attempts), "question": q["question"],
+                   "send advice": f"{cc['extra_attempts']} more attempts with your advice (write it in the note)"}
         d = a.gate.request("consult", "mini is stuck and would like your advice", details, options=options)
-        if d.approved and d.choice == "use paid":
-            a.log.emit("consult", answered=True, choice="paid", decided_by=d.decided_by)
-            return "paid"
         advice = (d.note or "").strip()
         if not d.approved or d.choice != "send advice" or not advice:
             a.log.emit("consult", answered=False, decided_by=d.decided_by)
@@ -1115,32 +1108,19 @@ class Creator:
         choice = self._consult_user()
         if choice == "advice":
             return None
-        if choice == "paid":
-            a.switch_tier("paid", f"the user picked paid after {a.wd.attempts} failed attempts", "user")
-            self._handover()
-            return None
-        a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.tier_attempts, tier=a.tier)
-        raise ToolFailed(f"{self.spec['name']}: tests still fail after {sum(a.wd.tier_attempts.values())} attempts")
-
-    def _handover(self):
-        """A stronger model takes over the tool: fresh conversation with the spec, the files and the last failure."""
-        a = self.a
-        a.log.emit("phase", phase="handover", tool=self.spec["name"], tier=a.tier, model=a.model)
-        self._fresh(trim(self.last_output), head=prompts.HANDOVER.format(attempts=json.dumps(a.wd.tier_attempts)) + "\n\n")
-        self.messages.append({"role": "user", "content": prompts.FIX})
+        a.log.emit("cap", cap="attempt_budget", tool=self.spec["name"], attempts=a.wd.attempts)
+        raise ToolFailed(f"{self.spec['name']}: tests still fail after {a.wd.attempts} attempts")
 
     def _install(self):
         a = self.a
         if a.wd.attempts > 1:
             self._record_lesson("fixed")
-        created_by = {"provider": a.tier, "model": a.model, "backend": a.cfg[a.tier]["backend"]}
-        if a.escalated_from:
-            created_by["escalated_from"] = a.escalated_from
+        created_by = {"provider": "local", "model": a.model, "preset": a.cfg["llamacpp"].get("preset") or None}
         manifest = dict(self.spec)
         manifest.update({
             "kind": "code", "files": sorted(os.listdir(self.files_dir)), "test_file": "test_tool.py",
             "test_results": self.last_test, "created_by": created_by,
-            "attempts_used": dict(a.wd.tier_attempts),
+            "attempts_used": a.wd.attempts,
             "restarts": self.restarts, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "image": self.image, "parent_version": self.parent, "run_id": a.log.run_id,
         })

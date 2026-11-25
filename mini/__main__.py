@@ -1,17 +1,18 @@
 """mini command line.
 
   python -m mini ui                                   Textual UI (default)
-  python -m mini run "task" [--attach FILE] [--auto] [--no-confirm] [--model local|free|paid] [--label L]
+  python -m mini run "task" [--attach FILE] [--auto] [--no-confirm] [--label L]
   python -m mini tools list|staged|show NAME [VERSION]|review NAME|accept NAME|discard NAME|rollback NAME VERSION|wipe
                      review/accept/discard take --run RUN when more than one task staged the tool
   python -m mini tool NAME [--field VALUE ...]        run an accepted tool; it asks for what is not given
   python -m mini tools shims                          (re)write the PATH commands of accepted tools
   python -m mini settings list|show KEY|set KEY|delete KEY
   python -m mini preset list|add NAME [--gpu vulkan|cuda|cpu --device D --model M --ctx N --args A]|use NAME|show [NAME]
-                                                      llama-server presets (GPU, model, context) in [presets.*]
+                                                      llama-server presets (GPU, model, context) in [presets.*]:
+                                                      the active one is the model mini runs on
   python -m mini undo [RUN] [FILE ...] [--list]       put back what a task changed (default: the newest task), or
                                                       only the files named, from its checkpoint (refs/mini/<run>)
-  python -m mini setup                                guided setup: sandbox, local model, cloud gateway
+  python -m mini setup                                guided setup: sandbox, llama.cpp, the local model
   python -m mini doctor                               check the setup, change nothing
 
 mini works in the folder it is started in, which must be a git repository (it offers `git init`). Before a task
@@ -48,7 +49,6 @@ def main(argv=None):
     r.add_argument("--auto", action="store_true")
     r.add_argument("--auto-approve", default="confirm,plan,permissions,install,cap")
     r.add_argument("--no-confirm", action="store_true")
-    r.add_argument("--model", choices=["local", "free", "paid"], help="tier to run on (default: local)")
     r.add_argument("--label", default="")
     r.add_argument("--quiet", action="store_true")
     g = sub.add_parser("tools", aliases=["registry"])
@@ -98,13 +98,13 @@ def main(argv=None):
             return 2
         if not checkpoint.offer_init(folder, checkpoint.terminal_ask):
             return 2
-        agent = Agent(cfg, label=a.label, start_tier=a.model, workspace=folder)
+        agent = Agent(cfg, label=a.label, workspace=folder)
         if not a.quiet:
             from .harness.eventlog import HeadlessSink
             agent.log.subscribe(HeadlessSink())
         s = agent.run_task(a.task, a.attach)
-        print(json.dumps({k: s[k] for k in ("run_id", "status", "answer", "error", "secs", "created", "escalations",
-                                            "tiers", "watchdogs", "outputs", "checkpoint")}, indent=1))
+        print(json.dumps({k: s[k] for k in ("run_id", "status", "answer", "error", "secs", "model", "created",
+                                            "watchdogs", "outputs", "checkpoint")}, indent=1))
         return 0 if s["status"] == "success" else 1
     if a.cmd in ("tools", "registry"):
         return tools_cmd(cfg, a)

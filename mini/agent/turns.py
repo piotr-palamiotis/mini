@@ -2,7 +2,6 @@
 
 ask() returns the next reply that carries at least one usable tool call. Runaway output, unparseable calls and
 empty replies are answered by the harness (they never count as attempts). Time/turn limits ask the user.
-When the local model's time budget for the task is used up, the conversation moves to the free tier.
 """
 import json
 import re
@@ -59,7 +58,7 @@ class Turns:
         self.implicit = implicit       # implicit(reply) -> synthesized tool call or None (e.g. code without a call)
 
     def _options(self):
-        if self.think_tokens and self.a.model_options.get("thinking_controls", True):
+        if self.think_tokens:
             return {**self.a.model_options, "reasoning_budget_tokens": self.think_tokens}
         return self.a.model_options
 
@@ -105,11 +104,10 @@ class Turns:
             stream.close("stopped" if reply.get("stopped") else "error" if reply.get("raw_error") else "ok")
             used = (reply.get("prompt_tokens") or 0) + (reply.get("output_tokens") or 0)
             a.tokens += used
-            a.tier_tokens[a.tier] = a.tier_tokens.get(a.tier, 0) + used
             a.log.emit("model_reply", step=self.step, thinking=reply.get("thinking"), content=reply.get("content"),
                        tool_calls=reply.get("tool_calls"), prompt_tokens=reply.get("prompt_tokens"),
                        output_tokens=reply.get("output_tokens"), secs=reply.get("secs"), done_reason=reply.get("done_reason"),
-                       error=reply.get("raw_error"), run_tokens=a.tokens, tier=a.tier, model=a.model)
+                       error=reply.get("raw_error"), run_tokens=a.tokens, model=a.model)
             if reply.get("think_budget_hit"):
                 a.log.emit("watchdog", name="think_budget", step=self.step, limit_tokens=a.cfg["caps"].get("reply_think_budget_tokens"))
             if reply.get("stopped"):
@@ -124,9 +122,10 @@ class Turns:
                     raise AgentStop(f"the conversation ({need} tokens) no longer fits the model's context ({have} tokens) "
                                     f"and cannot be shortened further: ask for a smaller step, or raise ctx in the preset")
                 continue
-            if a.tier_tokens[a.tier] > a.tier_tokens_cap():
-                a.log.emit("cap", cap="tokens_per_run", tier=a.tier, used=a.tier_tokens[a.tier], limit=a.tier_tokens_cap())
-                raise AgentStop(f"{a.tier} token cap reached: {a.tier_tokens[a.tier]} > {a.tier_tokens_cap()}")
+            cap = a.cfg["caps"]["tokens_per_run"]
+            if a.tokens > cap:
+                a.log.emit("cap", cap="tokens_per_run", used=a.tokens, limit=cap)
+                raise AgentStop(f"token cap reached: {a.tokens} > {cap}")
             if text_only:
                 if a.wd.on_reply(reply, expect_call=False) == "runaway":
                     self.messages.append({"role": "assistant", "content": "(reply discarded: too long)"})
@@ -191,12 +190,11 @@ class Turns:
 
     def _limit_reached(self):
         a = self.a
-        options = ["hint", "restart"] + (["use paid"] if a.offer_paid() else []) + ["stop"]
+        options = ["hint", "restart", "stop"]
         d = a.gate.request("cap", "Time or turn limit reached",
                            {"elapsed_s": round(a.wd_elapsed()), "turns": a.wd.turns, "step": self.step,
-                            "model": f"{a.tier} ({a.model})",
-                            "limits": f"{a.cfg['caps']['task_wall_clock_s']} s / {a.cfg['caps']['task_turns']} turns",
-                            "use paid": "switch to the paid model for the rest of this task"},
+                            "model": a.model,
+                            "limits": f"{a.cfg['caps']['task_wall_clock_s']} s / {a.cfg['caps']['task_turns']} turns"},
                            options=options)
         a.log.emit("cap", cap="time_or_turns", choice=d.choice)
         if not d.approved or d.choice == "stop":
@@ -206,10 +204,6 @@ class Turns:
             self.user("Hint from the user: " + (d.note or "Keep it simple and finish the current step."))
         elif d.choice == "restart":
             raise RestartRequested()
-        elif d.choice == "use paid":
-            a.switch_tier("paid", "the user picked paid at the time/turn limit", "user")
-            self.user("A different model continues this task from here. Read the conversation above and carry on "
-                      "with the current step." + (f" Note from the user: {d.note}" if d.note else ""))
 
 
 def args_json(args, limit=300):

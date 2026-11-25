@@ -1,4 +1,4 @@
-"""Approval gate. Installs, permission increases, the confirm-first step, model-tier choices and cap decisions all
+"""Approval gate. Installs, permission increases, the confirm-first step and cap decisions all
 pass through request(). The agent cannot answer for the user.
 
 Modes (config [approvals]):

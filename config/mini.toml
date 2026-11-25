@@ -1,12 +1,10 @@
-# mini's shared settings (in git). This machine's own settings (model, GPU, presets, paths, cloud providers) go in
+# mini's shared settings (in git). This machine's own settings (model, GPU, presets, paths) go in
 # ~/.config/mini/mini.toml, laid over this file: `mini setup` and `mini preset` write there. Missing keys fall back
 # to mini/harness/config.py DEFAULTS.
 
 [local]
-# The local tier. `use` lists backends from [backends.*] in order of preference; mini setup writes them
-# (to ~/.config/mini/mini.toml).
+# The model, served by mini's own llama-server. The active preset's model takes the place of `model`.
 backend = "openai"
-url = "http://127.0.0.1:8080/v1"
 model = "gemma4-12b"
 temperature = 0.6
 
@@ -75,9 +73,6 @@ auto_approve = []
 confirm = "proceed"
 cap = "hint"
 
-# Cloud tiers ([free], [paid]) are off until configured: `mini setup` adds them to ~/.config/mini/mini.toml.
-# Defaults (OmniRoute at http://127.0.0.1:20128, key from $OMNIROUTE_API_KEY or ~/.config/mini/env) are in config.py.
-
 [consult]
 enabled = true
 extra_attempts = 3
@@ -103,7 +98,7 @@ facts = []
 state = "state"
 runs = "runs"
 
-# [backends.*] and [presets.*] describe this machine's model servers: they live in ~/.config/mini/mini.toml.
+# [presets.*] (named ways to run llama-server: model, GPU, context) live in ~/.config/mini/mini.toml.
 
 # The folder mini is started in is where it works. It must be a git repository: every task is checkpointed in a
 # hidden ref (refs/mini/<run>) and `mini undo` restores it.

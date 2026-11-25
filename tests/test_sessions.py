@@ -1,5 +1,5 @@
-"""Sessions: tabs with their own conversation and model tier, running in parallel. The local model serves one reply
-at a time and file changes happen one at a time (harness/gates); a cloud tier exists only when configured."""
+"""Sessions: tabs with their own conversation, running in parallel. The local model serves one reply at a time and
+file changes happen one at a time (harness/gates)."""
 import asyncio
 import os
 import tempfile
@@ -103,28 +103,6 @@ class SessionsUI(unittest.TestCase):
                 self.assertEqual({h["status"] for h in first.history + second.history}, {"success"})
         asyncio.run(go())
 
-    def test_model_is_per_session_and_only_for_configured_tiers(self):
-        app = self.app()
-
-        async def go():
-            async with app.run_test(size=(180, 50)) as pilot:
-                await pilot.press(*"/model paid")
-                await pilot.press("enter")
-                self.assertEqual(app.active.tier, "local")          # no [paid] in the config: not enabled
-                app.cfg["paid"]["enabled"] = True
-                await pilot.press(*"/model paid")
-                await pilot.press("enter")
-                self.assertEqual(app.active.tier, "paid")
-                first = app.active
-                await pilot.press(*"/new")
-                await pilot.press("enter")
-                for _ in range(50):
-                    await pilot.pause(0.1)
-                    if app.active is not first:
-                        break
-                self.assertEqual((first.tier, app.active.tier), ("paid", "local"))
-        asyncio.run(go())
-
     def test_closing_the_last_session_exits_and_forgets_it(self):
         path = os.path.join(tempfile.mkdtemp(), ".mini", "sessions.json")
         cfg = temp_config()
@@ -185,7 +163,7 @@ class SessionsUI(unittest.TestCase):
     def test_a_task_cut_off_by_closing_is_reported_interrupted(self):
         path = os.path.join(tempfile.mkdtemp(), ".mini", "sessions.json")
         from mini.ui.session import Session, save
-        s = Session(1, "1", "local", 3, pending="half done")
+        s = Session(1, "1", 3, pending="half done")
         save(path, [s], s)
         cfg = temp_config()
         cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")

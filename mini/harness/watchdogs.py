@@ -6,7 +6,7 @@ Every trigger is logged as a "watchdog" event. Thresholds come from config [watc
 | passing test rerun      | N (2) reruns with no change, passing    | go straight to review                       |
 | file rewrites           | more than N (3) full rewrites of a file | force a step back: explain what still fails |
 | fail streak             | N (3) failed test runs in a row         | restart fresh with a summary (counts)       |
-| attempt budget          | N (10) attempts on one tool, per tier    | local: move to free; else ask the user      |
+| attempt budget          | N (10) attempts on one tool              | ask the user for advice, else stop          |
 | unparseable tool call   | parse/JSON error                        | "resend as one small call", up to N (5)     |
 | empty reply / lost call | no tool call                            | one nudge                                   |
 | runaway output          | reply_max_tokens or reply_max_s         | "make smaller changes"                      |
@@ -20,14 +20,12 @@ import time
 class Watchdogs:
     def __init__(self, cfg, log):
         self.w, self.caps, self.log = cfg["watchdogs"], cfg["caps"], log
-        self.tier = "local"                                 # the agent sets the model tier in use
         self.reset_task()
 
     # ------------------------------------------------------------ scope resets
     def reset_task(self):
         self.task_t0 = time.time()
         self.turns = 0
-        self.tier_attempts = {}                             # attempts per tier for the tool being built
         self.reset_tool()
 
     def reset_tool(self):
@@ -106,8 +104,7 @@ class Watchdogs:
         Returns one of: 'review', 'restart', 'budget', 'continue'."""
         if changed or self.attempts == 0:
             self.attempts += 1
-            self.tier_attempts[self.tier] = self.tier_attempts.get(self.tier, 0) + 1
-            self.log.emit("attempt", n=self.attempts, budget=self.budget, passed=passed, tier=self.tier,
+            self.log.emit("attempt", n=self.attempts, budget=self.budget, passed=passed,
                           extended=self.budget > self.caps["attempts_per_tool"])
         if passed:
             self.fail_streak = 0

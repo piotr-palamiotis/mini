@@ -1,4 +1,4 @@
-"""A tier's optional sampling keys (seed, top_k, ...) reach the model request, so every model can be sampled the same
+"""The optional sampling keys in [local] (seed, top_k, ...) reach the model request, so every model can be sampled the same
 way and a seeded run repeats."""
 import unittest
 
@@ -9,7 +9,7 @@ from tests.helpers import temp_config
 class SamplingTest(unittest.TestCase):
     def test_only_temperature_by_default(self):
         a = Agent(temp_config(), label="s")
-        self.assertEqual({k: v for k, v in a.model_options.items() if k != "thinking_controls"},
+        self.assertEqual(a.model_options,
                          {"temperature": a.cfg["local"]["temperature"]})
 
     def test_seed_and_sampling_keys_pass_through(self):

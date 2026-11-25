@@ -7,7 +7,7 @@ neither sees nor runs commands.
 
 parse() turns the prompt text into (command, arguments, problem): `--field value` flags from the schema (kebab or
 snake case, `--flag` / `--no-flag` for booleans, several words for an array, JSON for an object) and, for a core
-command that has one, positional words (`/model paid`, `/attach notes.txt`, `/undo RUN FILE...`).
+command that has one, positional words (`/model rtx3070`, `/attach notes.txt`, `/undo RUN FILE...`).
 
 complete() is the autocomplete when `/` is the first character: command names with descriptions filtered as you
 type, then `--field` flags and enum values of the chosen command, then file paths relative to the project folder
@@ -19,7 +19,6 @@ import os
 import shlex
 
 from ..harness import toolui
-from ..harness.config import TIERS
 
 SKIP_DIRS = {".git", ".mini", "__pycache__", "node_modules", ".venv"}
 MAX_PATHS = 40
@@ -96,9 +95,8 @@ class Command:
 
 
 CORE = [
-    Command("model", "model of this session (only configured tiers)",
-            {"properties": {"tier": {"type": "string", "enum": list(TIERS), "description": "the tier"}}},
-            positional="tier"),
+    Command("model", "the model and hardware mini runs on: a preset (none: list them); switching restarts llama-server",
+            {"properties": {"preset": {"type": "string", "description": "a preset name"}}}, positional="preset"),
     Command("new", "open another session (a tab with its own conversation and model; they run in parallel)",
             {"properties": {"name": {"type": "string"}}}, positional="name"),
     Command("clear", "forget this session's conversation so far (each task is told about the earlier ones)"),
@@ -110,7 +108,7 @@ CORE = [
             {"properties": {"target": {"type": "string"}}}, positional="target"),
     Command("attach", "attach a file to the next task",
             {"required": ["path"], "properties": {"path": {"type": "string", "format": "file"}}}, positional="path"),
-    Command("status", "check the local model and the cloud tiers"),
+    Command("status", "check the model server and the model"),
     Command("undo", "put back what the last task (or RUN) changed, or only those files",
             {"properties": {"target": {"type": "array", "items": {"type": "string", "format": "file"},
                                        "description": "a run id and/or files"}}}, positional="target",
@@ -126,8 +124,12 @@ CORE = [
 class Commands:
     """The command registry: the core commands, then one per accepted tool."""
 
-    def __init__(self, tools=()):
+    def __init__(self, tools=(), presets=()):
         self.cmds = {c.name: c for c in CORE}
+        if presets:                                # /model completes and checks the configured preset names
+            m = self.cmds["model"]
+            self.cmds["model"] = Command(m.name, m.description, {"properties": {"preset": {
+                "type": "string", "enum": list(presets), "description": "a preset name"}}}, positional="preset")
         for m in tools:
             name = kebab(m["name"])
             if name in self.cmds:                  # a core command keeps its name; the tool stays reachable
@@ -136,11 +138,11 @@ class Commands:
                                       ui=m.get("ui"), source="bundled" if m.get("bundled") else "tool")
 
     @classmethod
-    def load(cls, registry):
+    def load(cls, registry, presets=()):
         try:
-            return cls(registry.list_tools())
+            return cls(registry.list_tools(), presets)
         except Exception:   # noqa: BLE001 - a damaged registry must not take the core commands with it
-            return cls()
+            return cls(presets=presets)
 
     def __contains__(self, name):
         return name in self.cmds

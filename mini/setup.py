@@ -4,10 +4,12 @@
                  Steps that need root print the command to run instead of running it.
   mini doctor    the same checks, read-only.
 
-Checks, in order: sandbox engine, sandbox image, the local backends ([local] use: llama.cpp built in [llamacpp]
-dir, serving every GGUF in [llamacpp] models_dir in router mode; or another OpenAI-compatible server), start at
-boot, cloud gateway (OmniRoute) installed and running, its API key, the free/paid model names. A finished setup is
-recorded in <state>/setup.json; `mini` / `mini ui` offer the setup when it is missing.
+mini runs on one model server it builds and runs itself: llama.cpp's llama-server, from the pinned release, in
+router mode over a folder of GGUF files. Nothing else is used, so the setup is self-contained.
+
+Checks, in order: sandbox engine, sandbox image, llama.cpp built in [llamacpp] dir, models in [llamacpp]
+models_dir, llama-server running as a user service, the model mini uses (the active preset's) loads, start at boot.
+A finished setup is recorded in <state>/setup.json; `mini` / `mini ui` offer the setup when it is missing.
 """
 import getpass
 import json
@@ -22,7 +24,7 @@ import urllib.request
 
 from .harness import config as config_mod
 from .harness.backends import has_model
-from .harness.config import ENV_FILE, ROOT, llama_settings, local_candidates, secret
+from .harness.config import ROOT, llama_settings, resolve_local
 
 LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
 # The llama.cpp release mini is tested with. setup builds exactly this one and checks that the built
@@ -33,11 +35,6 @@ LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
 # `mini setup` and the test suite.
 LLAMA_TAG = "b11567"
 LLAMA_COMMIT = "972b5fc"
-BACKENDS = {                                # the local backends setup can set up; order = default preference
-    "llamacpp": "llama.cpp (llama-server on the GPU: Vulkan or CUDA, every model in the models folder)",
-    "custom": "another OpenAI-compatible server (LM Studio, vLLM, ...)",
-}
-DEFAULT_URLS = {"llamacpp": "http://127.0.0.1:8080/v1", "custom": "http://127.0.0.1:1234/v1"}
 UNIT_DIR = os.path.expanduser("~/.config/systemd/user")
 UNIT_MARK = "# written by mini setup"
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
@@ -51,35 +48,15 @@ def sh(cmd, timeout=60, **kw):
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
 
 
-def http_json(url, key="", timeout=3):
+def http_json(url, timeout=3):
     """(status, parsed body or None). status 0 = not reachable."""
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key} if key else {})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
             return r.status, json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
         return e.code, None
     except (OSError, ValueError):
         return 0, None
-
-
-def model_ids(body):
-    if not isinstance(body, dict):
-        return []
-    return [m.get("id") or m.get("name") for m in body.get("data") or body.get("models") or [] if isinstance(m, dict)]
-
-
-def find_bin(name):
-    """On PATH, else in ~/.local/bin or an nvm Node install (services do not see the login shell's PATH)."""
-    import glob
-    p = shutil.which(name)
-    if p:
-        return p
-    for pattern in (os.path.join(LOCAL_BIN, name), os.path.expanduser(f"~/.nvm/versions/node/*/bin/{name}")):
-        hits = sorted(glob.glob(pattern))
-        if hits:
-            return hits[-1]
-    return None
 
 
 def unit_path(name):
@@ -96,25 +73,13 @@ def unit_state(name):
     return exists, active, enabled, ours
 
 
-def gateway_url(cfg):
-    for t in ("free", "paid"):
-        if cfg[t].get("enabled", True):
-            return cfg[t]["url"]
-    return None
-
-
-def gateway_root(url):
-    return re.sub(r"/v1/?$", "", url.rstrip("/"))
-
-
-# ================================================================ tier status (UI line and doctor)
+# ================================================================ status (UI line and doctor)
 def ensure_local(cfg, say=print, wait_s=90):
     """Start the llama-server user service when it is installed but not running, and wait until it answers.
     True when the local endpoint is up. Only starts a unit mini wrote; anything else is left to setup/doctor."""
-    cands = local_candidates(cfg)
-    if not cands or cands[0][0] != "llamacpp" or cands[0][1].get("backend") == "fake":
+    if cfg["local"].get("backend") == "fake":
         return False
-    url = cands[0][1]["url"]
+    url = cfg["local"]["url"]
     if http_json(url.rstrip("/") + "/models")[0] == 200:
         return True
     exists, active, _, ours = unit_state("llama-server")
@@ -136,39 +101,20 @@ def ensure_local(cfg, say=print, wait_s=90):
     return False
 
 
-def tier_status(cfg):
-    """{tier: (ok, short text)} with quick probes."""
-    out = {}
-    cands = local_candidates(cfg)
-    up = [(n, e) for n, e in cands if e["backend"] == "fake" or has_model(e)]
-    if up:
-        n, e = up[0]
-        rest = [x for x, _ in cands if x != n]
-        out["local"] = (True, f"{e['model']} via {n}" + (f" (also: {', '.join(rest)})" if rest else "")
-                        + ("" if n == cands[0][0] else f"; {cands[0][0]} is down"))
-    else:
-        out["local"] = (False, "no local backend answers with its model: " + ", ".join(n for n, _ in cands))
-    for t in ("free", "paid"):
-        tc = cfg[t]
-        if not tc.get("enabled", True):
-            out[t] = (None, "off")
-            continue
-        key = secret(tc.get("api_key_env", ""))
-        code, body = http_json(tc["url"].rstrip("/") + "/models", key)
-        if code == 0:
-            out[t] = (False, "gateway not running")
-        elif code in (401, 403):
-            out[t] = (False, "API key missing or wrong")
-        elif tc["model"] not in model_ids(body):
-            out[t] = (False, f"no model or combo named {tc['model']}")
-        else:
-            out[t] = (True, tc["model"])
-    return out
+def local_status(cfg):
+    """(ok, short text) for the model mini uses, with a quick probe."""
+    lc = cfg["local"]
+    preset = cfg["llamacpp"].get("preset")
+    name = f"{lc['model']}" + (f" (preset {preset})" if preset else "")
+    if lc.get("backend") == "fake" or has_model(lc):
+        return True, name
+    code, _ = http_json(lc["url"].rstrip("/") + "/models")
+    return False, name + (": llama-server is not running" if code == 0 else ": not in the models folder")
 
 
 def status_line(cfg):
-    mark = {True: "ok", False: "!!", None: "--"}
-    return "   ".join(f"{t}: {mark[ok]} {text}" for t, (ok, text) in tier_status(cfg).items())
+    ok, text = local_status(cfg)
+    return f"model: {'ok' if ok else '!!'} {text}"
 
 
 # ================================================================ checks
@@ -194,48 +140,13 @@ def checks(cfg, ui):
                          "" if ok else "not built yet (python:3.12-slim + pytest, a few minutes, about 150 MB)",
                          fix=None if ok else lambda ui: _build_image(cfg, ui), fix_text="build it now"))
 
-    st = tier_status(cfg)
-    for name, entry in local_candidates(cfg):
-        out += backend_checks(cfg, name, entry)
+    out += llama_checks(cfg)
     linger = "Linger=yes" in sh(["loginctl", "show-user", getpass.getuser(), "-p", "Linger"]).stdout
     out.append(Check("linger", "user services start at boot without a login", linger,
                      "" if linger else "systemd stops your services when you log out",
                      fix=None if linger else lambda ui: _run(["loginctl", "enable-linger", getpass.getuser()], ui),
                      fix_text="loginctl enable-linger", manual="" if linger else f"sudo loginctl enable-linger {getpass.getuser()}"))
 
-    url = gateway_url(cfg)
-    if url:
-        root = gateway_root(url)
-        code, _ = http_json(url.rstrip("/") + "/models")
-        running = code != 0
-        installed = find_bin("omniroute") is not None
-        if not running:
-            if not installed:
-                npm = find_bin("npm")
-                out.append(Check("gateway", "cloud gateway (OmniRoute)", False,
-                                 "not installed. It routes the free and paid tiers to cloud models.",
-                                 fix=(lambda ui: _install_omniroute(npm, ui)) if npm else None,
-                                 fix_text="npm install -g omniroute",
-                                 manual="" if npm else "install Node.js 20+ (https://nodejs.org or nvm), then run mini setup again"))
-            else:
-                out.append(Check("gateway", "cloud gateway (OmniRoute)", False, f"installed but not running at {root}",
-                                 fix=lambda ui: setup_omniroute(cfg, ui), fix_text="run it as a user service (127.0.0.1 only, API key required)"))
-        else:
-            exists, active, enabled, ours = unit_state("omniroute")
-            if exists:
-                out.append(Check("gateway_boot", "OmniRoute starts at boot", enabled, "" if enabled else "running, but not enabled",
-                                 fix=None if enabled else lambda ui: _enable("omniroute", ui),
-                                 fix_text="systemctl --user enable omniroute"))
-            tiers = [t for t in ("free", "paid") if cfg[t].get("enabled", True)]
-            if any("key" in st[t][1] for t in tiers):
-                out.append(Check("gateway_key", "OmniRoute API key", False, "missing or not accepted by the gateway",
-                                 fix=lambda ui: set_gateway_key(cfg, ui), fix_text="save the OmniRoute API key"))
-            else:
-                for t in tiers:
-                    ok, text = st[t]
-                    out.append(Check(t, f"{t} tier ({cfg[t]['model']})", ok, "" if ok else text,
-                                     fix=None if ok else (lambda ui, t=t: setup_combo(cfg, t, ui)),
-                                     fix_text=f"create {cfg[t]['model']} in OmniRoute, or turn the {t} tier off"))
     return out
 
 
@@ -283,10 +194,10 @@ def write_unit(name, description, exec_start, env, ui):
     _run(["systemctl", "--user", "restart", name], ui)
 
 
-def _wait(url, key="", secs=240, ui=None):
+def _wait(url, secs=240, ui=None):
     t0 = time.time()
     while time.time() - t0 < secs:
-        code, _ = http_json(url, key)
+        code, _ = http_json(url)
         if code and code < 500:
             return code
         time.sleep(2)
@@ -393,12 +304,8 @@ def router_args(cfg, server):
             f"--host 127.0.0.1 --port {lc['port']}{dev} -c {lc['ctx']} {lc['extra_args']} --no-webui")
 
 
-def backend_checks(cfg, name, entry):
-    if name != "llamacpp":
-        ok = entry.get("backend") == "fake" or has_model(entry)
-        return [Check(name, f"{BACKENDS.get(name, name)}: {entry['model']} at {entry['url']}", ok,
-                      "" if ok else "not answering with that model",
-                      fix=None if ok else lambda ui: setup_custom(cfg, ui), fix_text="set its URL and model name")]
+def llama_checks(cfg):
+    entry = cfg["local"]
     out, lc = [], llama_settings(cfg)
     server = llama_server(cfg)
     gpu = llama_gpu(cfg)
@@ -556,14 +463,9 @@ def setup_router(cfg, ui):
         ctx = int(ui.text("Context size per model (tokens)", str(lc["ctx"])))
         config_mod.set_values(cfg.path, {"llamacpp": {"device": dev, "ctx": ctx}})
         cfg["llamacpp"].update(device=dev, ctx=ctx)
-    write_unit("llama-server", f"llama.cpp router over {os.path.expanduser(lc['models_dir'])} (mini local tier)",
+    write_unit("llama-server", f"llama.cpp router over {os.path.expanduser(lc['models_dir'])} (mini's model server)",
                router_args(cfg, server), {}, ui)
     _wait(f"http://127.0.0.1:{lc['port']}/health", ui=ui)
-    url = f"http://127.0.0.1:{lc['port']}/v1"
-    have = cfg.get("backends", {}).get("llamacpp", {})
-    model = lc.get("model") or have.get("model") or cfg["local"]["model"]
-    if have.get("url") != url or have.get("model") != model:
-        save_backend(cfg, "llamacpp", {"backend": "openai", "url": url, "model": model})
 
 
 # ---------------------------------------------------------------- presets: named ways to run llama-server
@@ -587,7 +489,7 @@ def save_preset(cfg, name, values):
 
 def use_preset(cfg, name, ui):
     """Make a preset the active one: builds llama.cpp for its backend if that is missing, rewrites the llama-server
-    unit and restarts it, and points the local tier at the preset's model."""
+    unit and restarts it; the preset's model is the one mini uses from then on."""
     if name not in cfg.get("presets", {}):
         raise SetupError(f"no preset {name!r}; known: " + (", ".join(cfg.get("presets", {})) or "none"))
     old = cfg["llamacpp"].get("preset", "")
@@ -601,6 +503,7 @@ def use_preset(cfg, name, ui):
         config_mod.set_values(cfg.path, {"llamacpp": {"preset": old}})
         cfg["llamacpp"]["preset"] = old
         raise
+    resolve_local(cfg)
     ui.say(f"preset {name} is active: " + preset_summary(name, llama_settings(cfg)).strip())
 
 
@@ -632,18 +535,25 @@ def preset_cmd(cfg, action, name=None, opts=None, ui=None):
 
 
 def choose_model(cfg, ui):
-    """Pick the model mini's local tier uses, from the models folder; it is load-tested before it is saved."""
-    lc, url = cfg["llamacpp"], cfg["backends"]["llamacpp"]["url"]
+    """Pick the model mini uses, from the models folder; it is load-tested before it is saved (to the active
+    preset when there is one, else to [local] model)."""
+    lc, url = cfg["llamacpp"], cfg["local"]["url"]
     names = list(models_in(os.path.expanduser(lc["models_dir"])))
     if not names:
         raise SetupError("no models in the models folder")
-    current = cfg["backends"]["llamacpp"].get("model")
+    current = cfg["local"].get("model")
     while names:
         pick = ui.choice("Which model should mini use locally?", names, current if current in names else names[0])
         ui.say(f"loading {pick} to test it (up to a minute) ...")
         ok, why = load_test(url, pick)
         if ok:
-            save_backend(cfg, "llamacpp", {"backend": "openai", "url": url, "model": pick})
+            preset = lc.get("preset")
+            if preset:
+                config_mod.set_values(cfg.path, {f"presets.{preset}": {"model": pick}})
+                cfg["presets"][preset]["model"] = pick
+            else:
+                config_mod.set_values(cfg.path, {"local": {"model": pick}})
+            cfg["local"]["model"] = pick
             ui.say(f"{pick} loads and answers.")
             return
         ui.say(f"{pick} does not load in llama.cpp {LLAMA_TAG}: {why}")
@@ -651,117 +561,29 @@ def choose_model(cfg, ui):
     raise SetupError("none of the models loads")
 
 
-def save_backend(cfg, name, entry):
-    """Write [backends.<name>] and make sure it is in [local] use."""
-    config_mod.set_values(cfg.path, {f"backends.{name}": entry})
-    cfg.setdefault("backends", {})[name] = {**cfg.get("backends", {}).get(name, {}), **entry}
-    use = list(cfg["local"].get("use") or [])
-    if name not in use:
-        use.append(name)
-        config_mod.set_values(cfg.path, {"local": {"use": use}})
-        cfg["local"]["use"] = use
-
-
-def setup_custom(cfg, ui):
-    entry = cfg["backends"].get("custom") or {}
-    url = ui.text("Base URL of its OpenAI-compatible API", entry.get("url") or DEFAULT_URLS["custom"])
-    code, body = http_json(url.rstrip("/") + "/models")
-    ids = model_ids(body)
-    model = ui.choice("Which model?", ids, entry.get("model")) if ids else ui.text("Model name", entry.get("model"))
-    save_backend(cfg, "custom", {"backend": "openai", "url": url, "model": model})
-
-
-def choose_backends(cfg, ui):
-    """Checklist of local backends, then their order of preference. Written to [local] use and [backends.*]."""
-    current = [n for n in cfg["local"].get("use") or [] if n in BACKENDS] or ["llamacpp"]
-    picked = ui.checklist("Which local model backends should mini use? (several = a fallback when one is down)",
-                          list(BACKENDS.values()), [BACKENDS[n] for n in current])
-    names = [n for n, lbl in BACKENDS.items() if lbl in picked]
-    if not names:
-        ui.say("keeping: " + ", ".join(current))
-        names = current
-    if len(names) > 1:
-        first = ui.choice("Which one first?", [BACKENDS[n] for n in names],
-                          BACKENDS[current[0]] if current[0] in names else BACKENDS[names[0]])
-        names.sort(key=lambda n: BACKENDS[n] != first)
-    for n in names:
-        if n not in cfg.get("backends", {}):
-            base = {"backend": "openai", "url": DEFAULT_URLS[n], "model": cfg["local"]["model"]}
-            if n == "llamacpp":
-                base["url"] = f"http://127.0.0.1:{cfg['llamacpp']['port']}/v1"
-            config_mod.set_values(cfg.path, {f"backends.{n}": base})
-            cfg.setdefault("backends", {})[n] = base
-    config_mod.set_values(cfg.path, {"local": {"use": names}})
-    cfg["local"]["use"] = names
-
-
-# ---------------------------------------------------------------- OmniRoute
-def _install_omniroute(npm, ui):
-    _run([npm, "install", "-g", "omniroute"], ui, timeout=1800)
-
-
-def setup_omniroute(cfg, ui):
-    bin_ = find_bin("omniroute")
-    if not bin_:
-        raise SetupError("omniroute is not installed")
-    node_dir = os.path.dirname(os.path.realpath(find_bin("node") or bin_))
-    port = re.search(r":(\d+)", gateway_url(cfg) or ":20128").group(1)
-    write_unit("omniroute", "OmniRoute AI gateway (mini free/paid tiers)",
-               f"{bin_} serve --port {port} --no-open --no-tray",
-               {"PATH": f"{node_dir}:{os.path.dirname(bin_)}:/usr/local/bin:/usr/bin:/bin",
-                "OMNIROUTE_SERVER_HOST": "127.0.0.1", "REQUIRE_API_KEY": "true"}, ui)
-    ui.say("starting OmniRoute ...")
-    _wait(gateway_url(cfg).rstrip("/") + "/models", ui=ui)
-
-
-def set_gateway_key(cfg, ui):
-    url = gateway_url(cfg)
-    ui.say(f"Open the OmniRoute dashboard: {gateway_root(url)}\n"
-           "  1. Providers: connect the services you want (free ones for the free tier, your subscription for paid).\n"
-           "  2. API Keys: create a key for mini and copy it.")
-    key = ui.secret("Paste the OmniRoute API key")
-    if not key:
-        raise SetupError("no key given")
-    code, _ = http_json(url.rstrip("/") + "/models", key)
-    if code != 200:
-        raise SetupError(f"the gateway answered {code} with this key")
-    name = cfg["free"].get("api_key_env") or cfg["paid"].get("api_key_env") or "OMNIROUTE_API_KEY"
-    save_env(name, key)
-    os.environ[name] = key
-    ui.say(f"saved to {ENV_FILE} (readable only by you)")
-
-
-def save_env(name, value):
-    os.makedirs(os.path.dirname(ENV_FILE), mode=0o700, exist_ok=True)
-    lines = []
-    if os.path.exists(ENV_FILE):
-        lines = [ln for ln in open(ENV_FILE).read().splitlines() if not ln.split("=", 1)[0].strip() == name]
-    lines.append(f"{name}={value}")
-    fd = os.open(ENV_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    os.replace(ENV_FILE + ".tmp", ENV_FILE)
-
-
-def setup_combo(cfg, tier, ui):
-    tc = cfg[tier]
-    want = {"free": "free models (several, so one can take over when another hits its limit)",
-            "paid": "your paid subscription models"}[tier]
-    ui.say(f"mini asks the gateway for the model {tc['model']!r} on the {tier} tier.\n"
-           f"In the OmniRoute dashboard ({gateway_root(tc['url'])}) open Combos, create one named {tc['model']} "
-           f"with {want}, strategy priority.")
-    choice = ui.choice(f"Then:", ["check again", f"use another model or combo name for {tier}", f"turn the {tier} tier off"],
-                       "check again")
-    if choice.startswith("use another"):
-        name = ui.text("Model or combo name")
-        config_mod.set_values(cfg.path, {tier: {"model": name}})
-        tc["model"] = name
-    elif choice.startswith("turn"):
-        config_mod.set_values(cfg.path, {tier: {"enabled": False}})
-        tc["enabled"] = False
-
-
 # ================================================================ terminal UI and the wizard
+class QuietUI:
+    """For a preset switch from inside the app: messages go to say(), every question takes its default."""
+
+    def __init__(self, say):
+        self.say = say
+
+    def yes(self, prompt, default=True):
+        return default
+
+    def text(self, prompt, default=None):
+        return default or ""
+
+    def secret(self, prompt):
+        return ""
+
+    def checklist(self, prompt, options, checked=()):
+        return list(checked)
+
+    def choice(self, prompt, options, default=None):
+        return default if default in options else options[0]
+
+
 class TerminalUI:
     def say(self, text):
         print(text, flush=True)
@@ -826,15 +648,8 @@ def doctor(cfg, ui=None):
 
 def wizard(cfg, ui=None):
     ui = ui or TerminalUI()
-    ui.say("mini setup: checks what mini needs and helps you set up what is missing. Nothing changes without a yes.\n")
-    if not any(cfg[t].get("enabled", True) for t in ("free", "paid")):
-        if ui.yes("Add cloud models (through OmniRoute) that you can pick per session with /model? "
-                  "mini never switches to them by itself.", False):
-            for t in ("free", "paid"):
-                tc = cfg[t]
-                config_mod.set_values(cfg.path, {t: {k: tc[k] for k in ("backend", "url", "model", "api_key_env")}})
-                tc["enabled"] = True
-    choose_backends(cfg, ui)
+    ui.say("mini setup: checks what mini needs and helps you set up what is missing. Nothing changes without a yes.\n"
+           "mini runs its models on llama.cpp, which this setup builds and runs for you.\n")
     skipped, done = set(), False
     while not done:
         done = True

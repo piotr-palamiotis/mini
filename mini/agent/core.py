@@ -4,13 +4,11 @@ The harness objects (backends, sandbox, registry, gate, watchdogs, log) are hand
 gets more authority than they allow. Its own actions are the core capabilities (mini/core): typed calls,
 validated against their schema before they run; gap detection and need_tool never build what core already does.
 
-Model tiers (config [local], [free], [paid]): a task runs on the tier it is started on (a session's tier, local by
-default; the user changes it with /model). A cloud tier exists only when its section is in the config. mini never
-moves a task to another model by itself: a task that fails on its tier fails. The only switch is the user's own pick
-("use paid") in a dialog; the conversation carries over.
+The model is local only: llama-server, built and run by mini setup, with the active preset's model ([local] and
+[llamacpp] in the config). The user picks the preset (`mini preset use`, /model in the UI); a task never moves to
+another model by itself.
 """
 import contextlib
-import copy
 import fnmatch
 import hashlib
 import json
@@ -27,8 +25,8 @@ from ..core._tools import describe_tool
 from ..core.run_code import ARGV_IDLE, argv_idle, job_of
 from ..harness import checkpoint as ckpt, gates, hwmon, journal, workspace as ws
 from ..harness.approvals import ApprovalGate
-from ..harness.backends import Endpoint, has_model, make_backend
-from ..harness.config import llama_settings, local_candidates
+from ..harness.backends import Endpoint, make_backend
+from ..harness.config import llama_settings
 from ..harness.eventlog import JournalSink, RunLog
 from ..harness.lessons import LessonStore
 from ..harness.registry import Registry, is_bundled
@@ -39,7 +37,7 @@ from ..harness.watchdogs import Watchdogs
 S = {"type": "string"}
 ARR = {"type": "array", "items": S}
 MIN_IMPLICIT_ANSWER = 200
-SAMPLING_KEYS = ("seed", "top_k", "top_p", "min_p", "repeat_penalty", "presence_penalty")   # optional, per tier
+SAMPLING_KEYS = ("seed", "top_k", "top_p", "min_p", "repeat_penalty", "presence_penalty")   # optional, in [local]
 
 
 def as_list(v):
@@ -140,8 +138,7 @@ def form_gap(task, text):
     return ""
 
 class Agent:
-    def __init__(self, cfg, approval_handler=None, backend=None, tier_backends=None, start_tier=None, label="", log=None,
-                 history=(), workspace=None):
+    def __init__(self, cfg, approval_handler=None, backend=None, label="", log=None, history=(), workspace=None):
         self.cfg = cfg
         self.workspace = os.path.realpath(workspace) if workspace else None   # the user's folder: a git repository
         self.history = list(history)                       # finished earlier tasks of this conversation (run_end events)
@@ -164,13 +161,7 @@ class Agent:
         self.invoked_any = set()                 # tools invoke_tool actually ran in this task (ok or not)
         self.kept_jobs, self.kept_told = {}, {}  # tools kept from a script in this task: what that script did
         self.task_text = ""
-        self.tier_backends = dict(tier_backends or {})     # tests inject scripted models per tier
-        if backend is not None:
-            self.tier_backends["local"] = backend
-        self.local_backend = self._pick_local()
-        self.start_tier = start_tier or "local"
-        self.tier_tokens, self.tiers_used, self.escalated_from = {}, [], None
-        self._use_tier(self.start_tier)
+        self._use_model(backend)                           # tests inject a scripted model
         self.registry = Registry(cfg.abspath("state"), run_id=self.log.run_id, auto_accept=cfg["tools"]["auto_accept"])
         self.registry.seed_bundled()                       # bundled document tools: installed on first run
         self.settings = SettingsStore(cfg.abspath("state"))
@@ -178,86 +169,27 @@ class Agent:
         self.sandbox = Sandbox(cfg, self.log)
         self.wd = Watchdogs(cfg, self.log)
         self.gate = ApprovalGate(cfg, self.log, self._unclocked(approval_handler) if approval_handler else None)
-        self.wd.tier = self.tier
         self.stop_event = threading.Event()
         self.abort_reason = None
         self.tokens = 0
         self.created, self.repaired = [], 0
-        self.escalations = 0
         self.run_t0 = time.time()
 
-    # ------------------------------------------------------------ model tiers
-    def _pick_local(self):
-        """With several local backends ([local] use), the first that answers and has its model becomes [local]
-        for this task. Returns its name."""
-        cands = local_candidates(self.cfg)
-        if "local" in self.tier_backends:
-            return cands[0][0]
-        if len(cands) == 1:                           # the only backend: its own url and model, not [local]'s
-            name, entry = cands[0]
-        else:
-            for name, entry in cands:
-                if has_model(entry):
-                    break
-            else:
-                name, entry = cands[0]                # none answers: keep the first, its error shows up in the log
-        self.cfg = copy.deepcopy(self.cfg)
-        self.cfg["local"] = entry
-        if name != cands[0][0]:
-            self.log.emit("info", text=f"local backend {cands[0][0]} is not available; using {name} ({entry['model']})")
-        return name
-
-    def _backend_for(self, tier):
-        if tier not in self.tier_backends:
-            tc = self.cfg[tier]
-            self.tier_backends[tier] = make_backend(Endpoint(
-                tc["backend"], tc["url"], options={}, api_key_env=tc.get("api_key_env", ""),
-                max_tokens=self.cfg["caps"]["reply_max_tokens"], timeout_s=self.cfg["caps"]["reply_max_s"],
-                think_max_chars=self.cfg["caps"].get("reply_think_max_chars", 0),
-                think_budget_tokens=self.cfg["caps"].get("reply_think_budget_tokens", 0),
-                max_tokens_tools=self.cfg["caps"].get("reply_max_tokens_tools", 0),
-                comment_cut_chars=self.cfg["caps"].get("reply_comment_cut_chars", 0)))
-        return self.tier_backends[tier]
-
-    def _use_tier(self, tier):
-        tc = self.cfg[tier]
-        self.tier, self.backend, self.model = tier, self._backend_for(tier), tc["model"]
-        self.model_options = {"temperature": tc["temperature"]}
+    # ------------------------------------------------------------ the model
+    def _use_model(self, backend=None):
+        lc = self.cfg["local"]
+        self.model = lc["model"]
+        self.backend = backend or make_backend(Endpoint(
+            lc["backend"], lc["url"], options={},
+            max_tokens=self.cfg["caps"]["reply_max_tokens"], timeout_s=self.cfg["caps"]["reply_max_s"],
+            think_max_chars=self.cfg["caps"].get("reply_think_max_chars", 0),
+            think_budget_tokens=self.cfg["caps"].get("reply_think_budget_tokens", 0),
+            max_tokens_tools=self.cfg["caps"].get("reply_max_tokens_tools", 0),
+            comment_cut_chars=self.cfg["caps"].get("reply_comment_cut_chars", 0)))
+        self.model_options = {"temperature": lc["temperature"]}
         # Set these to sample every model the same way (a GGUF may carry its own top_k/top_p defaults) and, with a
         # seed, to make a run repeatable.
-        self.model_options.update({k: tc[k] for k in SAMPLING_KEYS if tc.get(k) is not None})
-        if tc.get("thinking_controls") is False:
-            self.model_options["thinking_controls"] = False
-        if tier not in self.tiers_used:
-            self.tiers_used.append(tier)
-
-    def tier_available(self, tier):
-        """Enabled in config and answering. A gateway that is down must not eat the task's time."""
-        if tier == self.tier or not self.cfg[tier].get("enabled", True):
-            return False
-        try:
-            self._backend_for(tier).list_models()
-            return True
-        except (OSError, ValueError) as e:
-            self.log.emit("error", text=f"{tier} tier not reachable at {self.cfg[tier]['url']}: {e}")
-            return False
-
-    def switch_tier(self, tier, why, decided_by):
-        prev = self.tier
-        self._use_tier(tier)
-        self.wd.tier = tier
-        self.wd.reset_tool()                                 # the new model gets a full attempt budget
-        self.escalated_from = self.escalated_from or prev
-        self.escalations += 1
-        self.log.emit("tier", previous=prev, tier=tier, model=self.model, why=why, decided_by=decided_by,
-                      leaves_machine=tier != "local")
-
-    def offer_paid(self):
-        """Paid is an option in a dialog only when it is configured and not already in use."""
-        return self.tier != "paid" and self.cfg["paid"].get("enabled", True)
-
-    def tier_tokens_cap(self):
-        return self.cfg["caps"]["tokens_per_run"] if self.tier == "local" else self.cfg[self.tier]["tokens_per_run"]
+        self.model_options.update({k: lc[k] for k in SAMPLING_KEYS if lc.get(k) is not None})
 
     # ------------------------------------------------------------ control
     def abort(self, reason):
@@ -326,13 +258,13 @@ class Agent:
         self.task = task
         self.attachments = [os.path.realpath(a) for a in attachments]
         self.log.emit("run_start", task=task, attachments=[os.path.basename(a) for a in attachments],
-                      model=self.model, tier=self.tier, backend=self.cfg[self.tier]["backend"], local=self.local_backend,
+                      model=self.model, preset=self.cfg["llamacpp"].get("preset") or None,
                       workspace=self.workspace, caps=self.cfg["caps"], watchdogs=self.cfg["watchdogs"], confirm_first=self.cfg["approvals"]["confirm_first"])
         tl = time.time()
         try:
             self.backend.load(self.model, self.model_options)
         except OSError as e:
-            self.log.emit("error", text=f"{self.tier} backend not reachable: {e}")
+            self.log.emit("error", text=f"the model server is not reachable at {self.cfg['local']['url']}: {e}")
         self.log.emit("info", text=f"model {self.model} loaded in {time.time() - tl:.1f} s; swap baseline taken after loading",
                       swap_used_mib=round(hwmon.swap_used_mib()))
         swap = hwmon.SwapWatch(self.cfg["watchdogs"]["swap_growth_mib"], self._swap_trip)
@@ -361,8 +293,7 @@ class Agent:
             swap.stop()
         summary = {"run_id": self.log.run_id, "task": task, "status": status, "answer": answer, "error": error,
                    "secs": round(time.time() - t0, 1), "tokens": self.tokens, "created": self.created,
-                   "repairs": self.repaired, "escalations": self.escalations,
-                   "tiers": {"start": self.start_tier, "used": self.tiers_used, "tokens": self.tier_tokens},
+                   "repairs": self.repaired, "model": self.model,
                    "watchdogs": self._watchdog_counts(), "outputs": self.produced_files(),
                    "workspace": self.workspace, "checkpoint": self.checkpoint.ref if self.checkpoint else None, "swap_growth_mib": round(swap.growth(), 1), "registry_after": self.registry.snapshot()}
         json.dump(summary, open(os.path.join(self.run_dir, "summary.json"), "w"), indent=2)
@@ -848,16 +779,14 @@ class Agent:
         return done
 
     def hold_model(self):
-        """The local model serves one reply at a time across sessions (gates.LOCAL); cloud tiers are not gated."""
-        if self.tier != "local":
-            return contextlib.nullcontext()
+        """The local model serves one reply at a time across sessions (gates.LOCAL)."""
         return self._waiting_for(gates.LOCAL, on_wait=lambda: self.log.emit("gate", gate="local", state="waiting"))
 
     def context_tokens(self):
-        """The local model's context size, when it is known (llama.cpp); None otherwise."""
-        if self.tier == "local" and self.local_backend == "llamacpp":
-            return int(llama_settings(self.cfg).get("ctx") or 0) or None
-        return None
+        """The model's context size (llama-server's ctx), or None when it is not known (scripted test models)."""
+        if self.cfg["local"]["backend"] == "fake":
+            return None
+        return int(llama_settings(self.cfg).get("ctx") or 0) or None
 
     def produced_files(self):
         """The files this task wrote or changed in the folder, relative to it."""

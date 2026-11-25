@@ -35,7 +35,6 @@ from . import session as session_mod
 from .session import Session
 from .toolform import ToolForm
 from ..harness.approvals import Decision
-from ..harness.config import TIERS
 from ..harness.registry import Registry, is_bundled
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -419,14 +418,13 @@ class MiniApp(App):
         self.git_ok = self.workspace is None or checkpoint.is_repo(self.workspace)     # tasks wait for a repository
         self.sessions_file = sessions_file or session_mod.sessions_path(self.workspace)    # None: nothing is kept
         saved, active = session_mod.load(self.sessions_file, cfg["caps"]["attempts_per_tool"]) if self.sessions_file else ([], None)
-        self.sessions = saved or [Session(1, "1", "local", cfg["caps"]["attempts_per_tool"])]
+        self.sessions = saved or [Session(1, "1", cfg["caps"]["attempts_per_tool"])]
         self.active = next((x for x in self.sessions if x.n == active), self.sessions[0])
-        for x in self.sessions:
-            if not self.tier_on(x.tier):
-                x.tier = "local"                         # a cloud tier switched off since
+        self.switching = None                       # the preset /model is switching to, while llama-server restarts
+        self.preset_switcher = None                 # tests replace setup.use_preset
         self._ctx = None                            # the session an agent event belongs to, while it is handled
         self.session_n = max(x.n for x in self.sessions)
-        self.commands = commands.Commands()         # core commands now, the registry's tools from refresh_registry()
+        self.commands = commands.Commands(presets=self.presets())   # core commands now, the registry's tools from refresh_registry()
         self.sugg, self.sugg_i = [], None           # autocomplete: [(prompt text, label, description)], highlighted
 
     @property
@@ -514,14 +512,6 @@ class MiniApp(App):
     def last_run(self, v):
         self.s.last_run = v
 
-    @property
-    def next_tier(self):
-        return self.s.tier
-
-    @next_tier.setter
-    def next_tier(self, v):
-        self.s.tier = v
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="status")
@@ -575,39 +565,40 @@ class MiniApp(App):
         self.set_interval(0.1, self.tick)
         if len(self.sessions) > 1 or self.history:
             self.chat(f"[dim]restored {len(self.sessions)} session(s) from the last time[/dim]")
-        self.chat("[b]mini[/b] ready. " + "  ".join(
-            f"{t}: {self.cfg[t]['model']}" for t in TIERS if self.tier_on(t)) +
-            "\nEvery session starts on local; /model changes the current session's model (only configured tiers)."
-            " /new opens another session (ctrl+t), /exit quits.")
+        self.chat("[b]mini[/b] ready. " + self.model_text() +
+                  "\n/model switches the preset (model and hardware), /new opens another session (ctrl+t), /exit quits.")
         self.chat(f"working in [b]{escape(self.workspace)}[/b]: files change in place; every task is checkpointed in "
                   f"git, /undo puts it back." if self.workspace else escape(self.workspace_note) if self.workspace_note else
                   "no folder: tasks work in an empty folder of their run.")
-        self.check_tiers()
+        self.check_model()
         if not self.git_ok:
             self.offer_git_init()
         self.query_one("#prompt", Input).focus()
 
     @work(thread=True)
-    def check_tiers(self):
-        from ..setup import ensure_local, tier_status
+    def check_model(self):
+        from ..setup import ensure_local, local_status
         try:
             ensure_local(self.cfg, lambda m: self.call_from_thread(self.chat, f"[dim]{escape(m)}[/dim]"))
-            st = tier_status(self.cfg)
+            ok, text = local_status(self.cfg)
         except Exception as e:   # noqa: BLE001 - a status probe must never break the UI
-            st = {"status": (False, str(e))}
-        mark = {True: "[green]ok[/green]", False: "[red]!![/red]", None: "[dim]--[/dim]"}
-        line = "   ".join(f"{t} {mark[ok]} {escape(text)}" for t, (ok, text) in st.items())
-        bad = any(ok is False for ok, _ in st.values())
-        self.call_from_thread(self.chat, line + ("\n[dim]mini doctor shows how to fix it; mini setup fixes it[/dim]"
-                                                 if bad else ""))
+            ok, text = False, str(e)
+        self.call_from_thread(self.chat, f"model {'[green]ok[/green]' if ok else '[red]!![/red]'} {escape(text)}" +
+                              ("" if ok else "\n[dim]mini doctor shows how to fix it; mini setup fixes it[/dim]"))
+
+    def presets(self):
+        return list(self.cfg.get("presets") or {})
+
+    def model_text(self):
+        preset = self.cfg["llamacpp"].get("preset")
+        return f"model [b]{escape(self.cfg['local']['model'])}[/b]" + (f" (preset {escape(preset)})" if preset else "")
 
     # ------------------------------------------------------------ status
     def update_status(self):
         s = self.active
-        n, budget, who = s.attempt
-        tier = who if s.busy else s.tier
+        n, budget = s.attempt
         parts = [f"session [b]{escape(s.name)}[/b]",
-                 f"[b]{tier}[/b] {self.cfg[tier]['model']}" + ("" if s.busy else " (next task)"),
+                 self.model_text() + (f" [b yellow]switching to {escape(self.switching)}[/b yellow]" if self.switching else ""),
                  f"[b]attempt {n}/{budget}[/b]",
                  ("[b yellow]waiting for the " + ("local model" if s.waiting == "local" else "folder") + "[/b yellow]")
                  if s.waiting else "[b yellow]running[/b yellow]" if s.busy else "idle"]
@@ -653,9 +644,6 @@ class MiniApp(App):
         except Exception:   # noqa: BLE001 - the tab may not be mounted yet
             pass
 
-    def tier_on(self, tier):
-        return tier == "local" or bool(self.cfg[tier].get("enabled", True))
-
     @property
     def stream(self):
         s = self.s
@@ -698,16 +686,11 @@ class MiniApp(App):
             self.on_block(ev)
             return
         if k == "run_start":
-            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], ev.get("tier", "local"))
+            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"])
         elif k == "attempt":
-            budget = ev.get("budget", self.cfg["caps"]["attempts_per_tool"])
-            self.attempt = (ev["n"], budget, ev.get("tier", self.attempt[2]))
-        elif k == "tier":
-            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], ev["tier"])
-            self.chat(f"[b blue]model switched[/b blue] {ev['previous']} -> {ev['tier']} ({escape(ev['model'])}): "
-                      f"{escape(ev.get('why', ''))}" + ("\n[dim]task data now leaves this machine[/dim]" if ev.get("leaves_machine") else ""))
+            self.attempt = (ev["n"], ev.get("budget", self.cfg["caps"]["attempts_per_tool"]))
         elif k == "phase" and ev.get("phase") in ("create", "repair"):
-            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], self.attempt[2])
+            self.attempt = (0, self.cfg["caps"]["attempts_per_tool"])
             self.chat(f"[b]building a new tool[/b] for: {escape(str(ev.get('need') or ev.get('tool')))}")
         elif k == "cap" or (k == "watchdog" and ev.get("name") in ("attempt_budget", "time_turn_limit", "hardware_swap")):
             self.cap_hit = ev.get("cap") or ev.get("name")
@@ -818,16 +801,18 @@ class MiniApp(App):
         self.busy, self.cap_hit = True, ""
         self.s.pending = text
         self.persist()
-        tier = self.next_tier
-        self.attempt = (0, self.cfg["caps"]["attempts_per_tool"], tier)
+        self.attempt = (0, self.cfg["caps"]["attempts_per_tool"])
         self.update_status()
-        self.run_task(self.s, text, list(self.attachments), tier)
+        self.run_task(self.s, text, list(self.attachments))
         self.attachments = []
 
     def can_start(self):
         """Whether a task or a tool may start now (one at a time, in a git folder); says why not."""
         if self.busy:
             self.chat("[yellow]a task is running[/yellow]")
+            return False
+        if self.switching:
+            self.chat(f"[yellow]llama-server is restarting with preset {escape(self.switching)}[/yellow]; try again when it is up")
             return False
         if self.workspace_note and not self.workspace:
             self.chat(f"[yellow]{escape(self.workspace_note)}[/yellow]")
@@ -893,17 +878,48 @@ class MiniApp(App):
         return self.workspace or os.getcwd()
 
     def cmd_model(self, args):
-        tier = args.get("tier")
-        on = [t for t in TIERS if self.tier_on(t)]
-        if tier is None:
-            self.chat(f"this session's model: [b]{self.next_tier}[/b]. Choose: /model {'|'.join(on)}")
-        elif not self.tier_on(tier):
-            self.chat(f"[yellow]{tier} is not configured[/yellow] (only {', '.join(on)}); `mini setup` adds a cloud tier")
+        """The preset is the model and the hardware it runs on; llama-server serves one preset for every session."""
+        from ..setup import preset_summary
+        name, presets = args.get("preset"), self.cfg.get("presets") or {}
+        active = self.cfg["llamacpp"].get("preset") or ""
+        if name is None:
+            rows = "\n".join(escape(preset_summary(n, p, n == active)) for n, p in presets.items())
+            self.chat(self.model_text() + ("\n" + rows + "\n/model NAME switches; it restarts llama-server for every session"
+                                           if rows else "\nno presets yet: mini preset add NAME --gpu G --device D --model M"))
+        elif name not in presets:
+            self.chat(f"[yellow]no preset {escape(name)}[/yellow]; known: {escape(', '.join(presets) or 'none')}")
+        elif name == active:
+            self.chat(f"preset [b]{escape(name)}[/b] is already in use")
+        elif self.switching:
+            self.chat(f"[yellow]already switching to {escape(self.switching)}[/yellow]")
+        elif any(s.busy for s in self.sessions):
+            self.chat("[yellow]a task is running[/yellow]: switching restarts llama-server, so wait until it ends")
         else:
-            self.next_tier = tier
-            self.persist()
-            self.chat(f"this session's tasks run on [b]{tier}[/b] ({escape(self.cfg[tier]['model'])})"
-                      + ("\n[dim]task data leaves this machine[/dim]" if tier != "local" else ""))
+            self.switching = name
+            self.chat(f"switching to preset [b]{escape(name)}[/b]: restarting llama-server ...")
+            self.switch_preset(name)
+        self.update_status()
+
+    @work(thread=True)
+    def switch_preset(self, name):
+        from .. import setup
+        ui = setup.QuietUI(lambda m: self.call_from_thread(self.chat, f"[dim]{escape(m)}[/dim]"))
+        cfg = config_mod.reload(self.cfg)
+        try:
+            (self.preset_switcher or setup.use_preset)(cfg, name, ui)
+            ok, msg = True, ""
+        except Exception as e:   # noqa: BLE001 - the UI says what failed; the old preset stays
+            ok, msg = False, str(e)
+        self.call_from_thread(self.preset_switched, name, ok, msg)
+
+    def preset_switched(self, name, ok, msg):
+        self.switching = None
+        self.cfg = config_mod.reload(self.cfg)
+        self.refresh_registry()                              # /model completes the new preset list
+        if ok:
+            self.chat(f"[green]preset {escape(name)} is in use[/green]: " + self.model_text())
+        else:
+            self.chat(f"[red]could not switch to {escape(name)}:[/red] {escape(msg)}; " + self.model_text())
         self.update_status()
 
     def cmd_clear(self, args):
@@ -916,7 +932,7 @@ class MiniApp(App):
 
     async def add_session(self, name=None):
         self.session_n += 1
-        s = Session(self.session_n, name or str(self.session_n), "local", self.cfg["caps"]["attempts_per_tool"])
+        s = Session(self.session_n, name or str(self.session_n), self.cfg["caps"]["attempts_per_tool"])
         s.stream = VerticalScroll(id=s.stream_id, classes="stream")
         self.sessions.append(s)
         self.persist()
@@ -925,7 +941,7 @@ class MiniApp(App):
         tabs.active = s.pane_id
         self.switch_to(s)
         s.stream.anchor()
-        self.chat(f"session [b]{escape(s.name)}[/b]: runs on local; /model changes it; alt+1..9 or /session switches")
+        self.chat(f"session [b]{escape(s.name)}[/b]: alt+1..9 or /session switches")
 
     def switch_to(self, s):
         self.active = s
@@ -952,7 +968,7 @@ class MiniApp(App):
     def cmd_session(self, args):
         ref = args.get("target")
         if ref is None:
-            self.chat("sessions: " + ", ".join(f"{i}:{escape(s.name)} ({s.tier}{', running' if s.busy else ''})"
+            self.chat("sessions: " + ", ".join(f"{i}:{escape(s.name)}{' (running)' if s.busy else ''}"
                                                for i, s in enumerate(self.sessions, 1)))
             return
         s = self.find_session(ref)
@@ -1013,7 +1029,7 @@ class MiniApp(App):
             self.chat(f"[red]no such file:[/red] {escape(args['path'])}")
 
     def cmd_status(self, args):
-        self.check_tiers()
+        self.check_model()
 
     def cmd_undo(self, args):
         self.undo(args.get("target") or [])
@@ -1107,16 +1123,16 @@ class MiniApp(App):
         self.pick(ev.option_index)
         self.query_one("#prompt", Input).focus()
 
-    def run_task(self, session, text, attachments, tier):
-        self.run_worker(lambda: self._run_task(session, text, attachments, tier), thread=True, group=f"run-{session.n}",
+    def run_task(self, session, text, attachments):
+        self.run_worker(lambda: self._run_task(session, text, attachments), thread=True, group=f"run-{session.n}",
                         exclusive=True)
 
-    def _run_task(self, session, text, attachments, tier):
+    def _run_task(self, session, text, attachments):
         from ..agent.core import Agent
         cfg = self.cfg if self.backend_factory else config_mod.reload(self.cfg)
-        session.agent = Agent(cfg, approval_handler=lambda *a: self.approval_handler(*a, session=session), start_tier=tier,
+        session.agent = Agent(cfg, approval_handler=lambda *a: self.approval_handler(*a, session=session),
                               history=session.history, workspace=self.workspace,
-                              tier_backends={tier: self.backend_factory()} if self.backend_factory else None)
+                              backend=self.backend_factory() if self.backend_factory else None)
         session.agent.log.subscribe(lambda ev: self.call_from_thread(self.on_agent_event, session, ev))
         session.agent.run_task(text, attachments)
 
@@ -1209,13 +1225,13 @@ class MiniApp(App):
 
     def refresh_registry(self):
         reg = Registry(self.cfg.abspath("state"))
-        self.commands = commands.Commands.load(reg)          # every accepted tool is a slash command
+        self.commands = commands.Commands.load(reg, self.presets())   # every accepted tool is a slash command
         t = self.query_one("#reg-table", DataTable)
         t.clear(columns=True)
         t.add_columns("tool", "active", "versions", "built by", "tests", "attempts")
         for m in reg.list_tools():
             cb = m.get("created_by", {})
-            by = f"{cb.get('provider')}/{cb.get('model')}" + (f" (from {cb['escalated_from']})" if cb.get("escalated_from") else "")
+            by = f"{cb.get('provider')}/{cb.get('model')}"
             tr = m.get("test_results") or {}
             t.add_row(m["name"], f"v{m['version']}", ",".join(map(str, reg.versions(m["name"]))), by,
                       ("pass: " if tr.get("passed") else "FAIL: ") + tr.get("summary", "")[:30],
@@ -1304,9 +1320,6 @@ class MiniApp(App):
     def reload_config(self):
         """Take the file's values into the running UI; the next task uses them."""
         self.cfg = config_mod.reload(self.cfg)
-        for s in self.sessions:                              # a tier that is no longer configured falls back to local
-            if s.tier not in TIERS or not self.tier_on(s.tier):
-                s.tier = "local"
         settingsform.refresh(self, self.cfg)
         self.query_one("#cfg-text", TextArea).text = self.config_file_text()
         self.update_status()

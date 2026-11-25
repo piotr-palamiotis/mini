@@ -1,8 +1,7 @@
-"""Setup and doctor without touching the real system: a fake gateway (local HTTP server), a scripted UI, units
-and the env file in temp dirs."""
+"""Setup and doctor without touching the real system: a fake llama-server (local HTTP server), a scripted UI and
+units in temp dirs."""
 import json
 import os
-import stat
 import tempfile
 import threading
 import tomllib
@@ -14,17 +13,10 @@ from mini import setup
 from mini.harness import config as config_mod
 from tests.helpers import temp_config
 
-KEY = "k-123"
-
-
-class Gateway(BaseHTTPRequestHandler):
-    models = ["mini-free"]
+class FakeLlama(BaseHTTPRequestHandler):
+    models = ["good"]
 
     def do_GET(self):
-        if self.headers.get("Authorization") != "Bearer " + KEY:
-            self.send_response(401)
-            self.end_headers()
-            return
         body = json.dumps({"data": [{"id": m} for m in self.models]}).encode()
         self.send_response(200)
         self.end_headers()
@@ -62,7 +54,7 @@ class ScriptUI:
 class SetupTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.srv = HTTPServer(("127.0.0.1", 0), Gateway)
+        cls.srv = HTTPServer(("127.0.0.1", 0), FakeLlama)
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
         cls.url = f"http://127.0.0.1:{cls.srv.server_port}/v1"
 
@@ -74,52 +66,23 @@ class SetupTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="mini-setup-")
         self.cfg = temp_config()
         self.cfg.path = os.path.join(self.tmp, "mini.toml")
-        open(self.cfg.path, "w").write('[free]\nenabled = true   # keep me\nmodel = "mini-free"\n\n[paid]\nenabled = true\n')
-        for t in ("free", "paid"):
-            self.cfg[t].update(enabled=True, url=self.url, api_key_env="MINI_TEST_GW_KEY")
-        self.env = mock.patch.object(config_mod, "ENV_FILE", os.path.join(self.tmp, "env"))
-        self.env.start()
-        os.environ.pop("MINI_TEST_GW_KEY", None)
-
-    def tearDown(self):
-        self.env.stop()
-        os.environ.pop("MINI_TEST_GW_KEY", None)
+        open(self.cfg.path, "w").write('[llamacpp]\nctx = 4096   # keep me\n')
 
     def test_set_values_keeps_comments(self):
-        config_mod.set_values(self.cfg.path, {"free": {"enabled": False, "extra": 2}, "routing": {"start": "local"}})
+        config_mod.set_values(self.cfg.path, {"llamacpp": {"ctx": 8192, "extra": 2}, "routing": {"start": "local"}})
         text = open(self.cfg.path).read()
-        self.assertIn("enabled = false   # keep me", text)
-        self.assertEqual(tomllib.loads(text)["free"]["extra"], 2)
+        self.assertIn("ctx = 8192   # keep me", text)
+        self.assertEqual(tomllib.loads(text)["llamacpp"]["extra"], 2)
         self.assertEqual(tomllib.loads(text)["routing"]["start"], "local")
 
-    def test_tier_status(self):
-        st = setup.tier_status(self.cfg)
-        self.assertEqual(st["free"], (False, "API key missing or wrong"))
-        os.environ["MINI_TEST_GW_KEY"] = KEY
-        st = setup.tier_status(self.cfg)
-        self.assertEqual(st["free"], (True, "mini-free"))
-        self.assertEqual(st["paid"], (False, "no model or combo named mini-paid"))
-        self.cfg["paid"]["enabled"] = False
-        self.assertEqual(setup.tier_status(self.cfg)["paid"], (None, "off"))
-        self.cfg["free"]["url"] = "http://127.0.0.1:9/v1"
-        self.assertEqual(setup.tier_status(self.cfg)["free"], (False, "gateway not running"))
-
-    def test_gateway_key_is_checked_and_saved_privately(self):
-        with mock.patch.object(setup, "ENV_FILE", os.path.join(self.tmp, "env")):
-            with self.assertRaises(setup.SetupError):
-                setup.set_gateway_key(self.cfg, ScriptUI(secret=["wrong"]))
-            setup.set_gateway_key(self.cfg, ScriptUI(secret=[KEY]))
-        p = os.path.join(self.tmp, "env")
-        self.assertEqual(open(p).read(), f"MINI_TEST_GW_KEY={KEY}\n")
-        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
-        os.environ.pop("MINI_TEST_GW_KEY")
-        self.assertEqual(config_mod.secret("MINI_TEST_GW_KEY"), KEY, "mini reads it back from the env file")
-
-    def test_missing_combo_can_be_renamed_or_turned_off(self):
-        setup.setup_combo(self.cfg, "paid", ScriptUI(choice=["use another model or combo name for paid"], text=["other"]))
-        self.assertEqual(self.cfg["paid"]["model"], "other")
-        setup.setup_combo(self.cfg, "paid", ScriptUI(choice=["turn the paid tier off"]))
-        self.assertFalse(tomllib.load(open(self.cfg.path, "rb"))["paid"]["enabled"])
+    def test_local_status(self):
+        self.cfg["local"].update(backend="openai", url=self.url, model="good")
+        self.assertEqual(setup.local_status(self.cfg), (True, "good"))
+        self.cfg["llamacpp"]["preset"] = "p"
+        self.cfg["local"]["model"] = "missing"
+        self.assertEqual(setup.local_status(self.cfg), (False, "missing (preset p): not in the models folder"))
+        self.cfg["local"]["url"] = "http://127.0.0.1:9/v1"
+        self.assertEqual(setup.local_status(self.cfg)[1], "missing (preset p): llama-server is not running")
 
     def test_foreign_unit_is_not_replaced_without_a_yes(self):
         units = os.path.join(self.tmp, "units")
@@ -148,8 +111,7 @@ class SetupTest(unittest.TestCase):
             return [setup.Check("a", "thing a", state["fixed"], "broken", fix=fix, fix_text="repair a"),
                     setup.Check("b", "thing b", False, "needs root", manual="sudo do-b"),
                     setup.Check("c", "thing c", False, "optional", fix=fix, fix_text="repair c")]
-        self.cfg["free"]["enabled"] = self.cfg["paid"]["enabled"] = False
-        ui = ScriptUI(yes=[False, True, False])      # add cloud: no; fix a: yes; fix c: no
+        ui = ScriptUI(yes=[True, False])             # fix a: yes; fix c: no
         with mock.patch.object(setup, "checks", fake_checks):
             self.assertTrue(setup.needs_setup(self.cfg))
             rc = setup.wizard(self.cfg, ui)
@@ -158,7 +120,6 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(any("sudo do-b" in s for s in ui.said))
         self.assertFalse(setup.needs_setup(self.cfg))
         self.assertEqual(json.load(open(setup.marker(self.cfg)))["open"], ["b", "c"])
-        self.assertFalse(self.cfg["free"]["enabled"] or self.cfg["paid"]["enabled"], "no cloud wanted: none added")
 
     def test_gguf_header(self):
         import struct
@@ -173,16 +134,6 @@ class SetupTest(unittest.TestCase):
                     + kv_str("general.name", "N"))
         self.assertEqual(architecture(p), "testarch")
         self.assertEqual(metadata(p, ("general.name",)), {"general.name": "N"})
-
-    def test_backend_checklist_and_order(self):
-        self.cfg["local"].update(model="m1", use=[])
-        self.cfg["backends"] = {}
-        ui = ScriptUI(checklist=[[setup.BACKENDS["llamacpp"], setup.BACKENDS["custom"]]], choice=[setup.BACKENDS["custom"]])
-        setup.choose_backends(self.cfg, ui)
-        data = tomllib.load(open(self.cfg.path, "rb"))
-        self.assertEqual(data["local"]["use"], ["custom", "llamacpp"])
-        self.assertEqual(data["backends"]["llamacpp"], {"backend": "openai", "url": "http://127.0.0.1:8080/v1", "model": "m1"})
-        self.assertNotIn("ollama", setup.BACKENDS)
 
     def gguf(self, path, arch):
         import struct
@@ -207,14 +158,14 @@ class SetupTest(unittest.TestCase):
     def test_llama_checks(self):
         d = os.path.join(self.tmp, "models")
         self.cfg["llamacpp"].update(dir=os.path.join(self.tmp, "llama.cpp"), models_dir=d)
-        entry = {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "good"}
-        cs = setup.backend_checks(self.cfg, "llamacpp", entry)
+        self.cfg["local"].update(backend="openai", url="http://127.0.0.1:9/v1", model="good")
+        cs = setup.llama_checks(self.cfg)
         self.assertEqual([c.key for c in cs], ["llama_install"])
         self.assertIn(setup.LLAMA_TAG, cs[0].fix_text)
         with mock.patch.object(setup, "llama_server", return_value="/x/llama-server"), \
                 mock.patch.object(setup, "llama_commit", return_value="0000000"), \
                 mock.patch.object(setup, "unit_state", return_value=(False, False, False, False)):
-            cs = {c.key: c for c in setup.backend_checks(self.cfg, "llamacpp", entry)}
+            cs = {c.key: c for c in setup.llama_checks(self.cfg)}
             self.assertFalse(cs["llama_version"].ok)
             self.assertIn("0000000", cs["llama_version"].detail)
             self.assertFalse(cs["models"].ok)
@@ -222,7 +173,7 @@ class SetupTest(unittest.TestCase):
             self.gguf(os.path.join(d, "good.gguf"), "knownarch")
             self.gguf(os.path.join(d, "odd.gguf"), "newarch")
             with mock.patch.object(setup, "llama_supports", side_effect=lambda srv, a: a == "knownarch"):
-                cs = {c.key: c for c in setup.backend_checks(self.cfg, "llamacpp", entry)}
+                cs = {c.key: c for c in setup.llama_checks(self.cfg)}
         self.assertTrue(cs["models"].ok)
         self.assertEqual(cs["models"].detail, "good, odd")
         self.assertFalse(cs["model_arch"].ok)
@@ -286,29 +237,35 @@ class SetupTest(unittest.TestCase):
             f"mv {b}/sha256-aa /m/vis-1b/vis-1b.gguf", "ln /m/txt-2b/mmproj-txt-2b.gguf /m/vis-1b/mmproj-vis-1b.gguf",
             f"mv {b}/sha256-dd /m-drafts/vis-1b-draft.gguf", "chown -R u: /m /m-drafts"])
 
-    def test_single_backend_model_wins_over_local_model(self):
+    def test_the_active_presets_model_is_the_model(self):
         from mini.agent.core import Agent
         path = os.path.join(self.tmp, "one.toml")
-        open(path, "w").write('[local]\nmodel = "old"\nuse = ["llamacpp"]\n\n[backends.llamacpp]\nbackend = "openai"\n'
-                              'url = "http://127.0.0.1:9/v1"\nmodel = "new"\n')
-        self.assertEqual(config_mod.load(path)["local"]["model"], "new", "what the UI shows")
-        self.cfg["local"].update(model="old", use=["llamacpp"])
-        self.cfg["backends"] = {"llamacpp": {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "new"}}
-        self.assertEqual(Agent(self.cfg, label="one").model, "new", "what a task asks the server for")
+        open(path, "w").write('[local]\nmodel = "plain"\n\n[llamacpp]\nport = 8099\npreset = "big"\n\n'
+                              '[presets.big]\nmodel = "big-model"\nctx = 1024\n')
+        cfg = config_mod.load(path)
+        self.assertEqual((cfg["local"]["model"], cfg["local"]["url"]), ("big-model", "http://127.0.0.1:8099/v1"))
+        self.assertEqual(Agent(cfg, label="one").model, "big-model", "what a task asks the server for")
+        cfg["llamacpp"]["preset"] = ""
+        self.assertEqual(config_mod.reload(cfg)["local"]["model"], "big-model", "reload reads the file again")
+        open(path, "w").write('[local]\nmodel = "plain"\n')
+        self.assertEqual(config_mod.load(path)["local"]["model"], "plain", "no preset: [local] model")
 
-    def test_task_falls_back_to_the_next_backend(self):
-        from mini.agent.core import Agent
-        os.environ["MINI_TEST_GW_KEY"] = KEY
-        self.cfg["local"]["use"] = ["llamacpp", "custom"]
-        self.cfg["backends"] = {"llamacpp": {"backend": "openai", "url": "http://127.0.0.1:9/v1", "model": "x"},
-                                "custom": {"backend": "openai", "url": self.url, "model": "mini-free",
-                                           "api_key_env": "MINI_TEST_GW_KEY"}}
-        a = Agent(self.cfg, label="fallback")
-        self.assertEqual(a.local_backend, "custom")
-        self.assertEqual((a.model, a.cfg["local"]["url"]), ("mini-free", self.url))
-        self.assertEqual(self.cfg["local"]["use"], ["llamacpp", "custom"], "the shared config is not changed")
-        st = setup.tier_status(self.cfg)
-        self.assertEqual(st["local"], (True, "mini-free via custom (also: llamacpp); llamacpp is down"))
+    def test_choose_model_saves_to_the_active_preset(self):
+        self.gguf(os.path.join(self.tmp, "models", "good.gguf"), "a")
+        self.cfg["llamacpp"].update(models_dir=os.path.join(self.tmp, "models"), preset="p")
+        self.cfg["presets"] = {"p": {"model": "old"}}
+        self.cfg["local"].update(url=self.url, model="old")
+        with mock.patch.object(setup, "load_test", return_value=(True, "")):
+            setup.choose_model(self.cfg, ScriptUI(choice=["good"]))
+        data = tomllib.loads(open(self.cfg.path).read())
+        self.assertEqual((data["presets"]["p"]["model"], self.cfg["local"]["model"]), ("good", "good"))
+        self.assertNotIn("model", data.get("local", {}))
+
+    def test_use_preset_points_mini_at_its_model(self):
+        setup.save_preset(self.cfg, "a", {"gpu": "cuda", "model": "m-a"})
+        with mock.patch.object(setup, "llama_server", return_value="/x"), mock.patch.object(setup, "setup_router"):
+            setup.use_preset(self.cfg, "a", setup.QuietUI(lambda m: None))
+        self.assertEqual((self.cfg["llamacpp"]["preset"], self.cfg["local"]["model"]), ("a", "m-a"))
 
 
 if __name__ == "__main__":

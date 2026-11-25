@@ -1,4 +1,4 @@
-"""One conversation tab: its own stream, history, model tier and running task. The sessions of an app run in
+"""One conversation tab: its own stream, history and running task. The sessions of an app run in
 parallel; the local model and the folder's file changes are shared through harness/gates."""
 
 import json
@@ -18,7 +18,7 @@ def load(path, attempts):
     try:
         with open(path) as f:
             data = json.load(f)
-        out = [Session(int(d["n"]), str(d["name"]), d.get("tier", "local"), attempts, history=d.get("history") or [],
+        out = [Session(int(d["n"]), str(d["name"]), attempts, history=d.get("history") or [],
                        pending=d.get("pending")) for d in data["sessions"]]
         return out, data.get("active")
     except (OSError, ValueError, KeyError, TypeError):
@@ -27,7 +27,7 @@ def load(path, attempts):
 
 def save(path, sessions, active):
     """Write the tabs, atomically. Never raises: a full disk must not break a running task."""
-    data = {"active": active.n, "sessions": [{"n": s.n, "name": s.name, "tier": s.tier, "history": s.history,
+    data = {"active": active.n, "sessions": [{"n": s.n, "name": s.name, "history": s.history,
                                               "pending": s.pending} for s in sessions]}
     try:
         folder = os.path.dirname(os.path.dirname(path))
@@ -43,15 +43,14 @@ def save(path, sessions, active):
 
 
 class Session:
-    def __init__(self, n, name, tier, attempts, history=None, pending=None):
+    def __init__(self, n, name, attempts, history=None, pending=None):
         self.n, self.name = n, name
         self.pane_id, self.stream_id = f"s-{n}", f"stream-{n}"
         self.stream = None                          # the VerticalScroll, set once mounted
-        self.tier = tier                            # the model for this session's tasks (local unless /model says otherwise)
         self.history = list(history or [])                           # finished tasks of this conversation; every new task is told about them
         self.pending = pending                      # the task text while one runs: after a restart it was interrupted
         self.attachments = []
-        self.attempt = (0, attempts, tier)
+        self.attempt = (0, attempts)
         self.cap_hit = ""
         self.busy = False
         self.waiting = ""                           # "local" or "folder" while a gate holds this session back

@@ -301,10 +301,6 @@ Latest test run:
 
 Do not repeat a change listed above that did not help: the same failure will come back."""
 
-HANDOVER = """You take over building this tool from another model. Its attempts so far, per model tier: {attempts}.
-Diagnose the failure from the latest output below. Keep what works; fix what does not. Fix the tests too if they
-contradict the spec."""
-
 EXECUTE = """Task from the user:
 {task}
 

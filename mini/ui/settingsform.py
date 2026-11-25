@@ -1,7 +1,7 @@
 """The Config view as a form: switches, dropdowns and fields instead of a TOML text box.
 
 FIELDS says what is shown. Saving writes only the keys that changed, in place (comments and layout of the TOML
-file stay), through config.set_values. Backends and presets are not here: `mini preset` and `mini setup` own them.
+file stay), through config.set_values. Presets are not here: /model, `mini preset` and `mini setup` own them.
 """
 from rich.markup import escape
 from textual.containers import Horizontal, VerticalScroll
@@ -9,8 +9,8 @@ from textual.widgets import Collapsible, Input, Label, Select, Static, Switch
 
 # (section, key, label, kind[, options]); kind: switch | select | int | float | text
 FIELDS = [
-    ("Model tiers", [
-        ("local", "temperature", "Local model temperature", "float"),
+    ("Model", [
+        ("local", "temperature", "Model temperature", "float"),
     ]),
     ("Approvals", [
         ("approvals", "confirm_first", "Ask me to confirm the plan before a task runs", "switch"),
@@ -96,7 +96,7 @@ def widgets(cfg):
             group.append(row(label, control(kind, cfg[section][key], wid(section, key), *opt)))
     rows.append(Collapsible(*advanced, title="Advanced: thinking, limits, watchdogs", collapsed=True,
                             id="cfg-advanced"))
-    rows.append(Static("Backends and presets: `mini preset list|use`, `mini setup`. Anything else: the Raw TOML tab.",
+    rows.append(Static("Presets (model and hardware): /model, `mini preset list|add|use`. Anything else: the Raw TOML tab.",
                        classes="note"))
     return VerticalScroll(*rows, id="cfg-form")
 
