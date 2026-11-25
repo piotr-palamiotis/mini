@@ -1,24 +1,26 @@
-# mini configuration. Missing keys fall back to mini/harness/config.py DEFAULTS.
+# mini's shared settings (in git). This machine's own settings (model, GPU, presets, paths, cloud providers) go in
+# ~/.config/mini/mini.toml, laid over this file: `mini setup` and `mini preset` write there. Missing keys fall back
+# to mini/harness/config.py DEFAULTS.
 
 [local]
-# The local tier. `use` lists backends from [backends.*] in order of preference; mini setup writes them.
+# The local tier. `use` lists backends from [backends.*] in order of preference; mini setup writes them
+# (to ~/.config/mini/mini.toml).
 backend = "openai"
 url = "http://127.0.0.1:8080/v1"
-model = "gemma4-12b-it-qat"
+model = "gemma4-12b"
 temperature = 0.6
-use = ["llamacpp"]
 
 [llamacpp]
 # mini setup builds the pinned llama.cpp release in `dir` and runs llama-server in router mode over
 # `models_dir`: every NAME.gguf (or NAME/ folder with the model and its mmproj-*.gguf) is a model mini can use.
-dir = "/mnt/disk_a/llama.cpp"
-models_dir = "/mnt/disk_a/models"
+dir = "~/llama.cpp"
+models_dir = "~/models"
 port = 8080
-device = "Vulkan0"       # llama-server --list-devices
+device = ""              # e.g. Vulkan0, CUDA0 (llama-server --list-devices); empty: setup asks
 ctx = 65536              # context per model
 models_max = 1           # models in VRAM at once; others load on demand
 extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024"
-preset = "rtx3070"       # the active entry of [presets.*]; `mini preset use NAME` switches
+preset = ""              # the active entry of [presets.*]; `mini preset use NAME` switches
 gpu = "vulkan"           # build used when no preset is active: vulkan | cuda | cpu
 
 [thinking]
@@ -73,27 +75,8 @@ auto_approve = []
 confirm = "proceed"
 cap = "hint"
 
-# Cloud tiers go through OmniRoute (http://127.0.0.1:20128). The model names are OmniRoute combos: pick the
-# actual models in its dashboard. The API key is read from $OMNIROUTE_API_KEY or ~/.config/mini/env.
-[free]
-enabled = true
-backend = "openai"
-url = "http://127.0.0.1:20128/v1"
-model = "mini-free"
-api_key_env = "OMNIROUTE_API_KEY"
-temperature = 0.4
-thinking_controls = false
-tokens_per_run = 3000000
-
-[paid]
-enabled = false
-backend = "openai"
-url = "http://127.0.0.1:20128/v1"
-model = "mini-paid"
-api_key_env = "OMNIROUTE_API_KEY"
-temperature = 0.4
-thinking_controls = false
-tokens_per_run = 2000000
+# Cloud tiers ([free], [paid]) are off until configured: `mini setup` adds them to ~/.config/mini/mini.toml.
+# Defaults (OmniRoute at http://127.0.0.1:20128, key from $OMNIROUTE_API_KEY or ~/.config/mini/env) are in config.py.
 
 [consult]
 enabled = true
@@ -120,25 +103,7 @@ facts = []
 state = "state"
 runs = "runs"
 
-[backends.llamacpp]
-backend = "openai"
-url = "http://127.0.0.1:8080/v1"
-model = "gemma4-12b-it-qat"
-
-# Named ways to run llama-server (gpu, device, model, ctx, models_max, extra_args), laid over [llamacpp].
-[presets.rx6700xt]
-gpu = "vulkan"
-device = "Vulkan0"
-model = "gemma4-12b"
-ctx = 65536
-extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024"
-
-[presets.rtx3070]
-gpu = "cuda"
-device = "CUDA0"
-model = "gemma4-12b-it-qat"
-ctx = 40960
-extra_args = "-fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto --parallel 1 --cache-ram 1024 --no-mmproj-offload"
+# [backends.*] and [presets.*] describe this machine's model servers: they live in ~/.config/mini/mini.toml.
 
 # The folder mini is started in is where it works. It must be a git repository: every task is checkpointed in a
 # hidden ref (refs/mini/<run>) and `mini undo` restores it.

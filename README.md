@@ -65,7 +65,7 @@ of each tier at startup and on `/status`.
 
 **Models from Ollama:** `scripts/ollama-export DEST` prints the commands that move an Ollama store's GGUF
 files into the models folder layout (instant on the same disk, no copies); run them with
-`scripts/ollama-export /mnt/disk_a/models | sudo sh -e`. Draft models go to `DEST-drafts/`.
+`scripts/ollama-export ~/models | sudo sh -e`. Draft models go to `DEST-drafts/`.
 
 ```sh
 .venv/bin/python -m mini                                  # Textual UI
@@ -75,10 +75,18 @@ files into the models folder layout (instant on the same disk, no copies); run t
 .venv/bin/python -m mini settings list|show|set|delete KEY
 ```
 
-Configuration lives in `config/mini.toml` (every key is documented in `mini/harness/config.py`). The UI's Config
-tab is a form for the common settings (switches, dropdowns, number fields) that saves only what you changed, in
-place, so the file's comments stay; a second sub-tab edits the raw TOML. Backends and presets are managed with
-`mini preset` and `mini setup`.
+Configuration comes in two layers (every key is documented in `mini/harness/config.py`):
+
+- `config/mini.toml` (in git): the shared settings, the same on every machine.
+- `~/.config/mini/mini.toml` (never in git): this machine's own settings, laid over the shared file: the model,
+  the GPU and presets, the llama.cpp and models folders, the backends and the cloud tiers. Everything mini
+  changes (`mini setup`, `mini preset`, the UI's Config tab) is written here, so a `git pull` never conflicts
+  with your settings and they never end up in a commit. Secrets go in `~/.config/mini/env`.
+- `--config PATH` or `$MINI_CONFIG` names one file instead, read alone and written to (tests and benches).
+
+The UI's Config tab is a form for the common settings (switches, dropdowns, number fields) that saves only what
+you changed, in place, so the file's comments stay; a second sub-tab edits the machine file's raw TOML. Backends
+and presets are managed with `mini preset` and `mini setup`.
 
 ## How a task runs
 
@@ -222,11 +230,12 @@ one is missing, which **questions** it asks and in what order, what it confirms 
 | `free` | OmniRoute combo `mini-free`: free cloud models with failover | Only when you pick it (`/model free`). Exists only when `[free]` is in the config |
 | `paid` | OmniRoute combo `mini-paid`: your subscription | Only when you pick it (`/model paid`, `--model paid`, or "use paid" in a dialog). Exists only when `[paid]` is in the config |
 
-- A cloud tier is on only when its section (`[free]`, `[paid]`) is in `config/mini.toml` (`mini setup` writes it;
+- A cloud tier is on only when its section (`[free]`, `[paid]`) is in the config (`mini setup` writes it to
+  `~/.config/mini/mini.toml`;
   `enabled = false` in a section switches it off again). With neither, nothing leaves the machine. mini never
   moves a task to another model by itself: a task that fails on its tier fails. `/model` changes the tier of the
   current session.
-- Config: `[local]`, `[free]`, `[paid]` in `config/mini.toml`. Free and paid are OpenAI-compatible
+- Config: `[local]`, `[free]`, `[paid]` (this machine's values in `~/.config/mini/mini.toml`). Free and paid are OpenAI-compatible
   endpoints; the actual models behind `mini-free` and `mini-paid` are chosen in OmniRoute's dashboard.
 - The OmniRoute API key is read from `$OMNIROUTE_API_KEY` or `~/.config/mini/env` (`OMNIROUTE_API_KEY=...`). It is
   never in the repo and never reaches a sandbox.

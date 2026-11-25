@@ -878,7 +878,7 @@ class MiniApp(App):
 
     def _run_tool(self, session, name, inputs, line):
         from ..harness import toolrun
-        cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
+        cfg = self.cfg if self.backend_factory else config_mod.reload(self.cfg)
         sink = lambda ev: self.call_from_thread(self.on_agent_event, session, ev)
         m = Registry(cfg.abspath("state")).get(name)
         if not m:
@@ -1113,7 +1113,7 @@ class MiniApp(App):
 
     def _run_task(self, session, text, attachments, tier):
         from ..agent.core import Agent
-        cfg = self.cfg if self.backend_factory else config_mod.load(self.cfg.path)
+        cfg = self.cfg if self.backend_factory else config_mod.reload(self.cfg)
         session.agent = Agent(cfg, approval_handler=lambda *a: self.approval_handler(*a, session=session), start_tier=tier,
                               history=session.history, workspace=self.workspace,
                               tier_backends={tier: self.backend_factory()} if self.backend_factory else None)
@@ -1298,12 +1298,12 @@ class MiniApp(App):
         try:
             with open(self.cfg.path) as f:
                 return f.read()
-        except OSError:
-            return config_mod.dumps(self.cfg)
+        except OSError:                                  # nothing set for this machine yet
+            return config_mod.USER_HEADER if self.cfg.path == config_mod.USER_FILE else ""
 
     def reload_config(self):
         """Take the file's values into the running UI; the next task uses them."""
-        self.cfg = config_mod.load(self.cfg.path)
+        self.cfg = config_mod.reload(self.cfg)
         for s in self.sessions:                              # a tier that is no longer configured falls back to local
             if s.tier not in TIERS or not self.tier_on(s.tier):
                 s.tier = "local"
@@ -1343,6 +1343,7 @@ class MiniApp(App):
         except tomllib.TOMLDecodeError as e:
             msg.update(f"[red]not saved: {escape(str(e))}[/red]")
             return
+        os.makedirs(os.path.dirname(os.path.abspath(self.cfg.path)), exist_ok=True)
         with open(self.cfg.path, "w") as f:
             f.write(text)
         self.reload_config()

@@ -133,7 +133,7 @@ def write_shim(cfg, name):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     py = os.path.join(ROOT, ".venv", "bin", "python")
     py = py if os.path.exists(py) else sys.executable
-    conf = f' --config "{cfg.path}"' if cfg.path and os.path.exists(cfg.path) else ""
+    conf = f' --config "{cfg.named}"' if cfg.named and os.path.exists(cfg.named) else ""   # else the usual files
     with open(p, "w") as f:
         f.write(f"#!/bin/sh\n{SHIM_MARK} for {name} (written by `mini tools accept`; `mini tools shims` rewrites it)\n"
                 f'PYTHONPATH="{ROOT}${{PYTHONPATH:+:$PYTHONPATH}}" exec "{py}" -m mini{conf} tool {name} "$@"\n')

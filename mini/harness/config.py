@@ -1,7 +1,10 @@
 """Configuration. Every cap, budget and watchdog threshold lives here. Stdlib only.
 
-Lookup order: --config PATH, $MINI_CONFIG, <project>/config/mini.toml.
-Values missing from the file fall back to DEFAULTS, so an old file keeps working when new keys appear.
+Two layers: <project>/config/mini.toml holds the shared settings (in git), and ~/.config/mini/mini.toml this
+machine's own (model, presets, GPU, paths, providers: never in git), laid over it. Every change mini makes (setup,
+presets, the settings screen) goes to the machine file. --config PATH or $MINI_CONFIG names one file instead, read
+alone and written to (tests, benches). Values missing everywhere fall back to DEFAULTS, so an old file keeps
+working when new keys appear.
 """
 import copy
 import os
@@ -22,8 +25,8 @@ DEFAULTS = {
     },
     "backends": {},                          # name -> {backend, url, model}; written by mini setup
     "llamacpp": {                            # the llama.cpp install mini setup manages
-        "dir": "/mnt/disk_a/llama.cpp",      # source checkout and build of the pinned release
-        "models_dir": "/mnt/disk_a/models",  # GGUF files: NAME.gguf, or NAME/ with the model and its mmproj-*.gguf
+        "dir": "~/llama.cpp",                # source checkout and build of the pinned release
+        "models_dir": "~/models",            # GGUF files: NAME.gguf, or NAME/ with the model and its mmproj-*.gguf
         "port": 8080,
         "preset": "",                        # the active entry of [presets.*]; empty: the values below as they are
         "gpu": "vulkan",                     # which llama.cpp build serves: vulkan | cuda | cpu
@@ -156,7 +159,12 @@ def _merge(base, over):
 
 
 TIERS = ("local", "free", "paid")
-ENV_FILE = os.path.expanduser("~/.config/mini/env")
+CONFIG_DIR = os.path.expanduser("~/.config/mini")
+ENV_FILE = os.path.join(CONFIG_DIR, "env")
+USER_FILE = os.path.join(CONFIG_DIR, "mini.toml")     # this machine's settings, laid over SHARED_FILE
+SHARED_FILE = os.path.join(ROOT, "config", "mini.toml")
+USER_HEADER = ("# mini settings for this machine, laid over config/mini.toml in the mini folder. mini setup, mini preset\n"
+               "# and the settings screen write here. Keep secrets in ~/.config/mini/env, not here.\n")
 
 
 def local_candidates(cfg):
@@ -192,7 +200,14 @@ def secret(name):
 
 
 class Config(dict):
-    path = None
+    path = None          # the file changes are written to
+    source = None        # the one file named by --config / $MINI_CONFIG, or None: shared + machine file
+    files = ()           # the files read, in order
+
+    @property
+    def named(self):
+        """The one file this config is read from and written to, or None for the shared + machine files."""
+        return self.path if self.source else None
 
     def abspath(self, key):
         p = self["paths"][key]
@@ -200,17 +215,25 @@ class Config(dict):
 
 
 def load(path=None):
-    path = path or os.environ.get("MINI_CONFIG") or os.path.join(ROOT, "config", "mini.toml")
+    source = path or os.environ.get("MINI_CONFIG") or None
+    files = (source,) if source else (SHARED_FILE, USER_FILE)
     data = {}
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
+    for f in files:
+        if os.path.exists(f):
+            with open(f, "rb") as fh:
+                data = _merge(data, tomllib.load(fh))
     cfg = Config(_merge(DEFAULTS, data))
     for t in ("free", "paid"):         # a cloud tier is on when it is configured (its section exists), unless switched off
         cfg[t]["enabled"] = isinstance(data.get(t), dict) and data[t].get("enabled", True) is not False
-    cfg.path = path
+    cfg.path, cfg.source, cfg.files = source or USER_FILE, source, files
     cfg["local"] = local_candidates(cfg)[0][1]       # [local] shows the preferred backend's url and model
     return cfg
+
+
+def reload(cfg):
+    """The same files read again (after a change was saved). One named file is read from cfg.path, where it is
+    written."""
+    return load(cfg.named)
 
 
 def _fmt(v):
@@ -251,7 +274,11 @@ def save(cfg, path=None):
 def set_values(path, updates):
     """Change keys in a TOML file in place, keeping its comments and layout. updates: {section: {key: value}}.
     Missing keys are added at the end of their section, missing sections at the end of the file."""
-    lines = open(path).read().splitlines() if os.path.exists(path) else []
+    if os.path.exists(path):
+        lines = open(path).read().splitlines()
+    else:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        lines = USER_HEADER.splitlines() if os.path.abspath(path) == USER_FILE else []
     for sec, kv in updates.items():
         start = next((i for i, ln in enumerate(lines) if ln.strip() == f"[{sec}]"), None)
         if start is None:
