@@ -174,6 +174,49 @@ class TextBlock(Markdown):
         self.flush()
 
 
+class CardUI:
+    """The setup UI (say, choice, checklist, text, yes) as question cards in a session's stream, for flows that run
+    outside a task (the preset maker, picking a download). Esc on a card cancels the flow."""
+
+    def __init__(self, app, session):
+        from ..harness.approvals import ApprovalGate
+        from ..harness.eventlog import EventBus
+        self.app, self.session = app, session
+        bus = EventBus()
+        bus.subscribe(lambda ev: app.call_from_thread(app.on_agent_event, session, ev))
+        self.gate = ApprovalGate({"approvals": {**app.cfg["approvals"], "mode": "ask"}}, bus,
+                                 lambda *a: app.approval_handler(*a, session=session))
+
+    def _ask(self, prompt, choices, multi=False, checked=()):
+        from ..setup import SetupError
+        d = self.gate.request("question", prompt, {}, choices=choices, multi=multi, checked=checked)
+        if not d.approved or d.choice == "cancel":
+            raise SetupError("cancelled")
+        return d.picks or []
+
+    def say(self, text):
+        self.app.call_from_thread(self.app.chat, escape(text))
+
+    def choice(self, prompt, options, default=None):
+        options = list(options)
+        if default in options:                                 # the default first: Enter takes it
+            options.remove(default)
+            options.insert(0, default)
+        return (self._ask(prompt, options) or [default])[0]
+
+    def checklist(self, prompt, options, checked=()):
+        return self._ask(prompt + "  (Space ticks, Enter sends)", list(options), multi=True, checked=checked)
+
+    def text(self, prompt, default=None):
+        return (self._ask(prompt + "  (Enter keeps it, or type another)", [default] if default else []) or [default])[0] or ""
+
+    def yes(self, prompt, default=True):
+        return self._ask(prompt, ["yes", "no"] if default else ["no", "yes"])[0] == "yes"
+
+    def secret(self, prompt):
+        return ""
+
+
 class QuestionCard(Static, can_focus=True):
     """A question or approval inline in the stream. Rows: the asker's choices (or the fixed approval options) and
     always a free-text row added here. Arrows or number keys move, Space ticks (checklist), Enter sends, typing
@@ -198,7 +241,7 @@ class QuestionCard(Static, can_focus=True):
         self.details = {k: v for k, v in (ev.get("details") or {}).items()
                         if not (self.multi and k in ("options", "how"))}
         self.secret = bool(self.details.pop("_secret", False))
-        self.cursor, self.ticked, self.text = 0, set(), ""
+        self.cursor, self.ticked, self.text = 0, set(ev.get("checked") or ()), ""
         self.on_answer, self.active, self.final = None, False, None
 
     def ask(self, on_answer):
@@ -563,6 +606,7 @@ class MiniApp(App):
         self.persist()
         self.stream.anchor()                        # follow the newest block until the user scrolls up
         self.set_interval(0.1, self.tick)
+        self.set_interval(2.0, self.poll_downloads)
         if len(self.sessions) > 1 or self.history:
             self.chat(f"[dim]restored {len(self.sessions)} session(s) from the last time[/dim]")
         self.chat("[b]mini[/b] ready. " + self.model_text() +
@@ -604,6 +648,8 @@ class MiniApp(App):
                  if s.waiting else "[b yellow]running[/b yellow]" if s.busy else "idle"]
         if s.cap_hit:
             parts.append(f"[b white on red] CAP: {escape(s.cap_hit)} [/]")
+        if getattr(self, "_dl_text", ""):
+            parts.append(escape(self._dl_text))
         self.query_one("#status", Static).update("  |  ".join(parts))
         for t in self.sessions:
             self.relabel(t)
@@ -653,6 +699,30 @@ class MiniApp(App):
 
     def chat(self, text):
         self.stream.mount(Static(text, classes="note"))
+
+    def poll_downloads(self):
+        """Model downloads run outside the app (mini.models): show how far they are, and say when one ends."""
+        from .. import models
+        try:
+            jobs = models.all_jobs(self.cfg)
+        except Exception:   # noqa: BLE001 - a damaged job file must not break the UI
+            return
+        seen = getattr(self, "_dl_status", None)
+        now = {j["id"]: j["status"] for j in jobs}
+        if seen is not None:
+            for j in jobs:
+                was = seen.get(j["id"])
+                if was in ("queued", "running") and j["status"] != was:
+                    colour = "green" if j["status"] == "done" else "yellow" if j["status"] == "stopped" else "red"
+                    self.chat(f"[{colour}]download {escape(j['name'])}: {j['status']}[/{colour}]"
+                              + (f" ({escape(j['error'])})" if j.get("error") and j["status"] != "done" else "")
+                              + ("\n[dim]/preset-new makes a preset with it[/dim]" if j["status"] == "done" else ""))
+        self._dl_status = now
+        running = [j for j in jobs if j["status"] in ("queued", "running")]
+        text = "  ".join("↓ " + models.progress_text(j) for j in running)
+        if text != getattr(self, "_dl_text", ""):
+            self._dl_text = text
+            self.update_status()
 
     def tick(self):
         """Spinners and elapsed times of the running blocks."""
@@ -835,7 +905,7 @@ class MiniApp(App):
             self.chat(f"[yellow]{escape(problem)}[/yellow]   usage: {escape(c.usage())}")
             return
         if not c.tool:
-            getattr(self, "cmd_" + c.name)(args)
+            getattr(self, "cmd_" + c.name.replace("-", "_"))(args)
             return
         if not self.can_start():
             return
@@ -1045,6 +1115,71 @@ class MiniApp(App):
 
     def cmd_exit(self, args):
         self.exit()
+
+    # ------------------------------------------------------------ models and presets
+    def cmd_models(self, args):
+        from .. import models
+        from ..setup import models_in, model_size
+        have = models_in(os.path.expanduser(self.cfg["llamacpp"]["models_dir"]))
+        rows = [f"  {escape(n)}  [dim]{models.human(model_size(m))}{', vision' if m['mmproj'] else ''}[/dim]" for n, m in have.items()]
+        jobs = [j for j in models.all_jobs(self.cfg) if j["status"] != "done"]
+        rows += [f"  [b]{j['status']}[/b] {escape(models.progress_text(j))}" + (f" [dim]({escape(j['error'])})[/dim]" if j.get("error") else "")
+                 for j in jobs]
+        self.chat("[b]models folder[/b] " + escape(os.path.expanduser(self.cfg["llamacpp"]["models_dir"])) + "\n"
+                  + ("\n".join(rows) or "  (empty)") + "\n[dim]/download WORDS searches Hugging Face; /download OWNER/NAME "
+                  "[QUANT] downloads in the background; /preset-new picks a model and GPUs[/dim]")
+
+    def cmd_download(self, args):
+        ref = (args.get("repo") or "").strip()
+        if not ref:
+            self.chat("/download WORDS searches Hugging Face for GGUF models; /download OWNER/NAME [QUANT] downloads one")
+            return
+        quant = args.get("quant")
+        if "/" in ref.split()[0] and len(ref.split()) > 1:      # /download OWNER/NAME Q4_K_M
+            ref, quant = ref.split()[0], quant or ref.split()[1]
+        self.run_worker(lambda: self._download(self.s, ref, quant, args.get("name"), bool(args.get("mmproj"))),
+                        thread=True, group="download", exclusive=True)
+
+    def _download(self, session, ref, quant, name, mmproj):
+        from .. import models
+        say = lambda t: self.call_from_thread(self.chat, t)
+        try:
+            if "/" not in ref:
+                hits = models.search(ref)
+                say("\n".join(f"  {escape(r)}  [dim]{n:,} downloads[/dim]" for r, n in hits) +
+                    "\n[dim]/download OWNER/NAME shows its sizes and downloads one[/dim]" if hits else f"nothing found for {escape(ref)}")
+                return
+            ui = None if quant else CardUI(self, session)
+            job = models.download(self.cfg, ref, quant, name, mmproj, ui)
+            say(f"downloading [b]{escape(job['name'])}[/b] in the background ({escape(models.human(job['size']))}): it keeps "
+                "going when mini closes; /models shows how far it is")
+        except Exception as e:   # noqa: BLE001 - DownloadError, SetupError (cancelled), network
+            say(f"[yellow]download: {escape(str(e))}[/yellow]")
+        self.call_from_thread(self.poll_downloads)
+
+    def cmd_preset_new(self, args):
+        if self.busy:
+            self.chat("[yellow]a task is running in this session[/yellow]")
+            return
+        self.busy = True
+        self.update_status()
+        self.run_worker(lambda: self._preset_new(self.s), thread=True, group=f"run-{self.s.n}", exclusive=True)
+
+    def _preset_new(self, session):
+        from .. import setup
+        try:
+            name = setup.new_preset(config_mod.reload(self.cfg), CardUI(self, session), use=False)
+            msg = f"[green]preset {escape(name)} saved[/green]: /model {escape(name)} switches to it"
+        except Exception as e:   # noqa: BLE001 - SetupError (cancelled, no models, ...) ends the flow with a line
+            msg = f"[yellow]preset: {escape(str(e))}[/yellow]"
+
+        def done():
+            session.busy = False
+            self.cfg = config_mod.reload(self.cfg)
+            self.refresh_registry()                          # /model completes the new preset
+            self.chat(msg)
+            self.update_status()
+        self.call_from_thread(done)
 
     def cmd_help(self, args):
         self.chat(escape(self.commands.help_text()) + "\n/config: switches and fields for the settings (saved in "

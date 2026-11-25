@@ -7,9 +7,13 @@
   python -m mini tool NAME [--field VALUE ...]        run an accepted tool; it asks for what is not given
   python -m mini tools shims                          (re)write the PATH commands of accepted tools
   python -m mini settings list|show KEY|set KEY|delete KEY
+  python -m mini preset new [NAME] [--model M --gpus 0,1 --ctx N]   the preset maker: a model and the GPUs to run it on
+  python -m mini preset gpus                          the GPUs llama.cpp sees, one row per card
   python -m mini preset list|add NAME [--gpu vulkan|cuda|cpu --device D --model M --ctx N --args A]|use NAME|show [NAME]
                                                       llama-server presets (GPU, model, context) in [presets.*]:
                                                       the active one is the model mini runs on
+  python -m mini models list|search WORDS|files REPO|download REPO [QUANT] [--mmproj] [--name N]|cancel ID|resume ID
+                                                      models from Hugging Face; downloads run in the background
   python -m mini undo [RUN] [FILE ...] [--list]       put back what a task changed (default: the newest task), or
                                                       only the files named, from its checkpoint (refs/mini/<run>)
   python -m mini setup                                guided setup: sandbox, llama.cpp, the local model
@@ -61,13 +65,22 @@ def main(argv=None):
     st.add_argument("action", choices=["list", "show", "set", "delete"])
     st.add_argument("key", nargs="?")
     pr = sub.add_parser("preset")
-    pr.add_argument("action", choices=["list", "add", "use", "show"])
+    pr.add_argument("action", choices=["list", "new", "gpus", "add", "use", "show"])
     pr.add_argument("name", nargs="?")
     pr.add_argument("--gpu", choices=["vulkan", "cuda", "cpu"])
     pr.add_argument("--device")
     pr.add_argument("--model")
     pr.add_argument("--ctx", type=int)
     pr.add_argument("--args", help="llama-server arguments (default: [llamacpp] extra_args)")
+    pr.add_argument("--gpus", help="new: card numbers from `mini preset gpus` (0,1), or none; default: asks")
+    pr.add_argument("--use", action=argparse.BooleanOptionalAction, default=None, help="new: use it now (default: asks)")
+    mo = sub.add_parser("models", help="the models folder: search Hugging Face, download in the background")
+    mo.add_argument("action", choices=["list", "search", "files", "download", "cancel", "resume"])
+    mo.add_argument("ref", nargs="?", metavar="WORDS|REPO|ID")
+    mo.add_argument("wanted", nargs="?", metavar="QUANT", help="download: which quantization (Q4_K_M) or file")
+    mo.add_argument("--name", help="download: the model's name in the folder (default: from the file)")
+    mo.add_argument("--mmproj", action="store_true", help="download: also the vision projector")
+    mo.add_argument("--discard", action="store_true", help="cancel: also delete what was downloaded")
     un = sub.add_parser("undo")
     un.add_argument("items", nargs="*", metavar="RUN|FILE", help="a run id (default: the newest task), then files")
     un.add_argument("--list", action="store_true", help="list the checkpoints in this folder")
@@ -124,7 +137,10 @@ def main(argv=None):
         return undo_cmd(cfg, a.items, a.list)
     if a.cmd == "preset":
         from .setup import preset_cmd
-        return preset_cmd(cfg, a.action, a.name, {k: getattr(a, k) for k in ("gpu", "device", "model", "ctx", "args")})
+        return preset_cmd(cfg, a.action, a.name, {k: getattr(a, k) for k in ("gpu", "device", "model", "ctx", "args", "gpus", "use")})
+    if a.cmd == "models":
+        from .models import cli
+        return cli(cfg, a.action, a.ref, a.wanted, a.name, a.mmproj, a.discard)
     if a.cmd == "setup":
         from .setup import wizard
         return wizard(cfg)

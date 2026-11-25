@@ -40,7 +40,7 @@ PRESETS = ["rtx", "big", "cpu"]                        # /model completes and ch
 class RegistryTest(unittest.TestCase):
     def test_core_commands_and_tools_from_one_description(self):
         c = Commands(tools())
-        for name in ("model", "new", "attach", "status", "undo", "registry", "config", "tools", "help"):
+        for name in ("model", "models", "download", "preset-new", "new", "attach", "status", "undo", "registry", "config", "tools", "help"):
             self.assertIsNone(c.get(name).tool, name)
         email = c.get("send-email")                                     # kebab-case for send_email
         self.assertEqual((email.tool, email.mode, email.description), ("send_email", "form", "Send an email."))
@@ -48,7 +48,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(c.get("status").tool, None)
         self.assertEqual([x.name for x in c.matching("st")][:1], ["status"])
         self.assertIn("/send-email", c.help_text())
-        self.assertEqual(len(CORE), 14)
+        self.assertEqual(len(CORE), 17)
 
     def test_mode_defaults(self):
         c = Commands([{"name": "no_inputs", "description": "", "input_schema": {}},

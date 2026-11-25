@@ -446,6 +446,128 @@ def gpu_devices(server):
     return out
 
 
+INTEGRATED = re.compile(r"(?i)\bintel\b(?!.*\barc\b)|llvmpipe|^amd radeon(\(tm\))? graphics\b")
+
+
+def gpu_cards(devices):
+    """The physical cards behind llama.cpp's devices: one build with CUDA and Vulkan lists an NVIDIA card twice
+    (CUDA0 and Vulkan1). [{label, mib, cuda, vulkan, integrated}], discrete cards first, then by VRAM."""
+    cards, vulkan = [], [d for d in devices if d[0].startswith("Vulkan")]
+    for name, label, mib in devices:
+        if name.startswith("CUDA"):
+            twin = next((v for v in vulkan if label.lower() in v[1].lower()), None)
+            if twin:
+                vulkan.remove(twin)
+            cards.append({"label": label, "mib": mib, "cuda": name, "vulkan": twin[0] if twin else None})
+        elif not name.startswith("Vulkan"):
+            cards.append({"label": label, "mib": mib, "cuda": None, "vulkan": None, "other": name})
+    cards += [{"label": label, "mib": mib, "cuda": None, "vulkan": name} for name, label, mib in vulkan]
+    for c in cards:
+        c["integrated"] = bool(INTEGRATED.search(c["label"]))
+    return sorted(cards, key=lambda c: (c["integrated"], -c["mib"]))
+
+
+def card_label(c):
+    names = "/".join(x for x in (c.get("cuda"), c.get("vulkan"), c.get("other")) if x)
+    return f"{c['label']}, {c['mib'] / 1024:.1f} GB ({names})" + ("  integrated: shares system RAM" if c["integrated"] else "")
+
+
+def gpu_plan(cards):
+    """How llama-server runs on these cards: (backend, device, tensor_split, note). CUDA when every card has it
+    (faster on NVIDIA), else Vulkan, which every GPU here speaks. Several cards split the model by layers, in
+    proportion to their VRAM when they differ."""
+    if not cards:
+        return "cpu", "", "", "no GPU: the model runs on the CPU (slow)"
+    if all(c.get("cuda") for c in cards):
+        backend, devs = "cuda", [c["cuda"] for c in cards]
+    elif all(c.get("vulkan") for c in cards):
+        backend, devs = "vulkan", [c["vulkan"] for c in cards]
+    else:
+        raise SetupError("these cards have no backend in common in this llama.cpp build: " +
+                         ", ".join(card_label(c) for c in cards))
+    note = ""
+    if backend == "vulkan" and any(c.get("cuda") for c in cards):
+        note = "Vulkan for every card: the others have no CUDA (NVIDIA cards are a little slower on Vulkan than on CUDA)"
+    sizes = [c["mib"] for c in cards]
+    split = ",".join(str(round(m / min(sizes), 2)).rstrip("0").rstrip(".") for m in sizes) if len(set(sizes)) > 1 else ""
+    return backend, ",".join(devs), split, note
+
+
+def model_size(m):
+    return sum(os.path.getsize(p) for p in (m["file"], m.get("mmproj")) if p and os.path.exists(p)) + (
+        sum(os.path.getsize(os.path.join(os.path.dirname(m["file"]), f)) for f in os.listdir(os.path.dirname(m["file"]))
+            if SPLIT_PART.match(f) and os.path.join(os.path.dirname(m["file"]), f) != m["file"])
+        if SPLIT_PART.match(os.path.basename(m["file"])) else 0)
+
+
+SPLIT_PART = re.compile(r".+-\d{5}-of-\d{5}\.gguf$")
+
+
+def listing_server(cfg):
+    """The llama-server whose devices a preset can use: the CUDA build (it has Vulkan too) when there is one."""
+    for gpu in ("cuda", "vulkan", "cpu"):
+        server = llama_server(cfg, gpu)
+        if server:
+            return gpu, server
+    raise SetupError("llama.cpp is not built yet; mini setup builds it")
+
+
+def new_preset(cfg, ui, name=None, model=None, cards=None, ctx=None, use=None):
+    """The preset maker: which model (from the models folder) on which GPUs. Asks what is not given, saves the
+    preset and offers to use it."""
+    models = models_in(os.path.expanduser(cfg["llamacpp"]["models_dir"]))
+    if not models:
+        raise SetupError("no models in the models folder yet: mini models search WORDS, then mini models download")
+    asked = model is None or cards is None or ctx is None or name is None   # interactive: confirm a bad fit
+    if model is None:
+        labels = {f"{n}  ({model_size(m) / 1073741824:.1f} GB{', vision' if m['mmproj'] else ''})": n for n, m in models.items()}
+        model = labels[ui.choice("Which model should the preset load?", list(labels), next(iter(labels)))]
+    if model not in models:
+        raise SetupError(f"no model {model!r} in the models folder; there are: " + ", ".join(models))
+    build, server = listing_server(cfg)
+    found = gpu_cards(gpu_devices(server)) if build != "cpu" else []
+    if cards is None:
+        if found:
+            labels = [card_label(c) for c in found]
+            nvidia = [c for c in found if c.get("cuda") and not c["integrated"]]
+            default = [card_label(c) for c in (nvidia or [c for c in found if not c["integrated"]])]
+            picked = ui.checklist("Which GPUs? (several split the model between them)", labels, default)
+            cards = [found[labels.index(p)] for p in picked if p in labels]
+        else:
+            cards = []
+    elif all(isinstance(c, int) for c in cards):
+        if any(not 0 <= c < len(found) for c in cards):
+            raise SetupError(f"GPU numbers are 0 to {len(found) - 1} (mini preset gpus lists them)")
+        cards = [found[c] for c in cards]
+    backend, device, split, note = gpu_plan(cards)
+    vram = sum(c["mib"] for c in cards) * 1048576
+    size = model_size(models[model])
+    if ctx is None:
+        ctx = int(ui.text("Context size (tokens)", str(cfg["llamacpp"]["ctx"])))
+    args = cfg["llamacpp"]["extra_args"] + (" --split-mode layer" if len(cards) > 1 else "") + (f" -ts {split}" if split else "")
+    if name is None:
+        short = re.sub(r"(?i)[-_.](gguf|it|instruct)$", "", model)[:24].strip("-_.")
+        name = ui.text("Preset name", f"{short}-{len(cards)}gpu" if cards else f"{short}-cpu")
+    values = {"gpu": "cpu" if backend == "cpu" else build, "device": device, "model": model, "ctx": ctx, "extra_args": args}
+    ui.say("preset " + name + ": " + model + (" on " + ", ".join(c["label"] for c in cards) if cards else " on the CPU")
+           + f" ({backend}" + (f", split {split}" if split else "") + ")" + (f"\n  {note}" if note else ""))
+    if cards and size > vram * 0.9:
+        ui.say(f"  warning: the model is {size / 1073741824:.1f} GB and these cards have {vram / 1073741824:.1f} GB of VRAM; "
+               "it will not fit with its context: pick more cards or a smaller model")
+        if asked and not ui.yes("Save it anyway?", False):
+            raise SetupError("not saved")
+    elif cards and size > vram * 0.75:
+        ui.say(f"  the model is {size / 1073741824:.1f} GB of {vram / 1073741824:.1f} GB VRAM: little room for the context; "
+               "lower it if loading fails")
+    save_preset(cfg, name, values)
+    ui.say(f"saved preset {name}")
+    if use is None:
+        use = ui.yes(f"Use {name} now? (restarts llama-server)", True)
+    if use:
+        use_preset(cfg, name, ui)
+    return name
+
+
 def setup_router(cfg, ui):
     """Write and start the llama-server unit. With an active preset it asks nothing: the preset says what to run."""
     server = llama_server(cfg)
@@ -525,6 +647,17 @@ def preset_cmd(cfg, action, name=None, opts=None, ui=None):
             ui.say("saved: " + preset_summary(name, cfg["presets"][name]).strip() + "   (mini preset use " + name + ")")
         elif action == "use":
             use_preset(cfg, name or "", ui)
+        elif action == "new":
+            g = (opts.get("gpus") or "").strip()
+            try:
+                cards = None if not g else [] if g == "none" else [int(x) for x in g.split(",") if x.strip()]
+            except ValueError:
+                raise SetupError("--gpus takes card numbers (mini preset gpus), e.g. 0,1, or none") from None
+            new_preset(cfg, ui, name, opts.get("model"), cards, opts.get("ctx"), opts.get("use"))
+        elif action == "gpus":
+            build, server = listing_server(cfg)
+            for i, c in enumerate(gpu_cards(gpu_devices(server))):
+                ui.say(f"{i}  {card_label(c)}")
         elif action == "show":
             ui.say(json.dumps(llama_settings(cfg) if name in (None, active) else
                               {**cfg["llamacpp"], **cfg.get("presets", {}).get(name, {})}, indent=1))

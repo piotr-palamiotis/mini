@@ -268,6 +268,70 @@ class SetupTest(unittest.TestCase):
         self.assertEqual((self.cfg["llamacpp"]["preset"], self.cfg["local"]["model"]), ("a", "m-a"))
 
 
+class PresetMakerTest(unittest.TestCase):
+    """GPUs as physical cards, the backend they share, and the preset maker (a model + GPUs -> a preset)."""
+    DEVICES = [("CUDA0", "NVIDIA GeForce RTX 3070", 7893), ("CUDA1", "NVIDIA GeForce RTX 3070", 7893),
+               ("Vulkan0", "AMD Radeon RX 6700 XT (RADV NAVI22)", 12272), ("Vulkan1", "NVIDIA GeForce RTX 3070", 8438),
+               ("Vulkan2", "NVIDIA GeForce RTX 3070", 8438), ("Vulkan3", "Intel(R) HD Graphics 610 (KBL GT1)", 5890)]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mini-pm-")
+        self.cfg = temp_config()
+        self.cfg.path = os.path.join(self.tmp, "mini.toml")
+        self.cfg["llamacpp"].update(models_dir=os.path.join(self.tmp, "models"), ctx=4096, extra_args="--jinja")
+        os.makedirs(self.cfg["llamacpp"]["models_dir"])
+        for name, size in (("small", 1 << 20), ("big", 20 << 30)):
+            with open(os.path.join(self.cfg["llamacpp"]["models_dir"], name + ".gguf"), "wb") as f:
+                f.truncate(size)                                   # sparse: the size counts, not the bytes
+        self.cards = setup.gpu_cards(self.DEVICES)
+
+    def maker(self, ui, **kw):
+        with mock.patch.object(setup, "listing_server", return_value=("cuda", "/b/llama-server")), \
+                mock.patch.object(setup, "gpu_devices", return_value=self.DEVICES):
+            return setup.new_preset(self.cfg, ui, **kw)
+
+    def test_devices_become_cards(self):
+        self.assertEqual([(c["label"][:20], c["cuda"], c["vulkan"], c["integrated"]) for c in self.cards], [
+            ("AMD Radeon RX 6700 X", None, "Vulkan0", False), ("NVIDIA GeForce RTX 3", "CUDA0", "Vulkan1", False),
+            ("NVIDIA GeForce RTX 3", "CUDA1", "Vulkan2", False), ("Intel(R) HD Graphics", None, "Vulkan3", True)])
+
+    def test_the_backend_the_cards_share(self):
+        amd, n1, n2, intel = self.cards
+        self.assertEqual(setup.gpu_plan([n1, n2])[:3], ("cuda", "CUDA0,CUDA1", ""), "NVIDIA only: CUDA, even split")
+        backend, device, split, note = setup.gpu_plan([amd, n1])
+        self.assertEqual((backend, device, split), ("vulkan", "Vulkan0,Vulkan1", "1.55,1"), "split by VRAM")
+        self.assertIn("no CUDA", note)
+        self.assertEqual(setup.gpu_plan([])[:2], ("cpu", ""))
+
+    def test_pick_a_model_and_gpus(self):
+        ui = ScriptUI(choice=["small  (0.0 GB)"], checklist=[[setup.card_label(self.cards[1]), setup.card_label(self.cards[2])]],
+                      text=["8192", "two"], yes=[False])
+        self.assertEqual(self.maker(ui), "two")
+        p = tomllib.loads(open(self.cfg.path).read())["presets"]["two"]
+        self.assertEqual(p, {"gpu": "cuda", "device": "CUDA0,CUDA1", "model": "small", "ctx": 8192,
+                             "extra_args": "--jinja --split-mode layer"})
+        self.assertEqual(self.cfg["llamacpp"]["preset"], "", "saved, not switched to: the user said no")
+
+    def test_the_nvidia_cards_are_ticked_first_and_the_integrated_never(self):
+        seen = []
+
+        class UI(ScriptUI):
+            def checklist(self, prompt, options, checked=()):
+                seen.append(list(checked))
+                return list(checked)
+        self.maker(UI(text=["4096", "x"], yes=[False]), model="small")
+        self.assertEqual(seen, [[setup.card_label(c) for c in self.cards[1:3]]])
+
+    def test_a_model_too_big_for_the_cards_asks_before_saving(self):
+        ui = ScriptUI(checklist=[[setup.card_label(self.cards[1])]], text=["4096", "nope"], yes=[False])
+        with self.assertRaises(setup.SetupError):
+            self.maker(ui, model="big")
+        self.assertTrue(any("will not fit" in t for t in ui.said))
+        self.assertNotIn("nope", self.cfg.get("presets", {}))
+        name = self.maker(ScriptUI(), model="big", cards=[0, 1, 2], ctx=4096, name="all", use=False)   # flags: no question
+        self.assertEqual(self.cfg["presets"][name]["device"], "Vulkan0,Vulkan1,Vulkan2")
+
+
 if __name__ == "__main__":
     unittest.main()
 

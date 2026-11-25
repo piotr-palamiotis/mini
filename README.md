@@ -57,6 +57,24 @@ python3 -m venv .venv && .venv/bin/pip install textual   # the harness itself is
 It never replaces a systemd unit it did not write without asking (and keeps a `.bak`). The UI shows the state
 of the model server at startup and on `/status`.
 
+**Getting models** (two separate steps):
+
+- **Download** from Hugging Face into the models folder: `mini models search WORDS`, `mini models files OWNER/NAME`
+  (its quantizations and sizes), `mini models download OWNER/NAME Q4_K_M [--mmproj] [--name N]`. In the UI:
+  `/download WORDS` searches, `/download OWNER/NAME [QUANT]` downloads (a card asks which when you leave it out),
+  `/models` lists the folder and the downloads. A download runs in its own systemd user unit
+  (`mini-download-*`), so closing mini or a crash does not stop it; progress shows in the status bar. It writes
+  `.part` files and resumes where it stopped (`mini models resume ID`, also after a reboot), checks the sha256 the
+  Hub lists and the free disk space, and only then moves the file into place. Public models only (no login).
+  `mini models list` shows everything, `mini models cancel ID [--discard]` stops one.
+- **Make a preset**: which model from the folder, on which GPU(s). `mini preset new` or `/preset-new` asks: the
+  model, then a checklist of the cards (`mini preset gpus` lists them: an NVIDIA card is listed once even though
+  llama.cpp sees it as CUDAn and Vulkann; integrated GPUs are not ticked), the context and a name. Several cards
+  split the model by layers, in proportion to their VRAM when they differ. CUDA when every picked card has it,
+  else Vulkan for all (an AMD card with NVIDIA cards). It warns when the model will not fit the cards' VRAM.
+  Then `/model NAME` or `mini preset use NAME` switches to it. Non-interactive:
+  `mini preset new NAME --model M --gpus 0,1 --ctx N [--use]`.
+
 **Models from Ollama:** `scripts/ollama-export DEST` prints the commands that move an Ollama store's GGUF
 files into the models folder layout (instant on the same disk, no copies); run them with
 `scripts/ollama-export ~/models | sudo sh -e`. Draft models go to `DEST-drafts/`.

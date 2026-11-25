@@ -29,7 +29,7 @@ class ApprovalGate:
         self.log = log
         self.handler = handler           # handler(kind, title, details, options) -> Decision
 
-    def request(self, kind, title, details, options=("approve", "refuse"), choices=None, multi=False):
+    def request(self, kind, title, details, options=("approve", "refuse"), choices=None, multi=False, checked=()):
         """choices: answers to pick from (a question). Single-select, they become the options; with multi the
         handler gets a numbered list in details and the picks come from the note (numbers or names, comma-separated)
         unless the handler returns them in Decision.picks. The whole exchange is a question block in the stream."""
@@ -43,7 +43,8 @@ class ApprovalGate:
             options = tuple(choices) + ("cancel",)
         bid = self.log.start("question", req=kind, title=title, details={k: v for k, v in details.items()
                                                                          if not k.startswith("_")},
-                             options=list(options), choices=choices, multi=bool(multi and choices))
+                             options=list(options), choices=choices, multi=bool(multi and choices),
+                             checked=[i for i, c in enumerate(choices) if c in checked] if multi else [])
         self.log.emit("approval", phase="requested", req=kind, title=title, details=details, options=list(options))
         if self.cfg["mode"] == "auto":
             ok = kind in self.cfg["auto_approve"]

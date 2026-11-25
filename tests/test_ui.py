@@ -4,6 +4,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from mini import bundled
 from mini.harness.registry import Registry
@@ -91,6 +92,70 @@ class UITest(unittest.TestCase):
                 self.assertEqual(switched, ["b"])
                 self.assertEqual((app.cfg["llamacpp"]["preset"], app.cfg["local"]["model"]), ("b", "m-b"))
                 self.assertIn("m-b", str(app.query_one("#status").render()))
+        asyncio.run(go())
+
+
+class ModelsUITest(unittest.TestCase):
+    """/preset-new asks with question cards (model, GPUs, context, name); /download WORDS searches."""
+
+    def app(self):
+        from mini.harness.config import dumps
+        cfg = temp_config(**{"approvals.confirm_first": False})
+        cfg["llamacpp"]["models_dir"] = tempfile.mkdtemp(prefix="mini-m-")
+        open(os.path.join(cfg["llamacpp"]["models_dir"], "tiny.gguf"), "wb").write(b"x" * 100)
+        cfg.path = os.path.join(tempfile.mkdtemp(), "mini.toml")
+        open(cfg.path, "w").write(dumps({k: v for k, v in cfg.items()}))
+        return MiniApp(cfg, backend_factory=lambda: fake_backend([]))
+
+    async def answer(self, app, pilot, *keys):
+        for _ in range(50):
+            await pilot.pause(0.1)
+            if app.s.card is not None and app.s.card.active:
+                break
+        card = app.s.card
+        for k in keys:
+            card.handle_key(k)
+        await pilot.pause(0.2)
+
+    def test_preset_new_with_cards(self):
+        from mini import setup
+        app = self.app()
+        devices = [("CUDA0", "NVIDIA GeForce RTX 3070", 7893), ("Vulkan0", "AMD Radeon RX 6700 XT", 12272)]
+
+        async def go():
+            with mock.patch.object(setup, "listing_server", return_value=("cuda", "/b/llama-server")), \
+                    mock.patch.object(setup, "gpu_devices", return_value=devices):
+                async with app.run_test(size=(180, 50)) as pilot:
+                    await pilot.press(*"/preset-new")
+                    await pilot.press("enter")
+                    await self.answer(app, pilot, "enter")                 # the model: the only one
+                    await self.answer(app, pilot, "enter")                 # GPUs: the NVIDIA card, ticked already
+                    await self.answer(app, pilot, "enter")                 # context: the default
+                    await self.answer(app, pilot, "enter")                 # name: the default
+                    for _ in range(50):
+                        await pilot.pause(0.1)
+                        if not app.busy:
+                            break
+                    self.assertEqual(list(app.cfg["presets"]), ["tiny-1gpu"])
+                    self.assertEqual(app.cfg["presets"]["tiny-1gpu"]["device"], "CUDA0")
+                    notes = " ".join(str(w.render()) for w in app.query(".note"))
+                    self.assertIn("/model tiny-1gpu", notes)
+        asyncio.run(go())
+
+    def test_download_words_search(self):
+        from mini import models
+        app = self.app()
+
+        async def go():
+            with mock.patch.object(models, "search", return_value=[("o/tiny-GGUF", 5)]):
+                async with app.run_test(size=(180, 50)) as pilot:
+                    await pilot.press(*"/download tiny")
+                    await pilot.press("enter")
+                    for _ in range(30):
+                        await pilot.pause(0.1)
+                        if "o/tiny-GGUF" in " ".join(str(w.render()) for w in app.query(".note")):
+                            break
+                    self.assertIn("o/tiny-GGUF", " ".join(str(w.render()) for w in app.query(".note")))
         asyncio.run(go())
 
 
