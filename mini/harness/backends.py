@@ -8,6 +8,7 @@ Normalized reply:
 Streaming: chat() takes on_delta(kind, text) with kind "thinking" or "content", so a UI can show progress.
 Add a backend by subclassing Backend and registering it in BACKENDS.
 """
+import http.client
 import json
 import socket
 import time
@@ -16,6 +17,7 @@ import urllib.request
 
 RESTART_WAIT_S = 180         # how long a refused connection or a 503 (model loading) is retried
 RESTART_POLL_S = 5
+LOST_RESENDS = 2             # a reply cut off by the server dying is sent again this many times
 
 MAX_OUTPUT_TOKENS = 8192     # hard cap per reply; protects against runaway generation inside a tool call
 REPLY_TIMEOUT_S = 300        # no data for this long ends the reply (tool calls are not streamed while being written)
@@ -133,6 +135,18 @@ class OpenAIBackend(Backend):
         body.update({k: v for k, v in opts.items() if k in ("temperature", "top_p", "top_k", "min_p", "repeat_penalty",
                                                               "presence_penalty", "seed", "reasoning_budget_tokens")})
         req = urllib.request.Request(self.ep.url + "/chat/completions", data=json.dumps(body).encode(), headers=self._headers())
+        for resend in range(LOST_RESENDS + 1):   # the server died mid-reply (OOM kill): the same request again, once it is back
+            out = self._chat_once(req, tools, on_delta, stop_event)
+            out["resent"] = resend
+            if not out.pop("lost", False) or out["stopped"] or (stop_event is not None and stop_event.is_set()):
+                return out
+            if resend < LOST_RESENDS:
+                on_delta and on_delta("reset", "")
+                self._pause(stop_event)
+        out["raw_error"] = out["raw_error"] or f"the server dropped the reply {LOST_RESENDS + 1} times"
+        return out
+
+    def _chat_once(self, req, tools, on_delta, stop_event):
         out = {"content": "", "thinking": "", "tool_calls": [], "done_reason": None,
                "prompt_tokens": 0, "output_tokens": 0, "secs": 0.0, "raw_error": None, "stopped": False}
         calls = {}
@@ -142,10 +156,14 @@ class OpenAIBackend(Backend):
                 r = urllib.request.urlopen(req, timeout=self.ep.timeout_s)
                 break
             except urllib.error.HTTPError as e:
-                if e.code == 503 and time.time() - t0 < RESTART_WAIT_S:
+                if e.code in (502, 503, 504) and time.time() - t0 < RESTART_WAIT_S:   # loading, or the model process died
                     self._pause(stop_event)
                     continue
-                out["raw_error"] = f"HTTP {e.code}: {e.read()[:300]!r}"
+                try:
+                    detail = e.read()[:300]
+                except (OSError, http.client.HTTPException):   # the body was cut off too
+                    detail = b""
+                out["raw_error"] = f"HTTP {e.code}: {detail!r}"
                 return out
             except urllib.error.URLError as e:
                 if isinstance(e.reason, (ConnectionRefusedError, ConnectionResetError)) and \
@@ -157,6 +175,7 @@ class OpenAIBackend(Backend):
             except (socket.timeout, TimeoutError):
                 out.update(done_reason="timeout", secs=round(time.time() - t0, 2))
                 return out
+        finished = False                  # [DONE], a finish_reason or an error event: the reply is complete
         try:
             for raw in r:
                 if stop_event is not None and stop_event.is_set():
@@ -167,10 +186,12 @@ class OpenAIBackend(Backend):
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    finished = True
                     break
                 ev = json.loads(data)
                 if ev.get("error"):
                     out["raw_error"] = str(ev["error"])[:300]
+                    finished = True
                     break
                 if ev.get("usage"):
                     out["prompt_tokens"] = ev["usage"].get("prompt_tokens") or 0
@@ -198,6 +219,7 @@ class OpenAIBackend(Backend):
                         out["done_reason"], out["cut"] = "length", "comments"   # reasoning in comments: stop paying for it
                         break
                     if ch.get("finish_reason"):
+                        finished = True
                         out["done_reason"] = {"tool_calls": "stop"}.get(ch["finish_reason"], ch["finish_reason"])
                 if out["done_reason"] == "length":
                     break
@@ -206,8 +228,12 @@ class OpenAIBackend(Backend):
                     break
         except (socket.timeout, TimeoutError):
             out["done_reason"] = "timeout"
+        except (http.client.HTTPException, ConnectionError):     # cut off mid-reply (the server process died)
+            pass
         finally:
             r.close()
+        if not finished and not out["stopped"] and out["done_reason"] is None:
+            out["lost"] = True
         for i in sorted(calls):
             try:
                 args = json.loads(calls[i]["args"]) if calls[i]["args"] else {}

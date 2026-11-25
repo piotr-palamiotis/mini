@@ -127,6 +127,43 @@ class OpenAIBodyTest(unittest.TestCase):
                 mock.patch.object(backends, "RESTART_POLL_S", 0), mock.patch.object(backends, "RESTART_WAIT_S", 0):
             self.assertIn("unreachable", b.chat("m", [{"role": "user", "content": "hi"}], [])["raw_error"])
 
+    def test_a_reply_cut_off_by_the_server_dying_is_sent_again(self):
+        import http.client
+        import urllib.error
+        from mini.harness import backends
+
+        class Cut(io.BytesIO):                          # the model process was OOM-killed while it streamed
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"half"}}]}\n'
+                raise http.client.IncompleteRead(b"")
+
+        class Unreadable(io.BytesIO):
+            def read(self, *a):
+                raise http.client.IncompleteRead(b"")
+        tries, seen = [], []
+
+        def fake_urlopen(req, timeout):
+            tries.append(1)
+            if len(tries) == 1:
+                return Cut()
+            if len(tries) == 2:                         # the router, while its model restarts; the body is cut too
+                raise urllib.error.HTTPError("http://x", 502, "bad gateway", {}, Unreadable())
+            return io.BytesIO(b'data: {"choices":[{"delta":{"content":"whole"},"finish_reason":"stop"}]}\ndata: [DONE]\n')
+        b = OpenAIBackend(Endpoint("openai", "http://x/v1"))
+        with mock.patch("urllib.request.urlopen", fake_urlopen), mock.patch.object(backends, "RESTART_POLL_S", 0):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [], on_delta=lambda k, t: seen.append(k))
+        self.assertEqual((len(tries), out["raw_error"], out["content"], out["resent"]), (3, None, "whole", 1))
+        self.assertEqual(seen, ["content", "reset", "content"], "the cut text is closed before the new reply")
+
+        def refused(req, timeout):                    # an error whose body cannot be read is an error, not a crash
+            raise urllib.error.HTTPError("http://x", 400, "bad", {}, Unreadable())
+        with mock.patch("urllib.request.urlopen", refused):
+            self.assertEqual(b.chat("m", [{"role": "user", "content": "hi"}], [])["raw_error"], "HTTP 400: b''")
+        with mock.patch("urllib.request.urlopen", lambda req, timeout: Cut()), \
+                mock.patch.object(backends, "RESTART_POLL_S", 0):
+            out = b.chat("m", [{"role": "user", "content": "hi"}], [])
+        self.assertIn("dropped the reply 3 times", out["raw_error"])
+
     def test_llama_server_gets_thinking_controls(self):
         sent, out = self.body()
         self.assertEqual(sent["chat_template_kwargs"], {"enable_thinking": False})

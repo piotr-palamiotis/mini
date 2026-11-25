@@ -146,6 +146,10 @@ class ReplyStream:
         self.log, self.info, self.open = log, info, None       # open: [block, id, characters]
 
     def __call__(self, kind, text):
+        if kind == "reset":                  # the server dropped the reply: what came so far is cut, the request goes again
+            self.close("error")
+            self.log.emit("info", text="the model server stopped in the middle of the reply; waiting for it and asking again")
+            return
         block = "thinking" if kind == "thinking" else "text"
         if not self.open or self.open[0] != block:
             self.close()
