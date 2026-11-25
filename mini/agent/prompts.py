@@ -376,6 +376,14 @@ naming what the task asks and what the file has."""
 JUDGE_PARTIAL = (" What is shown above is all you get: judge the parts it shows, and do not answer false only because "
                  "a part is not shown.")
 
+NEAR = """
+Installed tools that do part of this, judged short of what this task needs:
+{tools}
+If one of them is the tool for this job once it handles what it lacks, call `report_tool_bug` with its name and, as
+the problem, what this task needs that it does not do: it is upgraded as a new version and stays one tool. Then run
+it with `invoke_tool`. Do not write its logic again in run_code.
+"""
+
 BUILT = """
 Built for this task, installed and already tested: {names}. Do not rewrite its logic in run_code and do not call
 `need_tool` for it. Call `invoke_tool` with it now.

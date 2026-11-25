@@ -53,6 +53,20 @@ class GapTest(unittest.TestCase):
         self.assertEqual([e["tool"] for e in ev if e["kind"] == "gap_judge"], ["yaml_to_toml"])
         self.assertEqual(got["use"], ["yaml_to_toml"])
 
+    def test_a_tool_judged_short_is_offered_for_an_upgrade_in_execute(self):
+        tools = [manifest("yaml_to_toml", "Convert a YAML file to TOML."), manifest("pdf_read", "Read a PDF.")]
+        script = [step(call("shortlist", names=["yaml_to_toml"])),
+                  step(call("judge_tool", fits=False, why="it does not keep comments")),
+                  step(call("decide_coverage", reasoning="change it", use=[], missing=[]))]
+        a, got = self.run_gap(script, tools)
+        self.assertEqual(got["use"], [])
+        a.registry.get = lambda n: next((m for m in tools if m["name"] == n), None)
+        note = a._near_note(got["use"])
+        self.assertIn("yaml_to_toml", note)
+        self.assertIn("it does not keep comments", note)
+        self.assertIn("report_tool_bug", note)
+        self.assertEqual(a._near_note(["yaml_to_toml"]), "")       # already in use: nothing to upgrade
+
 
 if __name__ == "__main__":
     unittest.main()

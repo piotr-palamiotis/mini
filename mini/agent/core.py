@@ -382,12 +382,14 @@ class Agent:
                       if score >= g.get("min_score", 2)] if g.get("judge", True) else []
         if len(candidates) > 1:
             candidates = self._screen(candidates)
-        fits = []
+        fits, self.gap_near = [], []
         for m in candidates:
             v = self._judge(u, m)
             self.log.emit("gap_judge", tool=m["name"], fits=v["fits"], step=v.get("step"), why=v.get("why"))
             if v["fits"]:
                 fits.append((m, v))
+            elif v.get("why") and v["why"] != "no judgement" and not is_bundled(m["name"]):
+                self.gap_near.append((m["name"], str(v["why"])))   # close but short: upgraded, not rewritten
         chosen = [m["name"] for m, _ in fits] if g.get("judge", True) else \
             [m["name"] for m in self.registry.search(query, limit=15)]
         if len(fits) > 1:
@@ -494,7 +496,8 @@ class Agent:
                 {"role": "user", "content": prompts.EXECUTE.format(task=task, understanding=json.dumps(understanding, indent=1),
                                                                    context=ctx, tools=listing(), core=self.core.listing(),
                                                                    files=self.list_work(),
-                                                                   built=prompts.BUILT.format(names=", ".join(built)) if built else "")}]
+                                                                   built=(prompts.BUILT.format(names=", ".join(built)) if built else "")
+                                                                   + self._near_note(tools))}]
         finish_rejections, tool_rejections, reviews = 0, 0, 0
         offered = self.core.tools() + CONTROL_TOOLS
         while True:
@@ -559,6 +562,16 @@ class Agent:
                     text = "Unknown tool. Use: " + ", ".join(x["function"]["name"] for x in offered)
                 self.log.emit("tool_result", step="execute", name=name, text=trim(text, 3000))
                 t.result(name, text + note)
+
+    def _near_note(self, tools):
+        """Installed tools the gap step judged close to this task but short of it: the way to use one is to upgrade
+        it (report_tool_bug makes a new version), not to write its logic again in run_code."""
+        near = [(n, why) for n, why in getattr(self, "gap_near", []) if n not in tools and self.registry.get(n)]
+        if not near:
+            return ""
+        lines = "\n".join(f"- {describe_tool(self.registry.get(n))}\n  falls short here: {trim(why, 300)}" for n, why in near)
+        self.log.emit("watchdog", name="near_tools", tools=[n for n, _ in near])
+        return prompts.NEAR.format(tools=lines)
 
     @staticmethod
     def _implicit_finish(reply):
