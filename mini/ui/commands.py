@@ -1,6 +1,6 @@
 """Slash commands: one registry for the core commands and every registry or bundled tool (docs/redesign.md 4b).
 
-Each command is a name, a description and an input schema. Core commands (/model, /new, /attach, /status, /undo,
+Each command is a name, a description and an input schema. Core commands (/model, /bench, /new, /attach, /status, /undo,
 /registry, /config, /tools, /help) run in the UI: MiniApp.cmd_<name>(args). Tools are shown in kebab-case
 (/send-email for send_email) and run in the harness (harness/toolrun.slash), in their ui.mode: form or ask. The agent
 neither sees nor runs commands.
@@ -104,6 +104,8 @@ CORE = [
                             "name": {"type": "string", "description": "the model's name in the folder"},
                             "mmproj": {"type": "boolean", "description": "also the vision projector"}}},
             positional="repo"),
+    Command("bench", "benchmarks: results per preset (every run and the average), and run a bench on a preset",
+            {"properties": {"preset": {"type": "string", "description": "the preset to show"}}}, positional="preset"),
     Command("preset-new", "the preset maker: pick a model from the folder and the GPU(s) to run it on"),
     Command("new", "open another session (a tab with its own conversation and model; they run in parallel)",
             {"properties": {"name": {"type": "string"}}}, positional="name"),

@@ -31,6 +31,7 @@ from ..harness import checkpoint
 from ..harness import config as config_mod
 from ..harness import workspace as ws
 from . import commands, settingsform
+from .benchview import BenchView
 from .modelbrowser import ModelBrowser
 from . import session as session_mod
 from .session import Session
@@ -576,6 +577,8 @@ class MiniApp(App):
                     yield RichLog(id="reg-detail", wrap=True, min_width=1)
                 with TabPane("Models", id="tab-models"):
                     yield ModelBrowser(self, id="model-browser")
+                with TabPane("Bench", id="tab-bench"):
+                    yield BenchView(self, id="bench-view")
                 with TabPane("Tools", id="tab-tools"):
                     yield DataTable(id="tools-table", cursor_type="row")
                     yield RichLog(id="tools-detail", wrap=True, min_width=1)
@@ -1120,6 +1123,11 @@ class MiniApp(App):
         self.exit()
 
     # ------------------------------------------------------------ models and presets
+    def cmd_bench(self, args):
+        """The Bench view: results per preset (every run and the averages), and running a bench on a preset."""
+        self.bench_preset = args.get("preset")
+        self.show_view("tab-bench")
+
     def cmd_models(self, args):
         from .. import models
         from ..setup import models_in, model_size
@@ -1320,6 +1328,9 @@ class MiniApp(App):
             self.refresh_tools()
         elif pane == "tab-models":
             self.query_one(ModelBrowser).opened()
+        elif pane == "tab-bench":
+            self.query_one(BenchView).opened(getattr(self, "bench_preset", None))
+            self.bench_preset = None
 
     def check_action(self, action, parameters):
         if action == "back":

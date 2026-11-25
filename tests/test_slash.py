@@ -48,7 +48,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(c.get("status").tool, None)
         self.assertEqual([x.name for x in c.matching("st")][:1], ["status"])
         self.assertIn("/send-email", c.help_text())
-        self.assertEqual(len(CORE), 17)
+        self.assertEqual(len(CORE), 18)
 
     def test_mode_defaults(self):
         c = Commands([{"name": "no_inputs", "description": "", "input_schema": {}},

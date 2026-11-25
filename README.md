@@ -248,3 +248,25 @@ build and devices, the context size and extra arguments (`[presets.NAME]` in `~/
   `mini preset use NAME` does the same from the terminal.
 - A task never moves to another model by itself: a task that fails, fails, and the user decides what next.
 - Tools record the model and preset that built them (`created_by`).
+
+## Benchmarks: a baseline per model
+
+`mini bench` runs fixed tasks on a preset and keeps, for every run of a task, whether it **passed or failed** and
+**how long it ran**. Running again adds new rows; nothing is overwritten. The averages per task and per preset are
+worked out from the rows, so presets (models, GPUs, context sizes) can be compared on the same work.
+
+- Suites, easiest first: `core` (everyday folder work), `formats` (undocumented binary formats), `calc`
+  (arithmetic a program must do), `tools` (building tools with third-party libraries, reusing and upgrading them),
+  `hard` (rule-heavy data work), `expert` (a bug hunt in a package, iCalendar scheduling across time zones, FIFO
+  stock accounting). `mini bench list [SUITE|TASK ...]` lists them.
+- `mini bench run [SUITE|TASK ...] --preset NAME [--reps N] [--seed N] [--background]` (default: every task, on
+  the active preset). The bench switches llama-server to the preset and back when it ends. Each run gets a fresh
+  git folder with the task's files and its own empty tool registry and lessons; mini works on it unattended and
+  the task's check decides. Sampling, thinking and the limits are pinned for benches, so your own settings do not
+  move a baseline. A run of the whole set takes hours: `--background` runs it outside mini
+  (`mini bench status`, `mini bench stop`).
+- `mini bench results [--preset NAME] [--runs]` prints the averages per preset and task (`--runs`: every run).
+- In the UI, `/bench` opens the Bench view: the presets on the left with their average, the chosen preset's
+  average per task and every run on the right, and Run / Stop for a bench on that preset.
+- Everything a bench writes is in `<state>/bench/`: `results.jsonl`, `trials/<run>/` (the folder the run worked
+  in), `trials/<run>.out` (its transcript) and the runs' logs.

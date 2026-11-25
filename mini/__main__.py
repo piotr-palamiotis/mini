@@ -16,6 +16,14 @@
                                                       models from Hugging Face; downloads run in the background
   python -m mini undo [RUN] [FILE ...] [--list]       put back what a task changed (default: the newest task), or
                                                       only the files named, from its checkpoint (refs/mini/<run>)
+  python -m mini bench list [SUITE|TASK ...]          the benchmarks: suites and tasks mini can run on a model
+  python -m mini bench run [SUITE|TASK ...] [--preset P[,P2...]] [--reps N] [--seed N] [--background]
+                                                      run them on a preset (default: all, on the active preset);
+                                                      every run of a task is one result: passed or failed, and its time
+  python -m mini bench results [--preset P] [--runs] [--all-versions]
+                                                      results per preset of this mini version: each task's average
+                                                      (--runs: every run; --all-versions: older versions too)
+  python -m mini bench status|stop                    the background bench
   python -m mini setup                                guided setup: sandbox, llama.cpp, the local model
   python -m mini doctor                               check the setup, change nothing
 
@@ -84,6 +92,16 @@ def main(argv=None):
     un = sub.add_parser("undo")
     un.add_argument("items", nargs="*", metavar="RUN|FILE", help="a run id (default: the newest task), then files")
     un.add_argument("--list", action="store_true", help="list the checkpoints in this folder")
+    be = sub.add_parser("bench", help="benchmarks: run fixed tasks on a preset and keep pass/fail and time")
+    be.add_argument("action", choices=["list", "run", "results", "status", "stop"])
+    be.add_argument("names", nargs="*", metavar="SUITE|TASK")
+    be.add_argument("--preset", help="run: the preset, or several (A,B: A first, then B; default: the active one); "
+                                     "results: only this preset")
+    be.add_argument("--reps", type=int, default=1, help="run: runs of each task")
+    be.add_argument("--seed", type=int, default=1, help="run: sampling seed of the first rep (rep r: seed + r)")
+    be.add_argument("--background", action="store_true", help="run: in its own process; mini bench status follows it")
+    be.add_argument("--runs", action="store_true", help="results: every run, not only the averages")
+    be.add_argument("--all-versions", action="store_true", help="results: also older mini versions, each on its own")
     sub.add_parser("setup")
     sub.add_parser("doctor")
     le = sub.add_parser("lessons")
@@ -135,6 +153,9 @@ def main(argv=None):
         return 0
     if a.cmd == "undo":
         return undo_cmd(cfg, a.items, a.list)
+    if a.cmd == "bench":
+        from .bench.cli import bench_cmd
+        return bench_cmd(cfg, a)
     if a.cmd == "preset":
         from .setup import preset_cmd
         return preset_cmd(cfg, a.action, a.name, {k: getattr(a, k) for k in ("gpu", "device", "model", "ctx", "args", "gpus", "use")})

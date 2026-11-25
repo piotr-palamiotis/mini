@@ -14,6 +14,7 @@ Commands are argv lists. argv[0] must be on the allowlist; no shell is ever invo
 import hashlib
 import json
 import os
+import shlex
 import re
 import subprocess
 import threading
@@ -113,11 +114,25 @@ def validate_packages(pkgs):
     return {"apt": apt, "pip": pip}
 
 
+def package_cache(cfg):
+    """The folder where image builds keep downloaded packages (pip wheels, apt .debs and lists), so building an image
+    again, or one with packages fetched before, does not download them: [sandbox] package_cache, by default
+    <state>/package-cache. Empty string: no cache."""
+    p = cfg["sandbox"].get("package_cache")
+    if p is None:
+        try:
+            return os.path.join(cfg.abspath("state"), "package-cache")
+        except (AttributeError, KeyError):
+            return ""
+    return os.path.expanduser(p) if p else ""
+
+
 class Sandbox:
     def __init__(self, cfg, log=None):
         self.cfg = cfg["sandbox"]
         self.engine = self.cfg["engine"]
         self.log = log
+        self.cache = package_cache(cfg)
 
     def _emit(self, kind, **kw):
         if self.log:
@@ -161,15 +176,32 @@ class Sandbox:
         if self.image_exists(image):
             return image
         lines = [f"FROM {self.cfg['image']}", "USER root"]
-        if pk["apt"]:
-            lines.append("RUN apt-get update && apt-get install -y --no-install-recommends " + " ".join(pk["apt"]) +
-                         " && rm -rf /var/lib/apt/lists/*")
-        if pk["pip"]:
-            lines.append("RUN pip install --no-cache-dir " + " ".join(pk["pip"]))
+        vols = []
+        apt = " ".join(shlex.quote(x) for x in pk["apt"])
+        pip = " ".join(shlex.quote(x) for x in pk["pip"])
+        if self.cache and self.engine == "podman":   # downloads kept on the host: a rebuild needs no network
+            for d in ("wheels", "apt/archives", "apt/lists"):
+                os.makedirs(os.path.join(self.cache, d), exist_ok=True)
+            vols = ["-v", f"{self.cache}/wheels:/wheels", "-v", f"{self.cache}/apt/archives:/var/cache/apt/archives",
+                    "-v", f"{self.cache}/apt/lists:/var/lib/apt/lists"]
+            if pk["apt"]:
+                lines.append("RUN rm -f /etc/apt/apt.conf.d/docker-clean && "
+                             f"(apt-get install -y --no-install-recommends --no-download {apt} || "
+                             f"(apt-get update && apt-get install -y --no-install-recommends {apt}))")
+            if pk["pip"]:
+                lines.append(f"RUN pip install --no-cache-dir --no-index --find-links /wheels {pip} || "
+                             f"(pip wheel --no-cache-dir -w /wheels {pip} && pip install --no-cache-dir --no-index "
+                             f"--find-links /wheels {pip})")
+        else:
+            if pk["apt"]:
+                lines.append(f"RUN apt-get update && apt-get install -y --no-install-recommends {apt} && "
+                             "rm -rf /var/lib/apt/lists/*")
+            if pk["pip"]:
+                lines.append(f"RUN pip install --no-cache-dir {pip}")
         lines.append("USER tool")
         cf = "\n".join(lines) + "\n"
-        code, out = self._build(["build", "-t", image, "-f", "-", SANDBOX_DIR], 1200, f"build {image}", input=cf,
-                                packages=pk, text=cf)
+        code, out = self._build(["build"] + vols + ["-t", image, "-f", "-", SANDBOX_DIR], 1200, f"build {image}",
+                                input=cf, packages=pk, text=cf)
         if code:
             raise PolicyError(f"package install failed (exit {code}):\n" + out[-2500:])
         return image

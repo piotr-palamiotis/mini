@@ -89,6 +89,7 @@ DEFAULTS = {
         "service_network": "mini-net",       # network of local services the user runs (e.g. a mail server) and the egress forwarder
         "fault_injection": {},               # tests only: {"host:port": "reset"} makes egress reset those connections
         "allowed_argv0": ["python", "python3", "pytest", "ls", "cat", "head", "tail", "wc", "file", "pip"],
+        # package_cache: where image builds keep pip wheels and apt packages (default <state>/package-cache; "" off)
     },
     "approvals": {
         "confirm_first": True,
