@@ -48,11 +48,15 @@ def trace():
                 read_path = os.path.normpath(str(a.get('path', ''))) if last == 'read_file' else None
                 if last in TYPED:
                     a = e.get('args')
+                    if last == 'finish' and isinstance(a, dict):   # finish's checks quote the file, and mini refuses
+                        a = {x: y for x, y in a.items() if x != 'checks'}   # a sample that is not in it
                     items.append((k, 'typed', last, (a if isinstance(a, str) else json.dumps(a)) + '\n' + reply))
             elif kind == 'tool_result' and e.get('name') in PROGRAM:
                 items.append((k, 'program', e.get('name'), e.get('text') or ''))
             elif kind == 'tool_result' and e.get('name') == 'read_file' and writer.get(read_path) in PROGRAM:
                 items.append((k, 'program', 'read_file', e.get('text') or ''))    # a file a program wrote
+            elif kind == 'watchdog' and e.get('name') == 'finish_review':   # mini showing the files the run wrote:
+                items.append((k, 'program', 'finish_review', e.get('text') or ''))  # typed ones were caught when typed
             elif kind == 'files_changed':
                 for p in e.get('paths') or []: writer[os.path.normpath(p)] = last
     return items, writer

@@ -88,6 +88,23 @@ class ProvenanceTest(unittest.TestCase):
               {"kind": "tool_call", "step": "execute", "name": "finish", "args": {"answer": "A-001 net 2565.74"}}]
         self.assertEqual(self.check(ev), "PASS")
 
+    def test_a_finish_check_quoting_a_program_written_file_is_not_typed_by_the_model(self):
+        ev = [{"kind": "tool_call", "step": "execute", "name": "run_code", "args": {"script": "..."}},
+              {"kind": "files_changed", "paths": ["stats.json"]},
+              {"kind": "tool_result", "step": "execute", "name": "run_code", "text": "Files written: stats.json"},
+              {"kind": "tool_call", "step": "execute", "name": "finish",
+               "args": {"answer": "done", "checks": [{"file": "stats.json", "sample": '"mean": 2565.74'}]}}]
+        self.assertEqual(self.check(ev), "PASS")
+
+    def test_a_number_seen_in_the_finish_review_of_a_written_file_counts_as_program_output(self):
+        ev = [{"kind": "tool_call", "step": "execute", "name": "run_code", "args": {"script": "..."}},
+              {"kind": "files_changed", "paths": ["stats.json"]},
+              {"kind": "tool_result", "step": "execute", "name": "run_code", "text": "Files written: stats.json"},
+              {"kind": "tool_call", "step": "execute", "name": "finish", "args": {"answer": "done"}},
+              {"kind": "watchdog", "step": "execute", "name": "finish_review", "text": 'stats.json: "mean": 2565.74'},
+              {"kind": "tool_call", "step": "execute", "name": "finish", "args": {"answer": "mean 2565.74"}}]
+        self.assertEqual(self.check(ev), "PASS")
+
     def test_a_number_no_program_printed_fails(self):
         ev = [{"kind": "tool_call", "step": "execute", "name": "read_file", "args": {"path": "invoices/a.json"}},
               {"kind": "tool_result", "step": "execute", "name": "read_file", "text": '{"qty": 3, "price": 855.25}'},
