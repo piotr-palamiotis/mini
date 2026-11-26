@@ -114,6 +114,7 @@ class GateAsker:
 
     def __init__(self, gate, log, work_dir, tool, folder=None):
         self.gate, self.log, self.work, self.tool, self.folder = gate, log, work_dir, tool, folder
+        self.defaulted = []          # [(key, question, default)]: asked when nobody could answer, so the default
 
     def __call__(self, msg):
         if msg.get("op") == "say":
@@ -133,6 +134,7 @@ class GateAsker:
                               choices=choices if kind == "choice" else None, multi=multi)
         if not d.approved or d.choice == "cancel":
             if d.decided_by.startswith("auto") and msg.get("default") is not None:
+                self.defaulted.append((msg["key"], msg.get("prompt") or msg["key"], msg["default"]))
                 return {"answer": msg["default"]}       # nobody to ask: the tool's default, as its own test assumed
             return {"error": f"no answer for {msg['key']}: pass it in the tool inputs" if d.decided_by.startswith("auto")
                     else "the user cancelled"}

@@ -60,9 +60,9 @@ MANIFEST = {
 SECRET = "tok-7f3a9c"
 
 
-def install(cfg):
+def install(cfg, tool=TOOL):
     d = tempfile.mkdtemp(prefix="mini-fixture-")
-    open(os.path.join(d, "tool.py"), "w").write(TOOL)
+    open(os.path.join(d, "tool.py"), "w").write(tool)
     Registry(cfg.abspath("state"), run_id="fixture", auto_accept=True).install(MANIFEST, d)
 
 
@@ -185,6 +185,7 @@ class AnswerStagingTest(unittest.TestCase):
         ask = GateAsker(gate, None, tempfile.mkdtemp(), "t")
         self.assertEqual(ask({"op": "ask", "key": "border", "prompt": "Border", "kind": "number", "default": 5}),
                          {"answer": 5})
+        self.assertEqual(ask.defaulted, [("border", "Border", 5)])
         self.assertIn("pass it in the tool inputs", ask({"op": "ask", "key": "p", "prompt": "Path", "kind": "text"})["error"])
 
     def test_a_file_of_the_folder_keeps_its_relative_path(self):
@@ -241,6 +242,24 @@ class InTaskTest(unittest.TestCase):
         res = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
         text = next(e["text"] for e in res if e["kind"] == "tool_result" and e["name"] == "invoke_tool")
         self.assertIn("pass it in the tool inputs", text)
+
+
+    def test_a_question_that_took_its_default_unattended_is_named_with_the_input_that_answers_it(self):
+        """A confirm with default no, asked in an unattended run, said "cancelled"; gemma-4 31B read that as a user
+        refusing and repaired a working mail tool instead of passing confirm_send: true (feed_digest bench)."""
+        cfg = temp_config(**{"approvals.confirm_first": False})
+        install(cfg, TOOL.replace('io.ask("go", "Write " + title + "?", "confirm")',
+                                  'io.ask("go", "Write " + title + "?", "confirm", default=False)'))
+        SettingsStore(cfg.abspath("state")).save("writer_profile", {"footer": "f", "token": "t"}, MANIFEST["settings"][0])
+        script = self.script()
+        script[2] = step(call("invoke_tool", name="note_writer", inputs={"title": "t", "body": "b", "add_footer": False}))
+        agent = Agent(cfg, backend=fake_backend(script), label="auto")
+        agent.run_task("write a note")
+        res = [json.loads(l) for l in open(os.path.join(agent.run_dir, "log.jsonl"))]
+        text = next(e["text"] for e in res if e["kind"] == "tool_result" and e["name"] == "invoke_tool")
+        self.assertIn("nobody saw the question", text)
+        self.assertIn("go: true in inputs", text)
+        self.assertTrue(any(e.get("name") == "question_defaulted" for e in res))
 
 
 class SettingDeclarationTest(unittest.TestCase):

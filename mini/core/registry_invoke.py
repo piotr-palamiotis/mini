@@ -142,6 +142,12 @@ def _invoke_in(a, m, name, inputs, box):
         text += "\nFiles written to the folder: " + ", ".join(written)
     if made:
         text += "\nFolders made in the folder: " + ", ".join(d + "/" for d in made)
+    for key, question, default in asker.defaulted:   # nobody saw the question: the result says so, not "the user"
+        shown = "no" if default is False else "yes" if default is True else json.dumps(default)
+        text += (f"\nThe tool asked {question!r} ({key}). This run is unattended, so nobody saw the question and it "
+                 f"took its default ({shown}); no person answered it. If the task asks for this, invoke the tool again "
+                 f"with {key}: {'true' if default is False else '...'} in inputs.")
+        a.log.emit("watchdog", name="question_defaulted", tool=name, key=key, default=default)
     if refused:
         text += "\nNot written: " + "; ".join(f"{rel} ({why})" for rel, why in refused)
         a.log.emit("watchdog", name="export_refused", tool=name, refused=refused)
